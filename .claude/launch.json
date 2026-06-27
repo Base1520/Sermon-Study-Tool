@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sermon-tool",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "vite"],
+      "port": 5173
+    }
+  ]
+}

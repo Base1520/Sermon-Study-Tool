@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@theme {
+  --font-family-sans: 'Inter', system-ui, sans-serif;
+  --font-family-serif: 'Crimson Pro', Georgia, serif;
+  --font-family-mono: 'JetBrains Mono', monospace;
+  --color-ink-950: #03030f;
+  --color-ink-900: #06060f;
+  --color-ink-800: #0a0a1e;
+}
+
+:root { color-scheme: dark; }
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #03030f;
+  color: #e8e6f0;
+  font-family: 'Inter', system-ui, sans-serif;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.selectable { user-select: text; -webkit-user-select: text; }
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+
+.drag-region { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* Phrase edge animation */
+@keyframes phrase-flow {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -32; }
+}
+
+/* React Flow overrides — strip all default chrome */
+.react-flow__node {
+  padding: 0 !important;
+  border-radius: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  width: auto !important;
+}
+
+.react-flow__node.selected .react-flow__node-default {
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.react-flow__handle {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  border: none !important;
+  background: transparent !important;
+}
+
+.react-flow__pane { cursor: grab !important; }
+.react-flow__pane:active { cursor: grabbing !important; }
+
+.react-flow__attribution { display: none !important; }
+
+/* Smooth scrollbar for sidebar */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

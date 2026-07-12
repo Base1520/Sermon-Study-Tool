@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { AuroraShader, webglAvailable } from './AuroraShader'
 
 interface Star {
   x: number; y: number; r: number
@@ -10,7 +11,14 @@ interface Nebula {
   color: string; opacity: number
 }
 
+// GPU shader background when WebGL is available; the Canvas-2D field below
+// stays as the fallback for machines without it.
 export function Starfield() {
+  if (webglAvailable()) return <AuroraShader />
+  return <LegacyStarfield />
+}
+
+function LegacyStarfield() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {

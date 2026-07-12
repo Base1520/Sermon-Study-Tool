@@ -74,3 +74,24 @@ body {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* Rotating halo behind the thinking octagon */
+@keyframes halo-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.halo-spin { animation: halo-spin 16s linear infinite; }
+
+/* Gold shimmer sweep across the BASE 1520 wordmark */
+@keyframes gold-shimmer {
+  0%, 100% { background-position: 130% 0; }
+  50%      { background-position: -30% 0; }
+}
+.gold-shimmer {
+  background: linear-gradient(110deg, #D8B33F 38%, #F7ECC0 50%, #D8B33F 62%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: gold-shimmer 7s ease-in-out infinite;
+}

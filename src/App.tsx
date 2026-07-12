@@ -102,6 +102,8 @@ export default function App() {
       const result = await (window as any).electronAPI.analyzePassage({ text, reference, apiKey })
       setAnalysis(result)
       setCurrentHistoryId(null)
+      // Nebula warp surge as the desk materializes
+      window.dispatchEvent(new Event('base-warp'))
     } catch (e: any) {
       setError(e.message ?? 'Analysis failed.')
     } finally { setLoading(false) }
@@ -407,8 +409,12 @@ export default function App() {
           <AnimatePresence mode="wait">
             {/* Desk — phrase tree + outline + cultural notes + draft on one infinite canvas */}
             {!loading && !error && analysis && tab === 'desk' && (
-              <motion.div key="desk" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                transition={{ duration: 0.2 }} style={{ position: 'absolute', inset: 0 }}>
+              <motion.div key="desk"
+                initial={{ opacity: 0, scale: 0.965, filter: 'blur(10px)' }}
+                animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+                style={{ position: 'absolute', inset: 0 }}>
                 <Desk
                   analysis={analysis}
                   annotations={annotations}

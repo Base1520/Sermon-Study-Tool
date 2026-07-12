@@ -16,6 +16,7 @@ precision highp float;
 uniform vec2  u_res;
 uniform float u_time;
 uniform vec2  u_mouse;   // -1..1, +y up
+uniform float u_warp;    // 0..1 analysis-complete surge
 
 #define BG    vec3(0.063, 0.071, 0.059)
 #define OLIVE vec3(0.157, 0.208, 0.122)
@@ -96,6 +97,7 @@ void main() {
   vec2 frag = gl_FragCoord.xy;
   vec2 uv = frag / u_res;
   vec2 p  = (frag - 0.5 * u_res) / u_res.y;
+  p *= 1.0 - 0.10 * u_warp;   // zoom surge during warp
   float t = u_time;
   vec2 m = u_mouse;
 
@@ -120,6 +122,17 @@ void main() {
   // Meteor streak every ~11s
   float mt = meteor(uv, t);
   col += mix(BONE, GOLD, 0.4) * mt * 0.9;
+
+  // Warp surge — radial gold rays racing outward while u_warp is up
+  if (u_warp > 0.001) {
+    float rad = length(p);
+    vec2 dirv = p / max(rad, 0.001);
+    float rays = pow(noise(dirv * 6.0 + 3.7), 3.0);
+    rays *= 0.6 + 0.4 * sin(rad * 20.0 - t * 14.0);
+    rays *= smoothstep(0.12, 0.7, rad);
+    col += mix(BONE, GOLD, 0.55) * rays * u_warp * 0.5;
+    col *= 1.0 + u_warp * 0.14;
+  }
 
   // Tactical grid
   vec2 gp = mod(frag, 48.0);
@@ -208,6 +221,7 @@ export function AuroraShader() {
     const uRes   = gl.getUniformLocation(program, 'u_res')
     const uTime  = gl.getUniformLocation(program, 'u_time')
     const uMouse = gl.getUniformLocation(program, 'u_mouse')
+    const uWarp  = gl.getUniformLocation(program, 'u_warp')
 
     // Cap the render resolution — fbm at full retina is wasted heat
     const DPR = Math.min(window.devicePixelRatio || 1, 1.25)
@@ -233,16 +247,36 @@ export function AuroraShader() {
     }
     window.addEventListener('mousemove', onMove)
 
+    // Warp surge — fired via `window.dispatchEvent(new Event('base-warp'))`
+    // when an analysis completes. Sim-time accelerates during the surge so
+    // the whole scene (nebula flow, twinkle, sweep) rushes for a beat.
+    const WARP_MS = 1600
+    let warpStart = -1
+    function onWarp() { warpStart = performance.now() }
+    window.addEventListener('base-warp', onWarp)
+
     let animId = 0
     let running = true
-    const t0 = performance.now()
+    let last = performance.now()
+    let simT = 0
     function frame() {
       if (!running) return
+      const now = performance.now()
+      const dt = Math.min((now - last) / 1000, 0.1)
+      last = now
+      let warp = 0
+      if (warpStart >= 0) {
+        const e = (now - warpStart) / WARP_MS
+        if (e >= 1) warpStart = -1
+        else warp = Math.sin(Math.PI * e)
+      }
+      simT += dt * (1 + warp * 5)
       mouse.x += (target.x - mouse.x) * 0.045
       mouse.y += (target.y - mouse.y) * 0.045
       gl!.uniform2f(uRes, canvas.width, canvas.height)
-      gl!.uniform1f(uTime, (performance.now() - t0) / 1000)
+      gl!.uniform1f(uTime, simT)
       gl!.uniform2f(uMouse, mouse.x, mouse.y)
+      gl!.uniform1f(uWarp, warp)
       gl!.drawArrays(gl!.TRIANGLES, 0, 3)
       animId = requestAnimationFrame(frame)
     }
@@ -254,6 +288,7 @@ export function AuroraShader() {
         cancelAnimationFrame(animId)
       } else if (!running) {
         running = true
+        last = performance.now()
         frame()
       }
     }
@@ -264,6 +299,7 @@ export function AuroraShader() {
       cancelAnimationFrame(animId)
       ro.disconnect()
       window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('base-warp', onWarp)
       document.removeEventListener('visibilitychange', onVisibility)
       gl.deleteProgram(program)
       gl.deleteBuffer(buf)

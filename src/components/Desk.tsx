@@ -60,6 +60,47 @@ interface Props {
   onPhraseModeChange?: (mode: 'key' | 'all') => void
 }
 
+// ── Tilt card wrapper ──────────────────────────────────────────────────────────
+// Perspective tilt + a gold sheen that follows the cursor across the card face.
+// Transform is written straight to the DOM so hover never triggers a re-render;
+// tilt is skipped while a mouse button is down so card dragging stays stable.
+function TiltCard({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const sheenRef = useRef<HTMLDivElement>(null)
+
+  function onMove(e: React.MouseEvent) {
+    const el = ref.current
+    if (!el || e.buttons) return
+    const r = el.getBoundingClientRect()
+    const px = (e.clientX - r.left) / r.width
+    const py = (e.clientY - r.top) / r.height
+    el.style.transform = `perspective(1100px) rotateX(${(0.5 - py) * 2.6}deg) rotateY(${(px - 0.5) * 2.6}deg)`
+    const sheen = sheenRef.current
+    if (sheen) {
+      sheen.style.opacity = '1'
+      sheen.style.background = `radial-gradient(300px circle at ${px * 100}% ${py * 100}%, rgba(216,179,63,0.06), transparent 65%)`
+    }
+  }
+
+  function onLeave() {
+    const el = ref.current
+    if (!el) return
+    el.style.transform = 'perspective(1100px) rotateX(0deg) rotateY(0deg)'
+    if (sheenRef.current) sheenRef.current.style.opacity = '0'
+  }
+
+  return (
+    <div ref={ref} onMouseMove={onMove} onMouseLeave={onLeave}
+      style={{ position: 'relative', transition: 'transform 0.25s ease-out', willChange: 'transform' }}>
+      {children}
+      <div ref={sheenRef} style={{
+        position: 'absolute', inset: 0, borderRadius: 16,
+        pointerEvents: 'none', opacity: 0, transition: 'opacity 0.3s',
+      }} />
+    </div>
+  )
+}
+
 // ── Annotation modal ───────────────────────────────────────────────────────────
 function AnnotationModal({ phraseId, initial, onSave, onClose }: {
   phraseId: string; initial: string; onSave: (id: string, text: string) => void; onClose: () => void
@@ -204,6 +245,7 @@ function OutlineCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={280} minHeight={120} handleStyle={hs} lineStyle={ls} />
+      <TiltCard>
       <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, display: 'flex', alignItems: 'center', gap: 10, cursor: 'grab', background: `${BASE.khaki}08`, flexShrink: 0 }}>
         <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em' }}>SERMON OUTLINE</span>
@@ -227,6 +269,7 @@ function OutlineCardNode({ data }: NodeProps) {
         ))}
       </div>
       </div>
+      </TiltCard>
     </>
   )
 }
@@ -240,6 +283,7 @@ function ThemeCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={240} minHeight={120} handleStyle={hs} lineStyle={ls} />
+      <TiltCard>
       <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, cursor: 'grab', background: `${BASE.khaki}08`, flexShrink: 0 }}>
         <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em' }}>CANONICAL CONTEXT</span>
@@ -275,6 +319,7 @@ function ThemeCardNode({ data }: NodeProps) {
         {canonicalConnections && <div><div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3 }}>CANONICAL CONNECTIONS</div><p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, margin: 0 }}>{canonicalConnections}</p></div>}
       </div>
       </div>
+      </TiltCard>
     </>
   )
 }
@@ -328,6 +373,7 @@ function DraftCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={380} minHeight={200} handleStyle={hs} lineStyle={ls} />
+      <TiltCard>
       <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '10px 16px', borderBottom: `1px solid ${BASE.khaki}20`, cursor: 'grab', display: 'flex', alignItems: 'center', gap: 10, background: `${BASE.khaki}08`, flexShrink: 0 }}>
         <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em' }}>SERMON MANUSCRIPT</span>
@@ -363,6 +409,7 @@ function DraftCardNode({ data }: NodeProps) {
         </div>
       )}
       </div>
+      </TiltCard>
     </>
   )
 }
@@ -381,6 +428,7 @@ function CulturalNotesCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={280} minHeight={200} handleStyle={hs} lineStyle={ls} />
+      <TiltCard>
       <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, cursor: 'grab', background: `${BASE.khaki}08`, flexShrink: 0, display: 'flex', alignItems: 'center' }}>
         <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em' }}>CULTURAL CONTEXT</span>
@@ -402,6 +450,7 @@ function CulturalNotesCardNode({ data }: NodeProps) {
         })}
       </div>
       </div>
+      </TiltCard>
     </>
   )
 }

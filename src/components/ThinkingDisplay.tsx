@@ -79,10 +79,28 @@ export function ThinkingDisplay() {
     <div style={{
       position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
       alignItems: 'center', justifyContent: 'center', zIndex: 10, gap: 44,
+      background: 'radial-gradient(ellipse at 50% 44%, rgba(16,18,15,0.25), rgba(16,18,15,0.7))',
     }}>
 
       {/* Octagon build animation */}
-      <svg width={260} height={260} style={{ overflow: 'visible' }}>
+      <div style={{
+        position: 'relative', width: 260, height: 260,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        {/* Rotating gold halo behind the octagon */}
+        <div className="halo-spin" style={{
+          position: 'absolute', inset: -70, borderRadius: '50%',
+          background: `conic-gradient(from 0deg,
+            transparent 0deg, rgba(216,179,63,0.12) 40deg, transparent 95deg,
+            transparent 175deg, rgba(103,112,79,0.10) 225deg, transparent 290deg)`,
+          filter: 'blur(30px)', pointerEvents: 'none',
+        }} />
+        <div style={{
+          position: 'absolute', inset: -30, borderRadius: '50%',
+          background: 'radial-gradient(circle, rgba(216,179,63,0.05), transparent 65%)',
+          pointerEvents: 'none',
+        }} />
+      <svg width={260} height={260} style={{ overflow: 'visible', position: 'relative' }}>
         {/* Dim base octagon outline */}
         <polygon
           points={VERTS.map(v => `${v.x},${v.y}`).join(' ')}
@@ -205,6 +223,7 @@ export function ThinkingDisplay() {
           )
         })}
       </svg>
+      </div>
 
       {/* Stage text */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>

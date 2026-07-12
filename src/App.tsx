@@ -226,7 +226,7 @@ export default function App() {
           {/* BASE B icon mark */}
           <img src="/b-icon.png" alt="BASE" style={{ width: 32, height: 32, borderRadius: 6, objectFit: 'contain' }} />
           <div>
-            <div style={{
+            <div className="gold-shimmer" style={{
               fontFamily: 'JetBrains Mono', fontSize: 11, color: BASE.gold,
               letterSpacing: '0.22em', fontWeight: 700, lineHeight: 1,
             }}>BASE 1520</div>

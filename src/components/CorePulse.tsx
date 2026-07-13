@@ -121,8 +121,6 @@ const CORNERS = [
 // ── Main export ────────────────────────────────────────────────────────────────
 export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenAgent, currentTab: propTab }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
-  const bgLayerRef = useRef<HTMLDivElement>(null)
-  const fgLayerRef = useRef<HTMLDivElement>(null)
   const [dims, setDims]                     = useState({ w: 0, h: 0 })
   const [hoveredId, setHoveredId]           = useState<string | null>(null)
   const [hoveredCorner, setHoveredCorner]   = useState<string | null>(null)
@@ -163,18 +161,6 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
   const selected = analysis?.phrases.find(p => p.id === selectedId)
   const hovered  = orbits.find(o => o.phrase.id === hoveredId)
 
-  // Depth parallax — background drifts less than the interactive layer.
-  // Written straight to the DOM so mousemove never triggers a React render.
-  function handleParallax(e: React.MouseEvent) {
-    const el = wrapRef.current
-    if (!el) return
-    const r = el.getBoundingClientRect()
-    const x = ((e.clientX - r.left) / r.width - 0.5) * 2
-    const y = ((e.clientY - r.top) / r.height - 0.5) * 2
-    if (bgLayerRef.current) bgLayerRef.current.style.transform = `translate(${x * -5}px, ${y * -5}px)`
-    if (fgLayerRef.current) fgLayerRef.current.style.transform = `translate(${x * -9}px, ${y * -9}px)`
-  }
-
   function handleNav(tabId: string) {
     if (expanding) return
     setExpanding(tabId)
@@ -186,37 +172,30 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
   }
 
   return (
-    <div ref={wrapRef} onMouseMove={handleParallax} style={{ position: 'absolute', inset: 0, overflow: 'hidden' }}>
+    <div ref={wrapRef} style={{ position: 'absolute', inset: 0, overflow: 'hidden' }}>
 
-      {/* ── Background depth layer — rings + watermark, drifts with cursor ── */}
-      <div ref={bgLayerRef} style={{
-        position: 'absolute', inset: 0, pointerEvents: 'none',
-        transition: 'transform 0.5s cubic-bezier(0.22,1,0.36,1)', willChange: 'transform',
-      }}>
-        <RingCanvas />
+      {/* Background ring canvas — reduced opacity so it doesn't compete */}
+      <RingCanvas />
 
-        {/* B core — translucent logo watermark, breathing */}
-        {w > 0 && (
-          <div style={{
-            position: 'absolute', left: '50%', top: '42%',
+      {/* ── B core — translucent logo watermark, no bloom ── */}
+      {w > 0 && (
+        <img
+          src="/b-icon.png"
+          alt=""
+          style={{
+            position: 'absolute',
+            left: '50%', top: '42%',
             transform: 'translate(-50%, -50%)',
-            zIndex: 1, pointerEvents: 'none', userSelect: 'none',
-          }}>
-            <motion.img
-              src="/b-icon.png"
-              alt=""
-              animate={{ scale: [1, 1.045, 1], opacity: [0.07, 0.1, 0.07] }}
-              transition={{ duration: 7, repeat: Infinity, ease: 'easeInOut' }}
-              style={{
-                display: 'block',
-                width:  Math.min(w, h) * 0.26,
-                height: Math.min(w, h) * 0.26,
-                mixBlendMode: 'screen' as const,
-              }}
-            />
-          </div>
-        )}
-      </div>
+            width:  Math.min(w, h) * 0.26,
+            height: Math.min(w, h) * 0.26,
+            opacity: 0.07,
+            mixBlendMode: 'screen' as const,
+            pointerEvents: 'none',
+            userSelect: 'none',
+            zIndex: 1,
+          }}
+        />
+      )}
 
       {/* ── Corner bracket decoration ── */}
       {w > 0 && (
@@ -234,12 +213,6 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
           ))}
         </svg>
       )}
-
-      {/* ── Foreground depth layer — constellation + hub, drifts more ── */}
-      <div ref={fgLayerRef} style={{
-        position: 'absolute', inset: 0,
-        transition: 'transform 0.5s cubic-bezier(0.22,1,0.36,1)', willChange: 'transform',
-      }}>
 
       {/* ── Phrase constellation SVG — top-left quadrant ── */}
       {w > 0 && (
@@ -286,7 +259,7 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
           )}
 
           {/* Phrase nodes */}
-          {orbits.map(({ phrase, x, y }, oi) => {
+          {orbits.map(({ phrase, x, y }) => {
             const color      = CLAUSE_COLORS[phrase.type as ClauseType] ?? BASE.steel
             const isMain     = phrase.type === 'main'
             const isSelected = selectedId === phrase.id
@@ -298,11 +271,8 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
             const label = truncate(phrase.text, 22)
 
             return (
-              <motion.g key={phrase.id}
-                initial={{ opacity: 0, scale: 0.4 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: 0.1 + oi * 0.05, duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-                style={{ cursor: 'pointer', transformBox: 'fill-box', transformOrigin: 'center' }}
+              <g key={phrase.id}
+                style={{ cursor: 'pointer' }}
                 onClick={e => { e.stopPropagation(); onSelect?.(isSelected ? null : phrase.id) }}
                 onMouseEnter={() => setHoveredId(phrase.id)}
                 onMouseLeave={() => setHoveredId(null)}
@@ -356,7 +326,7 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
                     </text>
                   )
                 })()}
-              </motion.g>
+              </g>
             )
           })}
 
@@ -368,7 +338,7 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
         <svg
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'hidden', zIndex: 8 }}
         >
-          {CORNERS.map((c, ci) => {
+          {CORNERS.map(c => {
             const angle =
               c.id === 'phrase'  ? -Math.PI / 2        :  // top
               c.id === 'outline' ?  0                   :  // right
@@ -387,11 +357,8 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
             const lx2 = hx  - ux * 26, ly2 = hy  - uy * 26
 
             return (
-              <motion.g key={c.id}
-                initial={{ opacity: 0, scale: 0.55 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: 0.25 + ci * 0.14, duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
-                style={{ cursor: 'pointer', transformBox: 'fill-box', transformOrigin: 'center' }}
+              <g key={c.id}
+                style={{ cursor: 'pointer' }}
                 onClick={() => handleNav(c.id)}
                 onMouseEnter={() => setHoveredCorner(c.id)}
                 onMouseLeave={() => setHoveredCorner(null)}
@@ -456,13 +423,11 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
                     r={2} fill={BASE.gold} fillOpacity={0.7}
                   />
                 )}
-              </motion.g>
+              </g>
             )
           })}
         </svg>
       )}
-
-      </div>{/* end foreground depth layer */}
 
 
       {/* Status bar (analysis loaded) */}

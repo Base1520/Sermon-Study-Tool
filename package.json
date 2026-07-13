@@ -1,6 +1,6 @@
 {
   "name": "sermon-tool",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "description": "Text-driven sermon preparation with phrasing diagrams",
   "main": "electron/main.js",
   "scripts": {
@@ -43,7 +43,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "Base1520",
+      "owner": "colepermenter",
       "repo": "Sermon-Study-Tool"
     },
     "dmg": {

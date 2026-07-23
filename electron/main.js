@@ -581,7 +581,10 @@ Return ONLY valid JSON with no markdown:
 }`
 
   const homileticalResponse = await client.messages.create({
-    model: 'claude-opus-4-8',
+    // Sonnet, not Opus: this agent synthesizes the two memos above into a
+    // draft — it writes from already-verified exegesis/theology rather than
+    // generating new factual claims, so the accuracy-critical work is upstream.
+    model: 'claude-sonnet-4-6',
     max_tokens: 4096,
     system: systemPrompt,
     messages: [{
@@ -643,7 +646,9 @@ ipcMain.handle('series-synthesize', async (_, { series, apiKey }) => {
   ).join('\n\n')
 
   const response = await client.messages.create({
-    model: 'claude-opus-4-8',
+    // Sonnet: this reworks already-analyzed passages into a series synthesis,
+    // so it's grounded in verified content rather than generating new facts.
+    model: 'claude-sonnet-4-6',
     max_tokens: 2000,
     messages: [{
       role: 'user',
@@ -837,14 +842,23 @@ ${preacherContext}`
     ? `Current passage under study: ${passageContext.reference}\n\nMain theme: ${passageContext.mainTheme}\n\nClauses analyzed:\n${(passageContext.phrases ?? []).map(p => `- [${p.type}] "${p.text}" — ${p.theologicalNote}`).join('\n')}\n\nCultural notes identified:\n${(passageContext.culturalNotes ?? []).map(n => `- ${n.term} (${n.category}): ${n.explanation}`).join('\n')}\n\nBiblical themes: ${(passageContext.canonicalContext?.biblicalThemes ?? []).join(', ')}`
     : null
 
+  // Cache the passage-context prefix (breakpoint on the assistant ack) so every
+  // follow-up turn in the same conversation reuses it at ~10% of input cost.
   const apiMessages = contextMessage
-    ? [{ role: 'user', content: contextMessage }, { role: 'assistant', content: 'I have the passage context. What would you like to explore?' }, ...messages]
+    ? [
+        { role: 'user', content: contextMessage },
+        { role: 'assistant', content: [{ type: 'text', text: 'I have the passage context. What would you like to explore?', cache_control: { type: 'ephemeral' } }] },
+        ...messages,
+      ]
     : messages
 
   const response = await client.messages.create({
-    model: 'claude-opus-4-8',
+    // Sonnet: conversational Q&A where the preacher is in the loop and can
+    // push back — the accuracy-critical fact generation happens in analysis.
+    model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: systemPrompt,
+    // Cache the large static persona/system prompt — same content every turn.
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: apiMessages,
   })
 
@@ -943,18 +957,23 @@ Filter every response through this preacher's hermeneutics. If they hold covenan
     ? `Current passage: ${passageContext.reference}\nMain theme: ${passageContext.mainTheme}\n\nPhrase analysis:\n${(passageContext.phrases ?? []).map(p => `- [${p.type}] "${p.text}" — ${p.theologicalNote ?? ''}`).join('\n')}\n\nCultural notes:\n${(passageContext.culturalNotes ?? []).map(n => `- ${n.term} (${n.category}): ${n.explanation}`).join('\n')}`
     : null
 
+  // Cache the passage-context prefix (breakpoint on the assistant ack) so every
+  // follow-up turn in the same conversation reuses it at ~10% of input cost.
   const apiMessages = contextMessage
     ? [
         { role: 'user', content: contextMessage },
-        { role: 'assistant', content: 'Got the passage. What do you want to dig into?' },
+        { role: 'assistant', content: [{ type: 'text', text: 'Got the passage. What do you want to dig into?', cache_control: { type: 'ephemeral' } }] },
         ...messages,
       ]
     : messages
 
   const response = await client.messages.create({
-    model: 'claude-opus-4-8',
+    // Sonnet: specialist chat where the preacher is in the loop; the
+    // accuracy-critical fact generation happens upstream in analysis.
+    model: 'claude-sonnet-4-6',
     max_tokens: 1200,
-    system: systemPrompt,
+    // Cache the large static agent-persona system prompt — same every turn.
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: apiMessages,
   })
 

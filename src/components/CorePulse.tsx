@@ -2,7 +2,7 @@ import { useEffect, useRef, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import type { PhrasingAnalysis, Phrase, ClauseType } from '../types/phrasing'
 import { CLAUSE_COLORS } from '../services/colors'
-import { BASE } from '../theme'
+import { BASE, FONT } from '../theme'
 
 interface Props {
   analysis?: PhrasingAnalysis | null
@@ -126,6 +126,30 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
   const [hoveredCorner, setHoveredCorner]   = useState<string | null>(null)
   const [activeTab, setActiveTab]           = useState(propTab ?? 'phrase')
   const [expanding, setExpanding]           = useState<string | null>(null)
+  const [nextMission, setNextMission] = useState<{ days: number; reference?: string; title?: string } | null>(null)
+
+  // Sunday ops clock — the app knows when you preach next
+  useEffect(() => {
+    ;(window as any).electronAPI?.calendarGet?.().then((cal: Record<string, any>) => {
+      const today = new Date(); today.setHours(0, 0, 0, 0)
+      let best: { days: number; reference?: string; title?: string } | null = null
+      // Planned entries first
+      for (const [dateIso, entry] of Object.entries(cal ?? {})) {
+        const d = new Date(dateIso + 'T12:00:00')
+        const days = Math.round((d.getTime() - today.getTime()) / 86400000)
+        if (days >= 0 && (!best || days < best.days)) best = { days, reference: (entry as any).reference, title: (entry as any).title }
+      }
+      // Fallback: next Sunday
+      if (!best) {
+        const days = (7 - today.getDay()) % 7 || 7
+        best = { days }
+      }
+      setNextMission(best)
+    }).catch(() => {
+      const today = new Date()
+      setNextMission({ days: (7 - today.getDay()) % 7 || 7 })
+    })
+  }, [])
 
   useEffect(() => { if (propTab) setActiveTab(propTab) }, [propTab])
 
@@ -197,6 +221,23 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
         />
       )}
 
+      {/* ── Sunday ops clock ── */}
+      {nextMission && (
+        <div style={{
+          position: 'absolute', top: 18, left: '50%', transform: 'translateX(-50%)',
+          textAlign: 'center', zIndex: 5, pointerEvents: 'none',
+        }}>
+          <div style={{ fontFamily: 'Saira', fontSize: 26, color: BASE.gold, letterSpacing: '0.12em', lineHeight: 1 }}>
+            {nextMission.days === 0 ? 'MISSION DAY' : `T-MINUS ${nextMission.days} DAY${nextMission.days === 1 ? '' : 'S'}`}
+          </div>
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.18em', marginTop: 4 }}>
+            {nextMission.reference
+              ? `NEXT MISSION · ${nextMission.reference.toUpperCase()}${nextMission.title ? ` — ${nextMission.title.toUpperCase().slice(0, 30)}` : ''}`
+              : 'NEXT MISSION · SUNDAY — NO PASSAGE PLANNED'}
+          </div>
+        </div>
+      )}
+
       {/* ── Corner bracket decoration ── */}
       {w > 0 && (
         <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 2 }}>
@@ -207,8 +248,10 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
             { x: w - 10, y: h - 10, dx: -1, dy: -1 },
           ] as const).map(({ x, y, dx, dy }, i) => (
             <g key={i}>
-              <line x1={x} y1={y} x2={x + dx * 14} y2={y} stroke={BASE.gold} strokeWidth={1} strokeOpacity={0.35} />
-              <line x1={x} y1={y} x2={x} y2={y + dy * 14} stroke={BASE.gold} strokeWidth={1} strokeOpacity={0.35} />
+              <line x1={x} y1={y} x2={x + dx * 26} y2={y} stroke={BASE.gold} strokeWidth={2} strokeOpacity={0.65} />
+              <line x1={x} y1={y} x2={x} y2={y + dy * 26} stroke={BASE.gold} strokeWidth={2} strokeOpacity={0.65} />
+              <line x1={x + dx * 3} y1={y + dy * 3} x2={x + dx * 12} y2={y + dy * 3} stroke={BASE.gold} strokeWidth={0.75} strokeOpacity={0.3} />
+              <line x1={x + dx * 3} y1={y + dy * 3} x2={x + dx * 3} y2={y + dy * 12} stroke={BASE.gold} strokeWidth={0.75} strokeOpacity={0.3} />
             </g>
           ))}
         </svg>
@@ -429,6 +472,30 @@ export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenA
         </svg>
       )}
 
+
+      {/* ── Identity lockup — bottom-left corner block ── */}
+      {w > 0 && (
+        <div style={{
+          position: 'absolute', left: 26, bottom: 22,
+          zIndex: 4, pointerEvents: 'none', userSelect: 'none',
+        }}>
+          <div style={{
+            fontFamily: FONT.mono, fontSize: 7, color: BASE.steel,
+            letterSpacing: '0.32em', marginBottom: 3,
+          }}>
+            BASE 1520
+          </div>
+          <div style={{
+            fontFamily: FONT.display, fontSize: 34, color: BASE.gold,
+            letterSpacing: '0.1em', lineHeight: 0.95, opacity: 0.85,
+          }}>
+            SERMON OPS
+          </div>
+          <div style={{
+            marginTop: 6, width: 44, height: 2, background: BASE.gold, opacity: 0.55,
+          }} />
+        </div>
+      )}
 
       {/* Status bar (analysis loaded) */}
       {analysis && w > 0 && (

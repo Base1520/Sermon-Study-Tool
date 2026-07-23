@@ -249,19 +249,33 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
     setMessages(newMessages)
     setInput('')
     setLoading(true)
+    // Streaming: placeholder assistant message fills in as chunks arrive
+    const streamId = `sc-${Date.now()}`
+    setMessages([...newMessages, { role: 'assistant', content: '' }])
+    const unsubscribe = (window as any).electronAPI.onChatChunk?.((d: { streamId: string; text: string }) => {
+      if (d.streamId !== streamId) return
+      setMessages(prev => {
+        const next = [...prev]
+        next[next.length - 1] = { role: 'assistant', content: next[next.length - 1].content + d.text }
+        return next
+      })
+    })
     try {
       const apiMessages = newMessages
         .filter(m => !(m.role === 'assistant' && m === messages[0]))
         .map(m => ({ role: m.role, content: m.content }))
-      const reply = await (window as any).electronAPI.scholarChat({ messages: apiMessages, passageContext: analysis ?? null, apiKey })
+      const reply = await (window as any).electronAPI.scholarChat({ messages: apiMessages, passageContext: analysis ?? null, apiKey, streamId })
       const updatedMessages = [...newMessages, { role: 'assistant' as const, content: reply }]
       setMessages(updatedMessages)
       persistChat(updatedMessages)
       if (updatedMessages.filter(m => m.role === 'user').length >= 2)
         (window as any).electronAPI.profileExtractInsights({ messages: updatedMessages.slice(-6), apiKey }).catch(() => {})
     } catch (err: any) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err?.message ?? 'Something went wrong'}` }])
-    } finally { setLoading(false) }
+      setMessages([...newMessages, { role: 'assistant', content: `Error: ${err?.message ?? 'Something went wrong'}` }])
+    } finally {
+      unsubscribe?.()
+      setLoading(false)
+    }
   }
 
   function handleKey(e: React.KeyboardEvent) {

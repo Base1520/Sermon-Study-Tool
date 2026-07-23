@@ -880,13 +880,29 @@ function ChapterGrid({ book, onSelect }: { book: Book; onSelect: (ref: string) =
 interface BookCompassProps {
   onClose: () => void
   onNavigate: (ref: string) => void
+  initialBook?: string   // e.g. the current analysis reference — compass opens on its book
 }
 
-export function BookCompass({ onClose, onNavigate }: BookCompassProps) {
+export function BookCompass({ onClose, onNavigate, initialBook }: BookCompassProps) {
   const [testament, setTestament] = useState<'OT' | 'NT'>('OT')
   const [selectedOT, setSelectedOT] = useState(0)
   const [selectedNT, setSelectedNT] = useState(0)
   const [view, setView] = useState<'survey' | 'chapters'>('survey')
+
+  // Open on the book being studied — no manual rotation from Genesis
+  useEffect(() => {
+    if (!initialBook) return
+    const raw = initialBook.trim().replace(/\s+\d.*$/, '').toLowerCase()
+    if (!raw) return
+    const find = (arr: Book[]) => arr.findIndex(b => {
+      const n = b.name.toLowerCase()
+      return n === raw || n.startsWith(raw) || raw.startsWith(n) || b.abbr.toLowerCase() === raw
+    })
+    const ot = find(OT_BOOKS)
+    if (ot >= 0) { setTestament('OT'); setSelectedOT(ot); return }
+    const nt = find(NT_BOOKS)
+    if (nt >= 0) { setTestament('NT'); setSelectedNT(nt) }
+  }, [initialBook])
 
   const books = testament === 'OT' ? OT_BOOKS : NT_BOOKS
   const selectedIdx = testament === 'OT' ? selectedOT : selectedNT

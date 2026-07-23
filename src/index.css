@@ -1,3 +1,24 @@
+@font-face {
+  font-family: 'Saira';
+  src: url('./assets/fonts/Saira-Variable.ttf') format('truetype-variations');
+  font-weight: 600 900; font-display: swap;
+}
+@font-face {
+  font-family: 'Bebas Neue';
+  src: url('./assets/fonts/BebasNeue-Regular.ttf') format('truetype');
+  font-weight: 400; font-display: swap;
+}
+@font-face {
+  font-family: 'Courier Prime';
+  src: url('./assets/fonts/CourierPrime-Regular.ttf') format('truetype');
+  font-weight: 400; font-display: swap;
+}
+@font-face {
+  font-family: 'Courier Prime';
+  src: url('./assets/fonts/CourierPrime-Bold.ttf') format('truetype');
+  font-weight: 700; font-display: swap;
+}
+
 @import "tailwindcss";
 
 @theme {
@@ -73,4 +94,25 @@ body {
 @keyframes fade-in {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+
+/* ── Field Command v2 — global atmosphere (ops-atmosphere) ── */
+::selection { background: rgba(216,179,63,0.3); color: #F5F2E8; }
+
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: rgba(184,180,157,0.18); border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(216,179,63,0.4); }
+
+:focus-visible { outline: 1px solid rgba(216,179,63,0.6); outline-offset: 1px; }
+
+/* Subtle scanline field over the whole app — barely there, pure atmosphere */
+body::after {
+  content: '';
+  position: fixed; inset: 0; pointer-events: none; z-index: 99999;
+  background: repeating-linear-gradient(
+    0deg, transparent 0px, transparent 3px, rgba(0,0,0,0.05) 3px, rgba(0,0,0,0.05) 4px
+  );
+  mix-blend-mode: multiply;
 }

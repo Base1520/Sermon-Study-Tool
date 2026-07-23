@@ -74,6 +74,20 @@ const SECTIONS: Section[] = [
         badge: 'new',
       },
       {
+        icon: '❖',
+        name: 'Parallel Text',
+        desc: 'Side-by-side translation comparison — ESV, KJV, YLT, ASV, Darby. See how literal translations render the same clause differently.',
+        how: 'Click + ADD TILE → ❖ PARALLEL TEXT. Toggle translations in the column header. Drag to resize.',
+        badge: 'new',
+      },
+      {
+        icon: '⊟',
+        name: 'Slide Deck',
+        desc: 'Auto-builds a presentation from your sermon outline. Hit Generate Slides to create slides from your full sermon draft via AI.',
+        how: 'Click + ADD TILE → ⊟ SLIDE DECK. Use the toolbar to generate, navigate (← →), add/remove slides. Click any text to edit inline.',
+        badge: 'new',
+      },
+      {
         icon: '⤢',
         name: 'Resize Tiles',
         desc: 'Any tile on the canvas can be resized by dragging its edges or corners.',
@@ -179,9 +193,23 @@ const SECTIONS: Section[] = [
       },
       {
         icon: '↓',
-        name: 'PDF Export',
-        desc: 'Export your analysis, outline, and sermon draft as a formatted PDF preaching sheet.',
-        how: 'Click the ↓ button in the top toolbar. Only visible after analysis.',
+        name: 'Export Preaching Notes',
+        desc: 'Export your full analysis, outline, cultural notes, and annotations as a formatted PDF pastor sheet.',
+        how: 'Click the gold ↓ button in the top toolbar. Only visible after analysis.',
+        badge: 'top toolbar',
+      },
+      {
+        icon: '⇩',
+        name: 'Export Study Notes',
+        desc: 'Congregation-ready handout — big idea, outline with fill-in-the-blank lines, background notes, and writing space.',
+        how: 'Click the ⇩ button (slightly smaller, beside the ↓). Opens a save dialog.',
+        badge: 'top toolbar',
+      },
+      {
+        icon: '♪',
+        name: 'Worship Planning',
+        desc: 'AI-generated hymn and worship song suggestions tied to the specific theology of your passage. Traditional, contemporary, or both. Copy the list to send to your music minister.',
+        how: 'Click ♪ in the toolbar after analysis. Select style, hit Suggest Songs, then copy to clipboard.',
         badge: 'top toolbar',
       },
       {

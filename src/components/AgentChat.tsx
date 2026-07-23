@@ -187,6 +187,17 @@ export function AgentChat({ agentType, analysis, apiKey, onClose, onPushToDraft 
     setMessages(next)
     setInput('')
     setLoading(true)
+    // Streaming: placeholder assistant message fills in as chunks arrive
+    const streamId = `ag-${Date.now()}`
+    setMessages([...next, { role: 'assistant', content: '' }])
+    const unsubscribe = (window as any).electronAPI.onChatChunk?.((d: { streamId: string; text: string }) => {
+      if (d.streamId !== streamId) return
+      setMessages(prev => {
+        const upd = [...prev]
+        upd[upd.length - 1] = { role: 'assistant', content: upd[upd.length - 1].content + d.text }
+        return upd
+      })
+    })
     try {
       const apiMessages = next
         .filter(m => !(m.role === 'assistant' && m === messages[0]))
@@ -196,11 +207,15 @@ export function AgentChat({ agentType, analysis, apiKey, onClose, onPushToDraft 
         messages: apiMessages,
         passageContext: analysis ?? null,
         apiKey,
+        streamId,
       })
       setMessages([...next, { role: 'assistant', content: reply }])
     } catch (err: any) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err?.message ?? 'Something went wrong'}` }])
-    } finally { setLoading(false) }
+      setMessages([...next, { role: 'assistant', content: `Error: ${err?.message ?? 'Something went wrong'}` }])
+    } finally {
+      unsubscribe?.()
+      setLoading(false)
+    }
   }
 
   function handleKey(e: React.KeyboardEvent) {

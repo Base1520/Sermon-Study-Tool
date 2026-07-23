@@ -63,7 +63,7 @@ export function CommentaryPanel({ reference, mainTheme, apiKey }: Props) {
         onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'none' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.14em' }}>
+          <span style={{ fontFamily: 'Saira, sans-serif', fontSize: 12, color: BASE.khaki, letterSpacing: '0.14em' }}>
             COMMENTARY VOICES
           </span>
           {loading && (
@@ -109,7 +109,7 @@ export function CommentaryPanel({ reference, mainTheme, apiKey }: Props) {
               )}
 
               {error && (
-                <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel, margin: '8px 0' }}>
+                <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, margin: '8px 0' }}>
                   {error}
                 </p>
               )}
@@ -133,7 +133,7 @@ export function CommentaryPanel({ reference, mainTheme, apiKey }: Props) {
                           }}>{c.era}</span>
                         </div>
                         <p style={{
-                          fontFamily: 'Crimson Pro, serif', fontSize: 12.5, color: BASE.boneMid,
+                          fontFamily: 'Crimson Pro, serif', fontSize: 13.5, color: BASE.bone,
                           lineHeight: 1.6, margin: '0 0 6px',
                         }}>{c.summary}</p>
                         <p style={{
@@ -151,20 +151,20 @@ export function CommentaryPanel({ reference, mainTheme, apiKey }: Props) {
                     }}>
                       {data.convergence && (
                         <div>
-                          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.gold, letterSpacing: '0.1em' }}>
+                          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7.5, color: BASE.gold, letterSpacing: '0.1em' }}>
                             ALL AGREE:{' '}
                           </span>
-                          <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.boneMid }}>
+                          <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.bone }}>
                             {data.convergence}
                           </span>
                         </div>
                       )}
                       {data.divergence && (
                         <div>
-                          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.steel, letterSpacing: '0.1em' }}>
+                          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7.5, color: BASE.khaki, letterSpacing: '0.1em' }}>
                             DIVERGE:{' '}
                           </span>
-                          <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.boneMid }}>
+                          <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.bone }}>
                             {data.divergence}
                           </span>
                         </div>

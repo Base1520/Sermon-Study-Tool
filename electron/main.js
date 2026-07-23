@@ -48,14 +48,15 @@ function buildMenu() {
 }
 
 function createWindow() {
+  const isMac = process.platform === 'darwin'
   const win = new BrowserWindow({
     width: 1600,
     height: 1000,
     minWidth: 1200,
     minHeight: 700,
     backgroundColor: '#0a0a0f',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    // hiddenInset + traffic lights are macOS-only; Windows/Linux get a standard frame
+    ...(isMac ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 16 } } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -69,6 +70,11 @@ function createWindow() {
   } else {
     win.loadFile(path.join(__dirname, '../dist/index.html'))
   }
+
+  win.webContents.on('did-finish-load', () => {
+    const z = store?.get('ui-zoom', 1) ?? 1
+    if (z !== 1) win.webContents.setZoomFactor(z)
+  })
 }
 
 app.whenReady().then(async () => {
@@ -106,8 +112,38 @@ async function withRetry(fn, maxAttempts = 4, baseDelayMs = 3000) {
   }
 }
 
-ipcMain.handle('analyze-passage', async (event, { text, reference, apiKey }) => {
-  console.log('[analyze-passage] key received, length:', apiKey?.length, 'prefix:', apiKey?.slice(0,12))
+// Robust JSON extraction from model output — handles code fences, prose
+// wrappers, trailing commas, and both object and array roots.
+function parseModelJSON(res) {
+  const rawText = res.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+  let raw = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+  const firstBrace = raw.indexOf('{'), firstBracket = raw.indexOf('[')
+  const isArray = firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)
+  const start = isArray ? firstBracket : firstBrace
+  const end = isArray ? raw.lastIndexOf(']') : raw.lastIndexOf('}')
+  if (start !== -1 && end > start) raw = raw.slice(start, end + 1)
+  raw = raw.replace(/,(\s*[}\]])/g, '$1')
+  try { return JSON.parse(raw) }
+  catch (e) {
+    console.error('[parseModelJSON] failed:', e.message, '| excerpt:', raw.slice(Math.max(0, raw.length - 300)))
+    throw new Error('The model returned malformed data — please try again.')
+  }
+}
+
+ipcMain.handle('get-app-version', () => app.getVersion())
+
+// ── UI zoom — visible accessibility control, persisted across launches ──
+ipcMain.handle('set-ui-zoom', (event, factor) => {
+  const f = Math.max(0.8, Math.min(1.6, Number(factor) || 1))
+  event.sender.setZoomFactor(f)
+  store?.set('ui-zoom', f)
+  return f
+})
+ipcMain.handle('get-ui-zoom', () => store?.get('ui-zoom', 1) ?? 1)
+
+ipcMain.handle('analyze-passage', async (event, { text, reference, apiKey, streamId }) => {
+  const stage = (name) => { try { if (streamId) event.sender.send('analysis-progress', { streamId, stage: name }) } catch {} }
+  stage('start')
   // Load preacher profile first — used for cache key and prompt injection
   const analysisProfile = store?.get('scholar-profile', null)
   const hermeneuticsNote = analysisProfile?.hermeneutics
@@ -120,11 +156,20 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, apiKey }) => 
   // ── Cache check — keyed on passage + hermeneutics so profile changes bust cache ──
   const profileVersion = analysisProfile?.hermeneutics ? analysisProfile.hermeneutics.slice(0, 16).replace(/\s+/g, '-') : 'no-profile'
   const textHash = require('crypto').createHash('md5').update(text.trim()).digest('hex').slice(0, 8)
-  const cacheKey = `analysis-cache-v2-${profileVersion}-${reference.trim().toLowerCase().replace(/\s+/g, '-')}-${textHash}`
+  const cacheKey = `analysis-cache-v3-${profileVersion}-${reference.trim().toLowerCase().replace(/\s+/g, '-')}-${textHash}`
   if (store) {
     const cached = store.get(cacheKey, null)
     if (cached) {
       console.log('[analyze-passage] cache hit:', reference)
+      // Re-surface in history so a re-analyzed passage moves to the top
+      const history = store.get('history', [])
+      const existing = history.find(e => e.analysis?.reference === cached.reference)
+      if (existing) {
+        store.set('history', [existing, ...history.filter(e => e.id !== existing.id)])
+      } else {
+        const entry = { id: Date.now().toString(), savedAt: new Date().toISOString(), analysis: cached, annotations: {} }
+        store.set('history', [entry, ...history].slice(0, 100))
+      }
       return cached
     }
   }
@@ -141,25 +186,20 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, apiKey }) => 
 
   const userMsg = `${reference}\n\n"${text}"`
 
-  const parseJSON = (res) => {
-    const rawText = res.content[0].text
-    let raw = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-    const start = raw.indexOf('{')
-    const end = raw.lastIndexOf('}')
-    if (start !== -1 && end !== -1 && end > start) raw = raw.slice(start, end + 1)
-    raw = raw.replace(/,(\s*[}\]])/g, '$1')
-    try { return JSON.parse(raw) }
-    catch (e) {
-      console.error('[parseJSON] failed:', e.message, '| excerpt:', raw.slice(Math.max(0, raw.length - 300)))
-      throw e
-    }
-  }
+  const parseJSON = parseModelJSON
 
   // ── Enrichment prompt (cultural notes + genre) — always parallel + non-fatal ──
-  const enrichPrompt = `You are a biblical scholar identifying cultural background and genre for sermon preparation.
+  const enrichPrompt = `You are a biblical scholar identifying cultural background, genre, and geographic references for sermon preparation.
 
 Return ONLY valid JSON, no markdown:
 {
+  "geoReferences": [
+    {
+      "place": "exact city or region name matching canonical biblical spelling (e.g. 'Rome', 'Corinth', 'Jerusalem')",
+      "verses": ["verse reference where it appears, e.g. 'Romans 1:7'"],
+      "significance": "one sentence on why this location matters to the passage"
+    }
+  ],
   "culturalNotes": [
     {
       "id": "cn1",
@@ -170,12 +210,17 @@ Return ONLY valid JSON, no markdown:
       "significance": "one sentence on how this changes interpretation"
     }
   ],
+  "questionsToConsider": [
+    "5-7 probing questions the preacher should wrestle with before preaching this text — interpretive tensions, likely congregational objections, application blind spots. Direct, specific to THIS passage, no generic filler."
+  ],
   "genre": {
     "genre": "Narrative|Law|Poetry|Wisdom|Prophecy|Epistle|Gospel|Apocalyptic|Discourse",
     "subgenre": "specific descriptor e.g. 'Pauline Theological Argument'",
     "readingRules": ["4-6 concrete hermeneutical rules specific to this genre and passage"]
   }
 }
+
+For geoReferences: include the primary city the letter/book is addressed TO or written FROM, plus any places explicitly named in the text. For epistles, always include the recipient city (e.g. Romans → Rome, 1 Corinthians → Corinth, Ephesians → Ephesus). For Revelation 2-3, include all seven churches addressed: Ephesus, Smyrna, Pergamum, Thyatira, Sardis, Philadelphia, Laodicea. Use these exact spellings. Empty array if truly no locations. Maximum 8 locations.
 
 Identify culturally embedded references a first-century reader would grasp but a modern reader misses. Only include references actually present in the text. Maximum 6 cultural notes.`
 
@@ -215,6 +260,10 @@ HIERARCHY IS REQUIRED: You MUST assign parentId relationships. The first phrase 
 Return ONLY valid JSON — no markdown, no extra text:
 {
   "mainTheme": "one sentence capturing the central truth of the passage",
+  "authorIntent": {
+    "doing": "what the author is DOING to the reader in one sentence",
+    "inOrderThat": "the response this text is designed to produce, phrased as: 'in order that ...'"
+  },
   "outline": [
     { "point": "I.", "label": "Main point (7 words max)", "sub": [{ "point": "A.", "label": "sub-point (5 words max)" }] }
   ],
@@ -230,25 +279,26 @@ Return ONLY valid JSON — no markdown, no extra text:
 STRICT: Max 4 outline points, max 2 sub-points each. All strings concise.${hermeneuticsNote}${theologyNote}`
 
     console.log('[analyze-passage] long passage — running 3 parallel calls')
+    stage('calls-dispatched')
     const [phrasesSettled, contextSettled, enrichSettled] = await Promise.allSettled([
       withRetry(() => client.messages.create({
         model: 'claude-opus-4-8',
         max_tokens: 4000,
-        system: phrasesPrompt,
+        system: [{ type: 'text', text: phrasesPrompt, cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: `Identify the 8 most structurally important clauses in this passage:\n\n${userMsg}` }],
-      })),
+      })).then(r => { stage('structure'); return r }),
       withRetry(() => client.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 2500,
-        system: contextPrompt,
+        system: [{ type: 'text', text: contextPrompt, cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: `Provide sermon context analysis for:\n\n${userMsg}` }],
-      })),
+      })).then(r => { stage('theme'); return r }),
       withRetry(() => client.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 2500,
-        system: enrichPrompt,
+        system: [{ type: 'text', text: enrichPrompt, cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: `Identify cultural background and genre for:\n\n${userMsg}` }],
-      })),
+      })).then(r => { stage('culture'); return r }),
     ])
 
     if (phrasesSettled.status === 'rejected') throw phrasesSettled.reason
@@ -263,11 +313,14 @@ STRICT: Max 4 outline points, max 2 sub-points each. All strings concise.${herme
     result = {
       reference,
       mainTheme: context.mainTheme ?? '',
+      authorIntent: context.authorIntent ?? null,
       phrases: phrases.phrases ?? [],
       outline: context.outline ?? [],
       canonicalContext: context.canonicalContext ?? {},
       culturalNotes: enrich.culturalNotes ?? [],
       genre: enrich.genre ?? null,
+      geoReferences: enrich.geoReferences ?? [],
+      questionsToConsider: enrich.questionsToConsider ?? [],
     }
   } else {
     // ── SHORT PASSAGE: 2 parallel calls (core + enrichment) ───────────────────
@@ -278,6 +331,10 @@ Return ONLY valid JSON. No markdown. No trailing commas. No extra text before or
 {
   "reference": "Book Chapter:Verse",
   "mainTheme": "one sentence capturing the central truth",
+  "authorIntent": {
+    "doing": "what the author is DOING to the reader in one sentence (convince, comfort, warn, exhort...)",
+    "inOrderThat": "the response this text is designed to produce, phrased as: 'in order that ...'"
+  },
   "phrases": [
     {
       "id": "p1",
@@ -305,19 +362,20 @@ Return ONLY valid JSON. No markdown. No trailing commas. No extra text before or
 
 STRICT LIMITS: max 16 phrases, 5-word theologicalNotes, max 4 outline points with 3 sub-points each.${hermeneuticsNote}${theologyNote}`
 
+    stage('calls-dispatched')
     const [coreSettled, enrichSettled] = await Promise.allSettled([
       withRetry(() => client.messages.create({
         model: 'claude-opus-4-8',
         max_tokens: 8000,
-        system: corePrompt,
+        system: [{ type: 'text', text: corePrompt, cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: `Perform a full phrasing analysis:\n\n${userMsg}` }],
-      })),
+      })).then(r => { stage('structure'); stage('theme'); return r }),
       withRetry(() => client.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 3000,
-        system: enrichPrompt,
+        system: [{ type: 'text', text: enrichPrompt, cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: `Identify cultural background and genre for:\n\n${userMsg}` }],
-      })),
+      })).then(r => { stage('culture'); return r }),
     ])
 
     if (coreSettled.status === 'rejected') throw coreSettled.reason
@@ -327,12 +385,14 @@ STRICT LIMITS: max 16 phrases, 5-word theologicalNotes, max 4 outline points wit
       ? (() => { try { return parseJSON(enrichSettled.value) } catch { return { culturalNotes: [], genre: null } } })()
       : { culturalNotes: [], genre: null }
 
-    result = { ...core, culturalNotes: enrich.culturalNotes ?? [], genre: enrich.genre ?? null }
+    result = { ...core, culturalNotes: enrich.culturalNotes ?? [], genre: enrich.genre ?? null, geoReferences: enrich.geoReferences ?? [], questionsToConsider: enrich.questionsToConsider ?? [] }
   }
 
   // Store raw passage text so the desk can render all-verses mode
   result.passageText = text
   result.passageReference = reference
+
+  stage('complete')
 
   // ── Cache and save to history ─────────────────────────────────────────────
   if (store) {
@@ -474,7 +534,7 @@ ${analysis.culturalNotes?.length > 0 ? `Cultural notes:\n${analysis.culturalNote
   // ── Agent 1: Exegetical ─────────────────────────────────────────────────────
   // Focuses on the text itself — Greek/Hebrew lexical data, grammar, syntax,
   // verified word meanings, natural structural divisions, and emotional register.
-  const exegeticalResponse = await client.messages.create({
+  const exegeticalResponse = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 2048,
     tools: [webSearchTool],
@@ -504,7 +564,7 @@ ${analysis.culturalNotes?.length > 0 ? `Cultural notes:\n${analysis.culturalNote
 
 Do NOT make application. Stay strictly in the world of the text.`,
     messages: [{ role: 'user', content: `Produce an exegetical memo for this passage:\n\n${passageContext}` }],
-  })
+  }))
 
   // Collect exegetical text (skip tool_use blocks)
   const exegeticalMemo = exegeticalResponse.content
@@ -515,7 +575,7 @@ Do NOT make application. Stay strictly in the world of the text.`,
   // ── Agent 2: Theological ────────────────────────────────────────────────────
   // Takes the exegetical memo and builds out the biblical-theological meaning —
   // canonical connections, doctrinal weight, redemptive-historical placement.
-  const theologicalResponse = await client.messages.create({
+  const theologicalResponse = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 2048,
     tools: [webSearchTool],
@@ -539,7 +599,7 @@ ${passageContext}
 EXEGETICAL MEMO:
 ${exegeticalMemo}`
     }],
-  })
+  }))
 
   const theologicalMemo = theologicalResponse.content
     .filter(b => b.type === 'text')
@@ -580,10 +640,10 @@ Return ONLY valid JSON with no markdown:
   "gospelBridge": "The explicit Christological connection"
 }`
 
-  const homileticalResponse = await client.messages.create({
+  const homileticalResponse = await withRetry(() => client.messages.create({
     model: 'claude-opus-4-8',
     max_tokens: 4096,
-    system: systemPrompt,
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: [{
       role: 'user',
       content: `Draft a sermon outline for ${analysis.reference}.
@@ -596,13 +656,9 @@ ${exegeticalMemo}
 THEOLOGICAL MEMO:
 ${theologicalMemo}`
     }],
-  })
+  }))
 
-  const raw = homileticalResponse.content[0].text
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '')
-    .trim()
-  return JSON.parse(raw)
+  return parseModelJSON(homileticalResponse)
 })
 
 // ── Sermon Series ─────────────────────────────────────────────────────────────
@@ -642,7 +698,7 @@ ipcMain.handle('series-synthesize', async (_, { series, apiKey }) => {
     `Week ${i + 1}: ${p.reference}\nTheme: ${p.mainTheme}\nThemes: ${(p.biblicalThemes ?? []).join(', ')}\nOutline: ${(p.outline ?? []).map(o => `${o.point} ${o.label}`).join(' | ')}`
   ).join('\n\n')
 
-  const response = await client.messages.create({
+  const response = await withRetry(() => client.messages.create({
     model: 'claude-opus-4-8',
     max_tokens: 2000,
     messages: [{
@@ -665,10 +721,8 @@ Provide a synthesis of this series. Return ONLY valid JSON, no markdown:
   "conclusionIdeas": "2-3 sentences on how to land the final week with the full weight of everything that came before"
 }`
     }],
-  })
-  const raw = response.content[0].text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-  const start = raw.indexOf('{'); const end = raw.lastIndexOf('}')
-  return JSON.parse(start !== -1 && end > start ? raw.slice(start, end + 1) : raw)
+  }))
+  return parseModelJSON(response)
 })
 
 // ── History ───────────────────────────────────────────────────────────────────
@@ -702,58 +756,71 @@ ipcMain.handle('session-load-latest', () => {
 // ── Cross-references ──────────────────────────────────────────────────────────
 ipcMain.handle('get-cross-refs', async (_, { reference, mainTheme, biblicalThemes, apiKey }) => {
   const client = new Anthropic.default({ apiKey })
-  const response = await client.messages.create({
+  const response = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 512,
     messages: [{
       role: 'user',
       content: `Given the passage ${reference} with theme "${mainTheme}" and themes: ${biblicalThemes.join(', ')}, suggest 5 cross-reference passages that illuminate the same theme. Return ONLY a JSON array: [{"reference":"Rom 3:23","reason":"one sentence on connection"}]. No markdown.`,
     }],
-  })
-  const raw = response.content[0].text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-  return JSON.parse(raw)
+  }))
+  return parseModelJSON(response)
 })
 
 // ── Word study ────────────────────────────────────────────────────────────────
 ipcMain.handle('word-study', async (_, { word, clauseText, reference, apiKey }) => {
   const client = new Anthropic.default({ apiKey })
-  const response = await client.messages.create({
+  const response = await withRetry(() => client.messages.create({
     model: 'claude-opus-4-8',
     max_tokens: 1024,
     messages: [{
       role: 'user',
       content: `Provide a concise word study for the word "${word}" as it appears in ${reference}: "${clauseText}". Return ONLY JSON: {"word":"${word}","original":"Greek or Hebrew word","transliteration":"romanized","strongs":"G#### or H####","gloss":"short definition","parsing":"grammatical parsing if verb/noun","semanticRange":"2-3 sentence note on the word's range of meaning in its biblical context","keyUses":["1-2 other key passages using this word"]}. No markdown.`,
     }],
-  })
-  const raw = response.content[0].text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-  return JSON.parse(raw)
+  }))
+  return parseModelJSON(response)
 })
 
-// ── ESV Bible API ─────────────────────────────────────────────────────────────
-ipcMain.handle('fetch-esv', async (_, { reference, esvKey }) => {
-  const params = new URLSearchParams({
-    q: reference,
-    'include-headings': 'false',
-    'include-footnotes': 'false',
-    'include-verse-numbers': 'false',
-    'include-short-copyright': 'false',
-    'include-passage-references': 'false',
-    'include-selahs': 'false',
-    'indent-paragraphs': '0',
-    'indent-poetry': 'false',
-  })
-  const res = await fetch(`https://api.esv.org/v3/passage/text/?${params}`, {
-    headers: { Authorization: `Token ${esvKey}` },
-  })
-  if (!res.ok) throw new Error(`ESV API error: ${res.status} ${res.statusText}`)
+// ── Bible fetch — public domain translations + ESV (if key provided) ──────────
+ipcMain.handle('fetch-bible', async (_, { reference, translation = 'kjv', esvKey = '' }) => {
+  const ref = reference.trim()
+
+  // ESV via api.esv.org (requires key)
+  if (translation === 'esv') {
+    if (!esvKey) throw new Error('ESV API key required — add it in Settings')
+    const params = new URLSearchParams({
+      q: ref,
+      'include-headings': 'false',
+      'include-footnotes': 'false',
+      'include-verse-numbers': 'false',
+      'include-short-copyright': 'false',
+      'include-passage-references': 'false',
+      'include-selahs': 'false',
+      'indent-paragraphs': '0',
+      'indent-poetry': 'false',
+    })
+    const res = await fetch(`https://api.esv.org/v3/passage/text/?${params}`, {
+      headers: { Authorization: `Token ${esvKey}` },
+    })
+    if (!res.ok) throw new Error(`ESV API error: ${res.status} ${res.statusText}`)
+    const data = await res.json()
+    if (!data.passages?.length) throw new Error('No passage found')
+    return data.passages[0].trim()
+  }
+
+  // Public-domain translations via bible-api.com (no key needed)
+  const encoded = encodeURIComponent(ref)
+  const res = await fetch(`https://bible-api.com/${encoded}?translation=${translation}`)
+  if (!res.ok) throw new Error(`Bible API error: ${res.status} ${res.statusText}`)
   const data = await res.json()
-  const passages = data.passages
-  if (!passages || passages.length === 0) throw new Error('No passage found for that reference')
-  return passages[0].trim()
+  if (data.error) throw new Error(data.error)
+  const text = (data.text || '').trim().replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!text) throw new Error('No passage found for that reference')
+  return text
 })
 
 // ── Scholar Chat ──────────────────────────────────────────────────────────────
-ipcMain.handle('scholar-chat', async (_, { messages, passageContext, apiKey }) => {
+ipcMain.handle('scholar-chat', async (event, { messages, passageContext, apiKey, streamId }) => {
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)
 
@@ -841,14 +908,27 @@ ${preacherContext}`
     ? [{ role: 'user', content: contextMessage }, { role: 'assistant', content: 'I have the passage context. What would you like to explore?' }, ...messages]
     : messages
 
-  const response = await client.messages.create({
+  const chatParams = {
     model: 'claude-opus-4-8',
-    max_tokens: 1024,
-    system: systemPrompt,
+    max_tokens: 2000,
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: apiMessages,
-  })
+  }
 
-  return response.content[0].text
+  // Streaming path — renderer passes a streamId and listens on 'chat-chunk'
+  if (streamId) {
+    return await withRetry(async () => {
+      const stream = client.messages.stream(chatParams)
+      stream.on('text', (t) => {
+        try { event.sender.send('chat-chunk', { streamId, text: t }) } catch { /* window closed */ }
+      })
+      const final = await stream.finalMessage()
+      return final.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+    })
+  }
+
+  const response = await withRetry(() => client.messages.create(chatParams))
+  return response.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
 })
 
 // ── PDF export ────────────────────────────────────────────────────────────────
@@ -865,7 +945,7 @@ ipcMain.handle('export-pdf', async (_, { html, reference }) => {
 })
 
 // ── Specialist Agent Chat (Exegetical / Theological / Homiletical) ────────────
-ipcMain.handle('agent-chat', async (_, { agentType, messages, passageContext, apiKey }) => {
+ipcMain.handle('agent-chat', async (event, { agentType, messages, passageContext, apiKey, streamId }) => {
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)
 
@@ -951,20 +1031,33 @@ Filter every response through this preacher's hermeneutics. If they hold covenan
       ]
     : messages
 
-  const response = await client.messages.create({
+  const chatParams = {
     model: 'claude-opus-4-8',
-    max_tokens: 1200,
-    system: systemPrompt,
+    max_tokens: 2000,
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: apiMessages,
-  })
+  }
 
-  return response.content[0].text
+  // Streaming path — renderer passes a streamId and listens on 'chat-chunk'
+  if (streamId) {
+    return await withRetry(async () => {
+      const stream = client.messages.stream(chatParams)
+      stream.on('text', (t) => {
+        try { event.sender.send('chat-chunk', { streamId, text: t }) } catch { /* window closed */ }
+      })
+      const final = await stream.finalMessage()
+      return final.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+    })
+  }
+
+  const response = await withRetry(() => client.messages.create(chatParams))
+  return response.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
 })
 
 // ── Commentary Insights (public domain) ──────────────────────────────────────
 ipcMain.handle('fetch-commentary', async (_, { reference, mainTheme, apiKey }) => {
   const client = new Anthropic.default({ apiKey })
-  const response = await client.messages.create({
+  const response = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 2000,
     messages: [{
@@ -991,10 +1084,8 @@ Return ONLY valid JSON, no markdown:
 
 Only include commentators with substantive things to say about this specific passage. Accuracy matters — only include what they actually wrote.`,
     }],
-  })
-  const raw = response.content[0].text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-  const start = raw.indexOf('{'); const end = raw.lastIndexOf('}')
-  return JSON.parse(start !== -1 && end > start ? raw.slice(start, end + 1) : raw)
+  }))
+  return parseModelJSON(response)
 })
 
 // ── Eisegesis / Doctrine Check ────────────────────────────────────────────────
@@ -1032,12 +1123,165 @@ If no problems exist, return {"flags":[]}.`,
       }],
     })
 
-    const raw = response.content[0].text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-    return JSON.parse(raw)
+    return parseModelJSON(response)
   } catch (e) {
     console.error('[eisegesis-check] error:', e?.message ?? e)
     return { flags: [], error: e?.message }
   }
+})
+
+// ── Mission Brief — 5-paragraph OPORD-style sermon summary ───────────────────
+ipcMain.handle('mission-brief', async (_, { analysis, draft, apiKey }) => {
+  const client = new Anthropic.default({ apiKey })
+  const response = await withRetry(() => client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1400,
+    messages: [{
+      role: 'user',
+      content: `You are writing a "Mission Brief" — a one-page, 5-paragraph sermon summary in military OPORD discipline, for a pastor to review before preaching ${analysis.reference}.
+
+Passage theme: ${analysis.mainTheme}
+${analysis.authorIntent ? `Author's intent: ${analysis.authorIntent.doing} — ${analysis.authorIntent.inOrderThat}` : ''}
+Outline: ${(analysis.outline ?? []).map(o => `${o.point} ${o.label}`).join(' | ')}
+${draft ? `Sermon draft/manuscript excerpt:\n${String(draft).slice(0, 3000)}` : ''}
+
+Return ONLY valid JSON, no markdown:
+{
+  "situation": "3-4 sentences: the text's context — author, audience, occasion, and what's at stake in the passage",
+  "mission": "2 sentences: the big idea as task + purpose — 'Proclaim X in order that the congregation Y'",
+  "execution": "4-6 sentences: the sermon's movements in order, each with its key verse anchor",
+  "sustainment": "2-3 sentences: the illustrations, applications, and supporting material that carry the weight",
+  "commandSignal": "2-3 sentences: the call to response — what the hearer must do, and the gospel note it lands on"
+}`,
+    }],
+  }))
+  return parseModelJSON(response)
+})
+
+// ── Delivery Review — record or upload, Whisper transcribes, Claude critiques ─
+ipcMain.handle('pick-media-file', async () => {
+  const { filePaths } = await dialog.showOpenDialog({
+    title: 'Choose sermon audio or video',
+    filters: [{ name: 'Audio/Video', extensions: ['mp3','m4a','wav','webm','mp4','mpeg','mpga','ogg'] }],
+    properties: ['openFile'],
+  })
+  if (!filePaths?.length) return null
+  const stat = fs.statSync(filePaths[0])
+  return { path: filePaths[0], sizeMB: Math.round(stat.size / 1048576 * 10) / 10 }
+})
+
+ipcMain.handle('review-delivery', async (_, { filePath, audioBase64, mimeType, openaiKey, apiKey, manuscript, reference }) => {
+  if (!openaiKey) throw new Error('OpenAI key required for transcription — add it in the panel')
+
+  // 1) Get the media bytes
+  let buf, name
+  if (filePath) {
+    buf = fs.readFileSync(filePath)
+    name = path.basename(filePath)
+  } else if (audioBase64) {
+    buf = Buffer.from(audioBase64, 'base64')
+    name = 'rehearsal.webm'
+  } else {
+    throw new Error('No audio provided')
+  }
+  if (buf.length > 25 * 1048576) throw new Error('File exceeds the 25MB transcription limit — export a lower-bitrate audio version')
+
+  // 2) Whisper transcription
+  const form = new FormData()
+  form.append('file', new Blob([buf], { type: mimeType || 'application/octet-stream' }), name)
+  form.append('model', 'whisper-1')
+  form.append('response_format', 'verbose_json')
+  const wRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${openaiKey}` },
+    body: form,
+  })
+  if (!wRes.ok) {
+    const errText = await wRes.text()
+    throw new Error(`Transcription failed (${wRes.status}): ${errText.slice(0, 200)}`)
+  }
+  const wData = await wRes.json()
+  const transcript = (wData.text ?? '').trim()
+  const durationMin = wData.duration ? Math.round(wData.duration / 60 * 10) / 10 : null
+  if (!transcript) throw new Error('Transcription came back empty')
+
+  // 3) Claude critique
+  const client = new Anthropic.default({ apiKey })
+  const response = await withRetry(() => client.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 2000,
+    messages: [{
+      role: 'user',
+      content: `You are an honest homiletics coach reviewing a sermon delivery${reference ? ` on ${reference}` : ''}. Be specific and direct — real encouragement for what works, real correction for what doesn't. No flattery.
+
+${durationMin ? `Duration: ~${durationMin} minutes.` : ''}
+${manuscript ? `PLANNED MANUSCRIPT/OUTLINE (compare delivery against this):\n${String(manuscript).slice(0, 3000)}\n` : ''}
+DELIVERY TRANSCRIPT:
+${transcript.slice(0, 12000)}
+
+Return ONLY valid JSON, no markdown:
+{
+  "overall": "2-3 sentence honest overall assessment",
+  "strengths": ["3-5 specific things that worked, quoting the transcript where useful"],
+  "critiques": ["3-5 specific things to fix, each with a concrete suggestion"],
+  "fillerWords": "observed filler/crutch words and rough frequency (um, uh, 'amen?', 'right?', repeated phrases)",
+  "pacing": "assessment of pace and structure — where it dragged, where it rushed${durationMin ? ', given the ~' + durationMin + ' min length' : ''}",
+  "clarity": "was the big idea clear and repeated? could a listener state it afterward?",
+  "faithfulness": ${manuscript ? '"where the delivery drifted from or improved on the plan"' : '"how well the message stayed anchored to the text"'}
+}`,
+    }],
+  }))
+  const critique = parseModelJSON(response)
+  return { ...critique, transcript: transcript.slice(0, 2000), durationMin }
+})
+
+// ── Local keys file — one place for all API keys ─────────────────────────────
+// Reads Documents/BASE1520/keys.txt (created with a template on first run).
+// Non-empty values are pulled into the app on every launch.
+ipcMain.handle('get-local-keys', () => {
+  try {
+    const dir = path.join(app.getPath('documents'), 'BASE1520')
+    const file = path.join(dir, 'keys.txt')
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, `# BASE 1520 — API keys
+# Paste your keys after the = signs. The app reads this file every time it starts.
+# Keep this file private — do not share or upload it.
+
+ANTHROPIC_KEY=
+ESV_KEY=
+OPENAI_KEY=
+`)
+      return { created: file }
+    }
+    const out = {}
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      const m = line.match(/^\s*(ANTHROPIC_KEY|ESV_KEY|OPENAI_KEY)\s*=\s*(.+)\s*$/)
+      if (m && m[2].trim() && !m[2].trim().startsWith('#')) out[m[1]] = m[2].trim()
+    }
+    return out
+  } catch (e) {
+    console.error('[get-local-keys]', e?.message)
+    return {}
+  }
+})
+
+ipcMain.handle('open-keys-folder', () => {
+  const dir = path.join(app.getPath('documents'), 'BASE1520')
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  shell.openPath(dir)
+})
+
+// ── Sermon Calendar ───────────────────────────────────────────────────────────
+// Keyed by ISO date 'YYYY-MM-DD' → { reference, title, seriesName, notes }
+ipcMain.handle('calendar-get', () => store?.get('sermon-calendar', {}) ?? {})
+
+ipcMain.handle('calendar-set', (_, { date, entry }) => {
+  const cal = store?.get('sermon-calendar', {}) ?? {}
+  if (entry) cal[date] = entry
+  else delete cal[date]
+  store?.set('sermon-calendar', cal)
+  return cal
 })
 
 // ── Asset image scanner ─────────────────────────────────────────────────────
@@ -1063,6 +1307,10 @@ function scanFolder(folderPath) {
   }
   return result
 }
+
+ipcMain.handle('open-external', async (_, url) => {
+  await shell.openExternal(url)
+})
 
 ipcMain.handle('scan-asset-images', async () => {
   const desktop = path.join(app.getPath('home'), 'Desktop', 'BASE Assets')

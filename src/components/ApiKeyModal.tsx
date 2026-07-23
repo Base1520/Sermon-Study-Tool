@@ -1,15 +1,31 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { BASE } from '../theme'
 
 interface Props {
-  onSave: (anthropicKey: string, esvKey: string) => void
+  onSave: (anthropicKey: string, esvKey?: string) => void
   onClose: () => void
+  onDemo?: () => void
   existingKey: string
-  existingEsvKey: string
+  existingEsvKey?: string
 }
 
-export function ApiKeyModal({ onSave, onClose, existingKey, existingEsvKey }: Props) {
-  const [key, setKey] = useState(existingKey)
+const ZOOMS = [
+  { f: 1,    label: 'NORMAL' },
+  { f: 1.15, label: 'LARGE' },
+  { f: 1.3,  label: 'X-LARGE' },
+  { f: 1.5,  label: 'HUGE' },
+]
+
+export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvKey = '' }: Props) {
+  const [zoom, setZoom] = useState(1)
+  useEffect(() => {
+    ;(window as any).electronAPI.getUiZoom?.().then((z: number) => setZoom(z ?? 1)).catch(() => {})
+  }, [])
+  function applyZoom(f: number) {
+    setZoom(f)
+    ;(window as any).electronAPI.setUiZoom?.(f).catch(() => {})
+  }
+  const [key, setKey]       = useState(existingKey)
   const [esvKey, setEsvKey] = useState(existingEsvKey)
   const [showAnthropicHelp, setShowAnthropicHelp] = useState(!existingKey)
 
@@ -105,33 +121,29 @@ export function ApiKeyModal({ onSave, onClose, existingKey, existingEsvKey }: Pr
           )}
 
           <input
-            type="text" value={key}
+            type="password" value={key}
             onChange={e => setKey(e.target.value.trim())}
             placeholder="sk-ant-..."
             autoComplete="off" spellCheck={false}
             style={{ ...fieldStyle, fontFamily: key ? 'JetBrains Mono' : 'Crimson Pro, serif' }}
             onFocus={e => (e.target.style.borderColor = BASE.borderGold)}
             onBlur={e => (e.target.style.borderColor = BASE.borderDim)}
-            onKeyDown={e => e.key === 'Enter' && canSave && onSave(key, esvKey)}
+            onKeyDown={e => e.key === 'Enter' && canSave && onSave(key)}
           />
         </div>
 
         {/* ESV key */}
         <div style={{ marginBottom: 24 }}>
           <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.khaki, letterSpacing: '0.12em', marginBottom: 6, opacity: 0.9 }}>
-            ESV BIBLE API — auto-fetch passage text{' '}
-            <span style={{ color: BASE.steel, fontWeight: 400 }}>(optional)</span>
+            ESV API KEY <span style={{ color: BASE.steel, fontWeight: 400 }}>(optional — unlocks ESV translation)</span>
           </div>
-          <div style={{
-            fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel,
-            lineHeight: 1.5, marginBottom: 8,
-          }}>
-            Free key at <strong style={{ color: BASE.boneMid }}>api.esv.org</strong> — lets you type a reference and auto-fetch the text. Without it, paste the passage text manually.
+          <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel, lineHeight: 1.5, marginBottom: 8 }}>
+            Free key at <strong style={{ color: BASE.boneMid }}>api.esv.org</strong>. Without it, KJV/ASV/YLT still work with no key required.
           </div>
           <input
-            type="text" value={esvKey}
-            onChange={e => setEsvKey(e.target.value)}
-            placeholder="Leave blank to paste passage text manually"
+            type="password" value={esvKey}
+            onChange={e => setEsvKey(e.target.value.trim())}
+            placeholder="Leave blank to use KJV / ASV / YLT instead"
             autoComplete="off" spellCheck={false}
             style={{ ...fieldStyle, fontFamily: esvKey ? 'JetBrains Mono' : 'Crimson Pro, serif' }}
             onFocus={e => (e.target.style.borderColor = `${BASE.khaki}66`)}
@@ -163,6 +175,50 @@ export function ApiKeyModal({ onSave, onClose, existingKey, existingEsvKey }: Pr
             </button>
           )}
         </div>
+
+        {/* Text size — accessibility, applies instantly and persists */}
+        <div style={{ marginTop: 16 }}>
+          <div style={{
+            fontFamily: 'Saira, sans-serif', fontSize: 12, letterSpacing: '0.14em',
+            color: BASE.khaki, marginBottom: 8,
+          }}>
+            TEXT SIZE
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {ZOOMS.map(z => (
+              <button key={z.f} onClick={() => applyZoom(z.f)}
+                style={{
+                  flex: 1, padding: '8px 0', borderRadius: 8, cursor: 'pointer',
+                  background: zoom === z.f ? `${BASE.gold}20` : 'transparent',
+                  border: `1px solid ${zoom === z.f ? BASE.gold : BASE.borderDim}`,
+                  color: zoom === z.f ? BASE.gold : BASE.steel,
+                  fontFamily: 'Saira, sans-serif', fontSize: 11 + (z.f - 1) * 6,
+                  letterSpacing: '0.08em', transition: 'all 0.15s',
+                }}>
+                {z.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7.5, color: BASE.steel, opacity: 0.7, marginTop: 5, letterSpacing: '0.06em' }}>
+            Applies instantly · remembered next launch · ⌘+ / ⌘− also works anywhere
+          </div>
+        </div>
+
+        {/* Demo mode — experience the desk without a key */}
+        {!existingKey && onDemo && (
+          <button onClick={onDemo}
+            style={{
+              marginTop: 10, width: '100%', padding: '9px 0', borderRadius: 10,
+              cursor: 'pointer', background: 'transparent',
+              border: `1px dashed ${BASE.gold}45`, color: `${BASE.gold}cc`,
+              fontFamily: 'JetBrains Mono, monospace', fontSize: 9,
+              letterSpacing: '0.12em', transition: 'all 0.2s',
+            }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = `${BASE.gold}10` }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
+            ✦ EXPLORE DEMO — ROMANS 8 (NO KEY NEEDED)
+          </button>
+        )}
       </div>
     </div>
   )

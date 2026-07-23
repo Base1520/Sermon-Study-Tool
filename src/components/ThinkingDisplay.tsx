@@ -8,15 +8,22 @@ const CX = 130
 const CY = 130
 
 const VERTEX_LABELS = [
-  'LEXICAL',
-  'GRAMMAR',
-  'THEOLOGY',
-  'CANON',
-  'HOMILETICS',
-  'CULTURE',
-  'STRUCTURE',
-  'SYNTHESIS',
+  'CONTEXTUALIZE',
+  'OBSERVE',
+  'VERIFY',
+  'EXAMINE',
+  'NAME',
+  'ANCHOR',
+  'NAVIGATE',
+  'TEACH',
 ]
+
+const LETTERS = ['C', 'O', 'V', 'E', 'N', 'A', 'N', 'T']
+
+// Honest progress: real pipeline stages → how many COVENANT vertices lock gold
+const STAGE_LOCKS: Record<string, number> = {
+  'start': 1, 'calls-dispatched': 2, 'structure': 4, 'theme': 6, 'culture': 7, 'complete': 8,
+}
 
 const STAGES = [
   { label: 'PARSING GRAMMATICAL STRUCTURE',   sub: 'Identifying clause types and syntax…' },
@@ -38,7 +45,17 @@ export function ThinkingDisplay() {
   const [lit, setLit] = useState<number>(0)       // how many vertices are lit (0-8)
   const [glowing, setGlowing] = useState(false)   // full octagon glow phase
   const [stageIdx, setStageIdx] = useState(0)
+  const [locked, setLocked] = useState(0)        // vertices locked by REAL pipeline stages
   const phaseRef = useRef<'building' | 'glowing' | 'resetting'>('building')
+
+  // Subscribe to honest analysis-progress events from the main process
+  useEffect(() => {
+    const unsub = (window as any).electronAPI?.onAnalysisProgress?.((d: { stage: string }) => {
+      const n = STAGE_LOCKS[d.stage]
+      if (n) setLocked(prev => Math.max(prev, n))
+    })
+    return () => unsub?.()
+  }, [])
 
   // Build octagon one vertex at a time, then glow, then restart
   useEffect(() => {
@@ -146,9 +163,14 @@ export function ThinkingDisplay() {
 
         {/* Vertices */}
         {VERTS.map((v, i) => {
-          const isLit = i < lit
-          const isFront = i === lit - 1  // the most recently lit vertex
+          const isLocked = i < locked
+          const isLit = i < lit || isLocked
+          const isFront = i === lit - 1 && !isLocked  // the most recently lit vertex
           const label = VERTEX_LABELS[i]
+          // Letter position — just inside each vertex
+          const la = (i / N) * Math.PI * 2 - Math.PI / 2
+          const lix = CX + (R - 22) * Math.cos(la)
+          const liy = CY + (R - 22) * Math.sin(la)
 
           // Label angle — push text outward from center
           const angle = (i / N) * Math.PI * 2 - Math.PI / 2
@@ -171,18 +193,33 @@ export function ThinkingDisplay() {
 
               {/* Vertex dot */}
               <motion.circle
-                cx={v.x} cy={v.y} r={isFront ? 5 : 3.5}
-                fill={isLit ? (glowing ? BASE.gold : isFront ? BASE.gold : BASE.moss) : 'transparent'}
-                stroke={isLit ? (glowing ? BASE.gold : BASE.moss) : BASE.border}
-                strokeWidth={isLit ? 1 : 0.5}
+                cx={v.x} cy={v.y} r={isLocked ? 6 : isFront ? 5 : 3.5}
+                fill={isLocked ? BASE.gold : isLit ? (glowing ? BASE.gold : isFront ? BASE.gold : BASE.moss) : 'transparent'}
+                stroke={isLocked ? BASE.gold : isLit ? (glowing ? BASE.gold : BASE.moss) : BASE.border}
+                strokeWidth={isLocked ? 1.5 : isLit ? 1 : 0.5}
                 strokeOpacity={isLit ? 1 : 0.2}
                 initial={{ scale: 0 }}
                 animate={{
                   scale: isLit ? 1 : 0,
-                  filter: glowing ? `drop-shadow(0 0 6px ${BASE.gold})` : 'none',
+                  filter: (glowing || isLocked) ? `drop-shadow(0 0 6px ${BASE.gold})` : 'none',
                 }}
                 transition={{ duration: 0.25, ease: 'backOut' }}
               />
+
+              {/* COVENANT letter — inside the ring, locks gold with real progress */}
+              <motion.text
+                x={lix} y={liy}
+                textAnchor="middle" dominantBaseline="middle"
+                fill={isLocked ? BASE.gold : BASE.steel}
+                fontSize={15}
+                fontFamily="Saira"
+                initial={{ opacity: 0.25 }}
+                animate={{ opacity: isLocked ? 1 : 0.3 }}
+                transition={{ duration: 0.4 }}
+                style={isLocked ? { filter: `drop-shadow(0 0 5px ${BASE.gold}66)` } : undefined}
+              >
+                {LETTERS[i]}
+              </motion.text>
 
               {/* Vertex label */}
               {isLit && (
@@ -232,6 +269,12 @@ export function ThinkingDisplay() {
             {stage.sub}
           </motion.div>
         </AnimatePresence>
+
+        {locked > 0 && (
+          <div style={{ fontFamily: 'Saira', fontSize: 13, color: BASE.gold, letterSpacing: '0.2em', marginTop: 2 }}>
+            {locked}/8 PHASES VERIFIED
+          </div>
+        )}
 
         {/* Progress dots */}
         <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>

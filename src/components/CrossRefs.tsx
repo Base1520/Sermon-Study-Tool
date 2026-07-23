@@ -1,7 +1,5 @@
-import { useState } from 'react'
-import { motion, AnimatePresence } from 'motion/react'
-import type { CrossRef, PhrasingAnalysis } from '../types/phrasing'
-import { BASE } from '../theme'
+import type { PhrasingAnalysis } from '../types/phrasing'
+import { BASE, FONT } from '../theme'
 
 interface Props {
   analysis: PhrasingAnalysis
@@ -11,25 +9,9 @@ interface Props {
   onPhraseModeChange: (mode: 'key' | 'all') => void
 }
 
-export function CrossRefs({ analysis, apiKey, onLoadRef, phraseMode, onPhraseModeChange }: Props) {
-  const [refs, setRefs] = useState<CrossRef[]>([])
-  const [loading, setLoading] = useState(false)
-  const [loaded, setLoaded] = useState(false)
-
-  async function fetch() {
-    if (loaded) return
-    setLoading(true)
-    try {
-      const result = await (window as any).electronAPI.getCrossRefs({
-        reference: analysis.reference,
-        mainTheme: analysis.mainTheme,
-        biblicalThemes: analysis.canonicalContext.biblicalThemes,
-        apiKey,
-      })
-      setRefs(result)
-      setLoaded(true)
-    } finally { setLoading(false) }
-  }
+// Cross-ref chips retired — the ⌒ Connections Map tile owns that job.
+// This strip now carries the phrase-mode toggle only.
+export function CrossRefs({ phraseMode, onPhraseModeChange }: Props) {
 
   return (
     <div style={{
@@ -48,7 +30,7 @@ export function CrossRefs({ analysis, apiKey, onLoadRef, phraseMode, onPhraseMod
           <button key={mode}
             onClick={() => onPhraseModeChange(mode)}
             style={{
-              fontFamily: 'JetBrains Mono', fontSize: 7.5, letterSpacing: '0.1em',
+              fontFamily: FONT.display, fontSize: 12, letterSpacing: '0.1em',
               padding: '3px 12px', borderRadius: 16, border: 'none',
               cursor: 'pointer',
               background: phraseMode === mode ? BASE.goldMid : 'transparent',
@@ -60,45 +42,9 @@ export function CrossRefs({ analysis, apiKey, onLoadRef, phraseMode, onPhraseMod
         ))}
       </div>
 
-      {/* Divider */}
-      <div style={{ width: 1, height: 16, background: BASE.borderDim, flexShrink: 0 }} />
-
-      <button
-        onClick={fetch}
-        disabled={loading}
-        style={{
-          fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.1em',
-          color: loaded ? BASE.steel : BASE.gold,
-          background: 'transparent', border: 'none', cursor: loading || loaded ? 'default' : 'pointer',
-          padding: '4px 0', flexShrink: 0, whiteSpace: 'nowrap',
-        }}>
-        {loading ? 'finding…' : loaded ? 'cross-refs' : '+ cross-refs'}
-      </button>
-
-      <AnimatePresence>
-        {refs.map((ref, i) => (
-          <motion.button
-            key={ref.reference}
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: i * 0.06 }}
-            title={ref.reason}
-            onClick={() => onLoadRef(ref.reference)}
-            style={{
-              fontFamily: 'Crimson Pro, serif', fontSize: 13,
-              color: BASE.bone,
-              background: BASE.goldDim,
-              border: `1px solid ${BASE.borderGold}`,
-              borderRadius: 6, padding: '3px 10px',
-              cursor: 'pointer', transition: 'all 0.15s',
-            }}
-            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = BASE.goldMid }}
-            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = BASE.goldDim }}
-          >
-            {ref.reference}
-          </motion.button>
-        ))}
-      </AnimatePresence>
+      <div style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.steel, letterSpacing: '0.12em', opacity: 0.7 }}>
+        CONNECTIONS → ⌒ MAP TILE ON THE DESK
+      </div>
     </div>
   )
 }

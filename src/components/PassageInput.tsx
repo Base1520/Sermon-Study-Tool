@@ -1,14 +1,22 @@
 import { useState, useEffect } from 'react'
-import { BASE } from '../theme'
+import { BASE, FONT } from '../theme'
 
 interface Props {
   onAnalyze: (text: string, reference: string) => void
   loading: boolean
   prefillRef?: string | null
   onPrefillUsed?: () => void
-  esvKey?: string
   onExpandPassage?: (text: string, reference: string) => void
+  esvKey?: string
 }
+
+const TRANSLATIONS = [
+  { id: 'esv', label: 'ESV', requiresKey: true  },
+  { id: 'kjv', label: 'KJV', requiresKey: false },
+  { id: 'nasb',label: 'ASV', requiresKey: false },
+  { id: 'ylt', label: 'YLT', requiresKey: false },
+  { id: 'dby', label: 'DBY', requiresKey: false },
+]
 
 const EXAMPLES = [
   { ref: 'Ephesians 2:8-10' },
@@ -22,25 +30,27 @@ const EXAMPLE_TEXTS: Record<string, string> = {
   'John 1:1-5': 'In the beginning was the Word, and the Word was with God, and the Word was God. He was in the beginning with God. All things were made through him, and without him was not any thing made that was made. In him was life, and the life was the light of men. The light shines in the darkness, and the darkness has not overcome it.',
 }
 
-export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, esvKey, onExpandPassage }: Props) {
-  const [reference, setReference] = useState('')
-  const [text, setText] = useState('')
-  const [fetching, setFetching] = useState(false)
-  const [fetchError, setFetchError] = useState<string | null>(null)
-  const [refFocused, setRefFocused] = useState(false)
+export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, onExpandPassage, esvKey }: Props) {
+  const [reference, setReference]     = useState('')
+  const [text, setText]               = useState('')
+  const [translation, setTranslation] = useState('esv')
+  const [fetching, setFetching]       = useState(false)
+  const [fetchError, setFetchError]   = useState<string | null>(null)
+  const [refFocused, setRefFocused]   = useState(false)
   const [textFocused, setTextFocused] = useState(false)
+
   const canAnalyze = !loading && text.trim() && reference.trim()
-  const canFetch = !!esvKey && reference.trim().length > 0 && !fetching && !loading
+  const canFetch   = reference.trim().length > 0 && !fetching && !loading
 
   useEffect(() => {
     if (prefillRef) { setReference(prefillRef); onPrefillUsed?.() }
   }, [prefillRef])
 
-  async function handleFetchEsv() {
+  async function handleFetch() {
     if (!canFetch) return
     setFetching(true); setFetchError(null)
     try {
-      const result = await (window as any).electronAPI.fetchEsv({ reference: reference.trim(), esvKey })
+      const result = await (window as any).electronAPI.fetchBible({ reference: reference.trim(), translation, esvKey: esvKey ?? '' })
       setText(result)
     } catch (e: any) {
       setFetchError(e?.message ?? 'Could not fetch passage')
@@ -49,7 +59,7 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, es
 
   const label = (text: string, active?: boolean) => (
     <div style={{
-      fontFamily: 'JetBrains Mono', fontSize: 7, letterSpacing: '0.16em',
+      fontFamily: FONT.display, fontSize: 12, letterSpacing: '0.14em',
       color: active ? BASE.gold : BASE.steel,
       marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6,
       transition: 'color 0.2s',
@@ -87,19 +97,19 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, es
           border-color: ${BASE.borderGold} !important;
           box-shadow: 0 0 24px ${BASE.gold}22 !important;
         }
+        .trans-btn { transition: all 0.15s; }
+        .trans-btn:hover { border-color: ${BASE.moss} !important; color: ${BASE.gold} !important; }
       `}</style>
 
       {/* Section header */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
-      }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
         <div style={{
           width: 3, height: 14, background: BASE.gold, flexShrink: 0,
           boxShadow: `0 0 6px ${BASE.gold}80`,
         }} />
         <span style={{
-          fontFamily: 'JetBrains Mono', fontSize: 7.5, letterSpacing: '0.18em',
-          color: BASE.gold, opacity: 0.8,
+          fontFamily: FONT.display, fontSize: 14, letterSpacing: '0.12em',
+          color: BASE.gold, opacity: 0.9, lineHeight: 1,
         }}>MISSION INTEL</span>
         <div style={{ flex: 1, height: 1, background: BASE.borderDim }} />
         <div style={{
@@ -110,49 +120,74 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, es
         }} />
       </div>
 
-      {/* Reference */}
+      {/* Reference + translation selector */}
       {label('TARGET REFERENCE', refFocused)}
-      <div style={{ display: 'flex', gap: 0, marginBottom: 14, alignItems: 'stretch' }}>
+      <div style={{ display: 'flex', gap: 0, marginBottom: 8, alignItems: 'stretch' }}>
         <input
           className="selectable hud-input"
           value={reference}
           onChange={e => { setReference(e.target.value); setFetchError(null) }}
-          onKeyDown={e => e.key === 'Enter' && handleFetchEsv()}
+          onKeyDown={e => e.key === 'Enter' && handleFetch()}
           onFocus={() => setRefFocused(true)}
           onBlur={() => setRefFocused(false)}
           placeholder="e.g. Romans 8:1"
-          style={{ ...inputStyle(refFocused), borderRight: esvKey ? 'none' : undefined }}
+          style={{ ...inputStyle(refFocused), borderRight: 'none', fontFamily: FONT.type, fontSize: 12, letterSpacing: '0.02em' }}
         />
-        {esvKey && (
-          <button
-            onClick={handleFetchEsv}
-            disabled={!canFetch}
-            title="Fetch from ESV"
-            style={{
-              padding: '0 11px',
-              background: canFetch ? `${BASE.olive}55` : `${BASE.olive}22`,
-              borderTop: `1px solid ${canFetch ? BASE.moss : BASE.borderDim}`,
-              borderRight: `1px solid ${canFetch ? BASE.moss : BASE.borderDim}`,
-              borderBottom: `1px solid ${canFetch ? BASE.moss : BASE.borderDim}`,
-              borderLeft: 'none',
-              borderRadius: 0,
-              cursor: canFetch ? 'pointer' : 'not-allowed',
-              color: canFetch ? BASE.gold : BASE.steel,
-              fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.08em',
-              display: 'flex', alignItems: 'center', gap: 4,
-              transition: 'all 0.2s', whiteSpace: 'nowrap',
-            }}
-          >
-            {fetching ? (
-              <span style={{
-                display: 'inline-block', width: 8, height: 8,
-                border: `1.5px solid ${BASE.moss}`, borderTopColor: BASE.gold,
-                borderRadius: '50%', animation: 'spin 0.8s linear infinite',
-              }} />
-            ) : <span>↓</span>}
-            esv
-          </button>
-        )}
+        <button
+          onClick={handleFetch}
+          disabled={!canFetch}
+          title={`Fetch ${translation.toUpperCase()}`}
+          style={{
+            padding: '0 12px',
+            background: canFetch ? `${BASE.olive}55` : `${BASE.olive}22`,
+            borderTop: `1px solid ${canFetch ? BASE.moss : BASE.borderDim}`,
+            borderRight: `1px solid ${canFetch ? BASE.moss : BASE.borderDim}`,
+            borderBottom: `1px solid ${canFetch ? BASE.moss : BASE.borderDim}`,
+            borderLeft: 'none',
+            borderRadius: 0,
+            cursor: canFetch ? 'pointer' : 'not-allowed',
+            color: canFetch ? BASE.gold : BASE.steel,
+            fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.08em',
+            display: 'flex', alignItems: 'center', gap: 5,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {fetching ? (
+            <span style={{
+              display: 'inline-block', width: 8, height: 8,
+              border: `1.5px solid ${BASE.moss}`, borderTopColor: BASE.gold,
+              borderRadius: '50%', animation: 'spin 0.8s linear infinite',
+            }} />
+          ) : <span style={{ fontSize: 9 }}>↓</span>}
+          {translation.toUpperCase()}
+        </button>
+      </div>
+
+      {/* Translation selector */}
+      <div style={{ display: 'flex', gap: 3, marginBottom: 14, alignItems: 'center' }}>
+        {TRANSLATIONS.map(t => {
+          const locked = t.requiresKey && !esvKey
+          const active = translation === t.id
+          return (
+            <button
+              key={t.id}
+              className="trans-btn"
+              onClick={() => setTranslation(t.id)}
+              title={locked ? 'Add your ESV key in Settings (⚙) to unlock' : t.label}
+              style={{
+                fontFamily: 'JetBrains Mono', fontSize: 7, letterSpacing: '0.1em',
+                padding: '2px 7px',
+                background: active ? `${BASE.gold}18` : 'transparent',
+                border: `1px solid ${active ? BASE.gold : BASE.borderDim}`,
+                color: locked ? `${BASE.steel}55` : active ? BASE.gold : BASE.steel,
+                cursor: 'pointer', borderRadius: 0,
+                opacity: locked ? 0.6 : 1,
+              }}
+            >
+              {t.label}{locked ? ' 🔑' : ''}
+            </button>
+          )
+        })}
       </div>
 
       {fetchError && (
@@ -191,7 +226,7 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, es
         onChange={e => setText(e.target.value)}
         onFocus={() => setTextFocused(true)}
         onBlur={() => setTextFocused(false)}
-        placeholder={esvKey ? 'Enter reference + ↓ esv to fetch…' : 'Paste passage text here…'}
+        placeholder="Enter reference above and ↓ to fetch, or paste text here…"
         style={{
           ...inputStyle(textFocused),
           resize: 'none', lineHeight: 1.65,
@@ -207,25 +242,18 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, es
         onClick={() => canAnalyze && onAnalyze(text.trim(), reference.trim())}
         disabled={!canAnalyze}
         style={{
-          marginTop: 12, width: '100%', padding: '11px 0',
-          background: canAnalyze ? `${BASE.olive}66` : `${BASE.olive}22`,
-          border: `1px solid ${canAnalyze ? BASE.moss : BASE.borderDim}`,
+          marginTop: 12, width: '100%', padding: '10px 0',
+          background: canAnalyze ? BASE.gold : `${BASE.olive}22`,
+          border: `1px solid ${canAnalyze ? BASE.gold : BASE.borderDim}`,
           borderRadius: 0,
           cursor: canAnalyze ? 'pointer' : 'not-allowed',
-          color: canAnalyze ? BASE.bone : BASE.steel,
-          fontFamily: 'JetBrains Mono',
-          fontSize: 8.5, letterSpacing: '0.18em',
+          color: canAnalyze ? BASE.bg : BASE.steel,
+          fontFamily: FONT.display,
+          fontSize: 15, letterSpacing: '0.12em', lineHeight: 1,
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
           position: 'relative', overflow: 'hidden',
         }}
       >
-        {/* left accent bar */}
-        {canAnalyze && (
-          <div style={{
-            position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,
-            background: BASE.gold, boxShadow: `0 0 8px ${BASE.gold}`,
-          }} />
-        )}
         {loading ? (
           <>
             <span style={{
@@ -237,7 +265,7 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, es
           </>
         ) : (
           <>
-            <span style={{ color: canAnalyze ? BASE.gold : BASE.steel }}>◈</span>
+            <span style={{ color: canAnalyze ? BASE.bg : BASE.steel, fontSize: 11 }}>◈</span>
             SEND IT
           </>
         )}
@@ -246,7 +274,7 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, es
       {/* Example passages */}
       <div style={{ marginTop: 16 }}>
         <div style={{
-          fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel,
+          fontFamily: FONT.display, fontSize: 12, color: BASE.steel,
           letterSpacing: '0.14em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6,
         }}>
           <span style={{ color: BASE.moss, opacity: 0.6 }}>[ </span>SAMPLE TARGETS<span style={{ color: BASE.moss, opacity: 0.6 }}> ]</span>

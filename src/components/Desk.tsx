@@ -9,12 +9,15 @@ import '@xyflow/react/dist/style.css'
 import { motion, AnimatePresence } from 'motion/react'
 import type { PhrasingAnalysis, Phrase, ClauseType } from '../types/phrasing'
 import { CLAUSE_COLORS } from '../services/colors'
-import { BASE } from '../theme'
+import { BASE, FONT } from '../theme'
 import { TopoMap } from './TopoMap'
 import { MonarchyCardNode } from './MonarchyCard'
 import { KingsListNode } from './KingsList'
 import { WorshipStructureNode } from './WorshipStructure'
+import { CrossRefArcs } from './CrossRefArcs'
 import { LineageViewerNode } from './LineageViewer'
+import { ParallelPanel } from './ParallelPanel'
+import { SlideDeck } from './SlideDeck'
 
 // ── Layout constants ───────────────────────────────────────────────────────────
 const NODE_W = 320
@@ -53,9 +56,11 @@ interface Props {
   selectedPhraseId: string | null
   onSelectPhrase: (id: string | null) => void
   apiKey: string
+  esvKey?: string
   historyId: string | null
   initialDraft?: string
   onDraftChange?: (text: string) => void
+  onLoadRef?: (ref: string) => void
   phraseMode?: 'key' | 'all'
   onPhraseModeChange?: (mode: 'key' | 'all') => void
 }
@@ -71,15 +76,15 @@ function AnnotationModal({ phraseId, initial, onSave, onClose }: {
       <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.96 }}
         transition={{ duration: 0.15 }} onClick={e => e.stopPropagation()}
         style={{ background: `${BASE.bg}f8`, backdropFilter: 'blur(32px)', border: `1px solid ${BASE.borderGold}`, borderRadius: 16, padding: 24, width: 360 }}>
-        <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 10 }}>study note</div>
+        <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.steel, letterSpacing: '0.12em', marginBottom: 10 }}>STUDY NOTE</div>
         <textarea autoFocus value={val} onChange={e => setVal(e.target.value)} placeholder="Your observation on this clause…"
           style={{ width: '100%', height: 100, background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`, borderRadius: 10, padding: '10px 12px', color: BASE.bone, fontFamily: 'Crimson Pro, serif', fontSize: 14, resize: 'none', outline: 'none', lineHeight: 1.6, boxSizing: 'border-box' }} />
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button onClick={() => { onSave(phraseId, val); onClose() }}
-            style={{ flex: 1, padding: '9px 0', borderRadius: 10, cursor: 'pointer', background: BASE.goldMid, border: `1px solid ${BASE.borderGold}`, color: BASE.gold, fontFamily: 'Crimson Pro, serif', fontSize: 14 }}>Save</button>
+            style={{ flex: 1, padding: '9px 0', borderRadius: 10, cursor: 'pointer', background: BASE.gold, border: `1px solid ${BASE.gold}`, color: BASE.bg, fontFamily: FONT.display, fontSize: 14, letterSpacing: '0.12em' }}>SAVE</button>
           {initial && (
             <button onClick={() => { onSave(phraseId, ''); onClose() }}
-              style={{ padding: '9px 16px', borderRadius: 10, cursor: 'pointer', background: 'transparent', border: `1px solid ${BASE.red}44`, color: BASE.red, fontFamily: 'Crimson Pro, serif', fontSize: 14 }}>Remove</button>
+              style={{ padding: '9px 16px', borderRadius: 10, cursor: 'pointer', background: 'transparent', border: `1px solid ${BASE.red}44`, color: BASE.red, fontFamily: FONT.display, fontSize: 14, letterSpacing: '0.12em' }}>REMOVE</button>
           )}
         </div>
       </motion.div>
@@ -204,9 +209,9 @@ function OutlineCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={280} minHeight={120} handleStyle={hs} lineStyle={ls} />
-      <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+      <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, display: 'flex', alignItems: 'center', gap: 10, cursor: 'grab', background: `${BASE.khaki}08`, flexShrink: 0 }}>
-        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em' }}>SERMON OUTLINE</span>
+        <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>SERMON OUTLINE</span>
         <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.khaki, marginLeft: 'auto' }}>{reference}</span>
       </div>
       <div className="nowheel" style={{ padding: '14px 18px', overflowY: 'auto', flex: 1 }}>
@@ -240,20 +245,20 @@ function ThemeCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={240} minHeight={120} handleStyle={hs} lineStyle={ls} />
-      <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+      <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, cursor: 'grab', background: `${BASE.khaki}08`, flexShrink: 0 }}>
-        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em' }}>CANONICAL CONTEXT</span>
+        <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>CANONICAL CONTEXT</span>
       </div>
       <div className="nowheel" style={{ padding: '14px 18px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 13 }}>
         {genre && (
           <div>
-            <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 4 }}>GENRE</div>
+            <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 4 }}>GENRE</div>
             <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 14, color: BASE.gold }}>{genre.genre}</span>
             {genre.subgenre && <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel }}> · {genre.subgenre}</span>}
           </div>
         )}
         <div>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 5 }}>THEMES</div>
+          <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 5 }}>THEMES</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {(biblicalThemes ?? []).map((t: string) => (
               <span key={t} style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.khaki, background: `${BASE.khaki}10`, border: `1px solid ${BASE.khaki}25`, borderRadius: 10, padding: '1px 9px' }}>{t}</span>
@@ -262,7 +267,7 @@ function ThemeCardNode({ data }: NodeProps) {
         </div>
         {keyWords?.length > 0 && (
           <div>
-            <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 5 }}>KEY WORDS</div>
+            <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 5 }}>KEY WORDS</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
               {keyWords.map((w: string) => (
                 <span key={w} style={{ fontFamily: 'JetBrains Mono', fontSize: 9, color: BASE.gold, background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`, borderRadius: 8, padding: '2px 8px' }}>{w}</span>
@@ -270,9 +275,9 @@ function ThemeCardNode({ data }: NodeProps) {
             </div>
           </div>
         )}
-        {bookTheme && <div><div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3 }}>BOOK THEME</div><p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, margin: 0 }}>{bookTheme}</p></div>}
-        {passageRole && <div><div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3 }}>PASSAGE ROLE</div><p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, margin: 0 }}>{passageRole}</p></div>}
-        {canonicalConnections && <div><div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3 }}>CANONICAL CONNECTIONS</div><p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, margin: 0 }}>{canonicalConnections}</p></div>}
+        {bookTheme && <div><div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3 }}>BOOK THEME</div><p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, margin: 0 }}>{bookTheme}</p></div>}
+        {passageRole && <div><div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3 }}>PASSAGE ROLE</div><p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, margin: 0 }}>{passageRole}</p></div>}
+        {canonicalConnections && <div><div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3 }}>CANONICAL CONNECTIONS</div><p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, margin: 0 }}>{canonicalConnections}</p></div>}
       </div>
       </div>
     </>
@@ -328,13 +333,13 @@ function DraftCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={380} minHeight={200} handleStyle={hs} lineStyle={ls} />
-      <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+      <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '10px 16px', borderBottom: `1px solid ${BASE.khaki}20`, cursor: 'grab', display: 'flex', alignItems: 'center', gap: 10, background: `${BASE.khaki}08`, flexShrink: 0 }}>
-        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em' }}>SERMON MANUSCRIPT</span>
+        <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>SERMON MANUSCRIPT</span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
           {checking && <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.steel }}>checking…</span>}
           {!checking && flagged.length > 0 && <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.red, background: `${BASE.red}12`, border: `1px solid ${BASE.red}30`, borderRadius: 8, padding: '1px 8px' }}>{flagged.length} flag{flagged.length > 1 ? 's' : ''}</span>}
-          {!generating && <button className="nodrag" onClick={generate} style={{ fontFamily: 'JetBrains Mono', fontSize: 7, letterSpacing: '0.1em', color: BASE.gold, background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`, borderRadius: 8, padding: '4px 10px', cursor: 'pointer' }}>{text ? '↺ REGENERATE' : '✦ GENERATE DRAFT'}</button>}
+          {!generating && <button className="nodrag" onClick={generate} style={{ fontFamily: FONT.display, fontSize: 14, letterSpacing: '0.12em', color: BASE.gold, background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`, borderRadius: 8, padding: '3px 10px', cursor: 'pointer' }}>{text ? '↺ REGENERATE' : '✦ GENERATE DRAFT'}</button>}
         </div>
       </div>
       {generating && (
@@ -381,9 +386,9 @@ function CulturalNotesCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={280} minHeight={200} handleStyle={hs} lineStyle={ls} />
-      <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+      <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, cursor: 'grab', background: `${BASE.khaki}08`, flexShrink: 0, display: 'flex', alignItems: 'center' }}>
-        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em' }}>CULTURAL CONTEXT</span>
+        <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>CULTURAL CONTEXT</span>
         <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: `${BASE.khaki}60`, marginLeft: 'auto' }}>{(notes ?? []).length} notes</span>
       </div>
       <div className="nowheel" style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
@@ -414,12 +419,12 @@ function NoteCardNode({ data }: NodeProps) {
   const hs = { width: 14, height: 14, borderRadius: 4, background: '#2c3820', border: `1px solid ${BASE.khaki}30` }
   const ls = { border: `1px solid ${BASE.khaki}20` }
   return (
-    <div style={{ position: 'relative', width: w, height: h, overflow: 'hidden', borderRadius: 16, background: '#2c3820', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+    <div style={{ position: 'relative', width: w, height: h, overflow: 'hidden', borderRadius: 16, background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <NodeResizer minWidth={200} minHeight={150} handleStyle={hs} lineStyle={ls} />
       <div className="nodrag" style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, cursor: 'grab', background: `${BASE.khaki}08`, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
         <input value={title} onChange={e => setTitle(e.target.value.toUpperCase())}
           onKeyDown={e => e.stopPropagation()}
-          style={{ background: 'transparent', border: 'none', outline: 'none', fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.14em', width: '100%', cursor: 'text' }} />
+          style={{ background: 'transparent', border: 'none', outline: 'none', fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em', width: '100%', cursor: 'text' }} />
         <CloseBtn color={BASE.khaki} />
       </div>
       <textarea className="nodrag nowheel" value={text} onChange={e => setText(e.target.value)}
@@ -443,10 +448,10 @@ function MapCardNode({ data }: NodeProps) {
   return (
     <>
       <NodeResizer minWidth={480} minHeight={320} handleStyle={hs} lineStyle={ls} />
-      <div style={{ width: w, height: h, display: 'flex', flexDirection: 'column', borderRadius: 16, overflow: 'hidden', border: `2px solid ${KHAKI}55`, boxShadow: `0 0 0 1px ${KHAKI}18`, boxSizing: 'border-box' }}>
+      <div style={{ width: w, height: h, display: 'flex', flexDirection: 'column', borderRadius: 16, overflow: 'hidden', border: `2px solid ${KHAKI}55`, boxShadow: `0 0 0 1px ${KHAKI}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${KHAKI}1c`, boxSizing: 'border-box' }}>
         {/* Header */}
         <div style={{ height: headerH, padding: '0 16px', borderBottom: `1px solid ${KHAKI}20`, cursor: 'grab', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, background: `#2c3820`, boxSizing: 'border-box' }}>
-          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: KHAKI, letterSpacing: '0.14em' }}>⊕ THEATRE OF OPERATIONS</span>
+          <span style={{ fontFamily: FONT.display, fontSize: 13, color: KHAKI, letterSpacing: '0.1em' }}>⊕ THEATRE OF OPERATIONS</span>
           <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6, color: `${KHAKI}55`, letterSpacing: '0.1em' }}>
             {geoReferences.length > 0 ? `${geoReferences.length} LOCATIONS MARKED` : 'ANE · ROMAN WORLD'}
           </span>
@@ -476,6 +481,81 @@ function draftToText(draft: any): string {
   return `TITLE: ${draft.title}\nEMOTIONAL REGISTER: ${draft.emotionalRegister}\n\nBIG IDEA\n${draft.mainIdea}\n\n---\n\nINTRODUCTION\n${draft.introduction}\n\n---\n\n${points}\n\n---\n\nGOSPEL BRIDGE\n${draft.gospelBridge}\n\n---\n\nCONCLUSION\n${draft.conclusion}`
 }
 
+// ── Slide Deck Card Node ──────────────────────────────────────────────────────
+function SlideDeckCardNode({ data }: NodeProps) {
+  const { analysis, apiKey = '' } = data as any
+  const { w, h } = useCardDims(860, 560)
+  const hs = { width: 8, height: 8, background: 'transparent', border: 'none' }
+  const ls = { border: `1px solid ${BASE.khaki}18` }
+  if (!analysis) return null
+  return (
+    <>
+      <NodeResizer minWidth={520} minHeight={380} handleStyle={hs} lineStyle={ls} />
+      <div style={{ width: w, height: h, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, borderRadius: 16, overflow: 'hidden', boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c` }}>
+        <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, cursor: 'grab', background: `${BASE.khaki}08` }}>
+          <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>⊟ SLIDE DECK</span>
+          <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.khaki, opacity: 0.6 }}>{analysis.reference}</span>
+          <div style={{ flex: 1 }} />
+          <CloseBtn color={BASE.khaki} />
+        </div>
+        <div className="nodrag nowheel" style={{ flex: 1, minHeight: 0 }}>
+          <SlideDeck analysis={analysis} apiKey={apiKey} />
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ── Parallel Translation Card Node ────────────────────────────────────────────
+function ParallelCardNode({ data }: NodeProps) {
+  const { reference = '', esvKey = '' } = data as any
+  const { w, h } = useCardDims(860, 500)
+  const hs = { width: 8, height: 8, background: 'transparent', border: 'none' }
+  const ls = { border: `1px solid ${BASE.khaki}18` }
+
+  return (
+    <>
+      <NodeResizer minWidth={520} minHeight={340} handleStyle={hs} lineStyle={ls} />
+      <div style={{ width: w, height: h, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, borderRadius: 16, overflow: 'hidden', boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c` }}>
+        <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, cursor: 'grab', background: `${BASE.khaki}08` }}>
+          <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>❖ PARALLEL TEXT</span>
+          <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.khaki, opacity: 0.6 }}>{reference}</span>
+          <div style={{ flex: 1 }} />
+          <CloseBtn color={BASE.khaki} />
+        </div>
+        <div className="nodrag nowheel" style={{ flex: 1, minHeight: 0 }}>
+          <ParallelPanel reference={reference} esvKey={esvKey} />
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ── Cross-Reference Arc Map Node ──────────────────────────────────────────────
+function CrossRefArcsNode({ data }: NodeProps) {
+  const { reference = '', mainTheme = '', biblicalThemes = [], apiKey = '', onLoadRef } = data as any
+  const { w, h } = useCardDims(900, 430)
+  const hs = { width: 8, height: 8, background: 'transparent', border: 'none' }
+  const ls = { border: `1px solid ${BASE.khaki}18` }
+
+  return (
+    <>
+      <NodeResizer minWidth={620} minHeight={320} handleStyle={hs} lineStyle={ls} />
+      <div style={{ width: w, height: h, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, borderRadius: 16, overflow: 'hidden', boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c` }}>
+        <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, cursor: 'grab', background: `${BASE.khaki}08` }}>
+          <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>⌒ CONNECTIONS MAP</span>
+          <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.khaki, opacity: 0.6 }}>{reference}</span>
+          <div style={{ flex: 1 }} />
+          <CloseBtn color={BASE.khaki} />
+        </div>
+        <div className="nodrag nowheel" style={{ flex: 1, minHeight: 0 }}>
+          <CrossRefArcs reference={reference} mainTheme={mainTheme} biblicalThemes={biblicalThemes} apiKey={apiKey} onLoadRef={onLoadRef} />
+        </div>
+      </div>
+    </>
+  )
+}
+
 // ── Node / edge type registry ──────────────────────────────────────────────────
 const nodeTypes = {
   phraseNode: PhraseNode,
@@ -485,6 +565,9 @@ const nodeTypes = {
   culturalNotesCard: CulturalNotesCardNode,
   noteCard: NoteCardNode,
   mapCard: MapCardNode,
+  parallelCard: ParallelCardNode,
+  crossRefArcs: CrossRefArcsNode,
+  slideDeckCard: SlideDeckCardNode,
   monarchyCard: MonarchyCardNode,
   kingsList: KingsListNode,
   worshipStructure: WorshipStructureNode,
@@ -641,7 +724,7 @@ function Legend({ phrases, selectedId, onSelect }: { phrases: Phrase[]; selected
   const types = [...new Set(phrases.map(p => p.type))]
   return (
     <div style={{ background: `${BASE.bg}cc`, backdropFilter: 'blur(20px)', border: `1px solid ${BASE.borderDim}`, borderRadius: 12, padding: '10px 12px' }}>
-      <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.12em', marginBottom: 5 }}>clause types</div>
+      <div style={{ fontFamily: FONT.display, fontSize: 12, color: BASE.steel, letterSpacing: '0.12em', marginBottom: 5 }}>CLAUSE TYPES</div>
       {types.map(t => {
         const color = CLAUSE_COLORS[t as ClauseType]
         const active = selectedId && phrases.find(p => p.type === t && p.id === selectedId)
@@ -662,10 +745,26 @@ function Legend({ phrases, selectedId, onSelect }: { phrases: Phrase[]; selected
 function DeskInner({
   analysis, annotations, onAnnotate, onWordClick,
   culturalPhraseIds, selectedPhraseId, onSelectPhrase,
-  apiKey, historyId, initialDraft, onDraftChange,
+  apiKey, esvKey, historyId, initialDraft, onDraftChange, onLoadRef,
   phraseMode: phraseModeprop, onPhraseModeChange,
 }: Props) {
-  const { fitView, getViewport, setCenter } = useReactFlow()
+  const { fitView, getViewport, setCenter, setViewport } = useReactFlow()
+
+  // Text-size setting also scales the canvas content — fit first, then zoom in
+  const uiScaleRef = { current: 1 } as { current: number }
+  ;(window as any).electronAPI?.getUiZoom?.().then((z: number) => { uiScaleRef.current = z || 1 }).catch(() => {})
+  function fitThenScale(delay: number, duration: number) {
+    setTimeout(() => {
+      fitView({ duration: 0, padding: 0.08, maxZoom: 0.85 })
+      const s = uiScaleRef.current
+      if (s > 1.01) {
+        setTimeout(() => {
+          const vp = getViewport()
+          setViewport({ ...vp, zoom: vp.zoom * s }, { duration })
+        }, 30)
+      }
+    }, delay)
+  }
   const [annotatingId, setAnnotatingId] = useState<string | null>(null)
   const [annotationInit, setAnnotationInit] = useState('')
   const [phraseModeLocal, setPhraseModeLocal] = useState<'key' | 'all'>('key')
@@ -707,7 +806,7 @@ function DeskInner({
 
     // Auto-fit when switching to a new passage
     if (isNewPassage) {
-      setTimeout(() => fitView({ duration: 500, padding: 0.08, maxZoom: 0.85 }), 80)
+      fitThenScale(80, 400)
     }
   }, [analysis, selectedPhraseId, annotations, culturalPhraseIds, phraseMode])
 
@@ -720,23 +819,28 @@ function DeskInner({
     }
   }, [])
 
-  function addTile(type: 'noteCard' | 'mapCard' | 'monarchyCard' | 'kingsList' | 'worshipStructure' | 'lineageViewer') {
+  function addTile(type: 'noteCard' | 'mapCard' | 'parallelCard' | 'slideDeckCard' | 'crossRefArcs' | 'monarchyCard' | 'kingsList' | 'worshipStructure' | 'lineageViewer') {
     const id = `${type}-${Date.now()}`
     const config = {
       noteCard:     { w: 300,  h: 260, data: {} },
       mapCard:      { w: 820,  h: 540, data: { geoReferences: (analysis as any).geoReferences ?? [] } },
-      monarchyCard: { w: 1100, h: 580, data: { reference: analysis.reference } },
+      parallelCard:  { w: 860,  h: 500, data: { reference: analysis.reference, esvKey } },
+      slideDeckCard: { w: 860,  h: 560, data: { analysis, apiKey } },
+      crossRefArcs:  { w: 900,  h: 430, data: { reference: analysis.reference, mainTheme: analysis.mainTheme, biblicalThemes: analysis.canonicalContext?.biblicalThemes ?? [], apiKey, onLoadRef } },
+      monarchyCard:  { w: 1100, h: 580, data: { reference: analysis.reference } },
       kingsList:        { w: 520,  h: 560, data: {} },
       worshipStructure: { w: 560,  h: 560, data: {} },
       lineageViewer:    { w: 500,  h: 580, data: {} },
     }[type]
-    // Place tiles at known canvas positions relative to the fixed layout
-    const BELOW_Y = DRAFT_Y + CARD_H_BOT + 60   // below the bottom row of cards
-    const RIGHT_X = CARD_X2 + CARD_W2 + 60      // to the right of col-2
+    const BELOW_Y = DRAFT_Y + CARD_H_BOT + 60
+    const RIGHT_X = CARD_X2 + CARD_W2 + 60
     const notePositions: Record<string, { x: number; y: number }> = {
       noteCard:     { x: CARD_X,  y: BELOW_Y },
       mapCard:      { x: RIGHT_X, y: PHRASE_Y },
-      monarchyCard: { x: RIGHT_X, y: PHRASE_Y },
+      parallelCard:  { x: RIGHT_X, y: PHRASE_Y },
+      slideDeckCard: { x: RIGHT_X, y: PHRASE_Y },
+      crossRefArcs:  { x: RIGHT_X, y: PHRASE_Y },
+      monarchyCard:  { x: RIGHT_X, y: PHRASE_Y },
       kingsList:        { x: RIGHT_X, y: PHRASE_Y },
       worshipStructure: { x: RIGHT_X, y: PHRASE_Y },
       lineageViewer:    { x: RIGHT_X, y: PHRASE_Y },
@@ -766,7 +870,7 @@ function DeskInner({
     )
     setNodes(defaultNodes)
     setEdges(defaultEdges)
-    setTimeout(() => fitView({ duration: 500, padding: 0.08, maxZoom: 0.85 }), 80)
+    fitThenScale(80, 400)
   }
 
   return (
@@ -821,23 +925,26 @@ function DeskInner({
             {addOpen && (
               <div style={{ position: 'absolute', bottom: '100%', left: 0, marginBottom: 6, background: `${BASE.bgCard}f4`, backdropFilter: 'blur(24px)', border: `1px solid ${BASE.borderDim}`, borderRadius: 10, overflow: 'hidden', minWidth: 160 }}>
                 {([
-                  { type: 'noteCard' as const,     label: '✦ BLANK NOTE',  color: BASE.khaki },
-                  { type: 'mapCard' as const,      label: '⊕ GEO MAP',     color: BASE.khaki },
-                  { type: 'monarchyCard' as const, label: '♚ MONARCHY',    color: BASE.gold  },
-                  { type: 'kingsList' as const,        label: '♛ KINGS LIST',   color: BASE.gold  },
-                  { type: 'worshipStructure' as const, label: '✦ WORSHIP PLAN',   color: BASE.gold  },
-                  { type: 'lineageViewer'    as const, label: '⊳ LINEAGE VIEWER', color: BASE.gold  },
-                ] as const).map(({ type, label, color }) => (
+                  { type: 'noteCard'        as const, label: '✎  BLANK NOTE'     },
+                  { type: 'mapCard'         as const, label: '⊕  GEO MAP'        },
+                  { type: 'parallelCard'    as const, label: '❖  PARALLEL TEXT'  },
+                  { type: 'crossRefArcs'    as const, label: '⌒  CONNECTIONS MAP' },
+                  { type: 'slideDeckCard'   as const, label: '⊟  SLIDE DECK'     },
+                  { type: 'worshipStructure'as const, label: '⛩  WORSHIP PLAN'   },
+                  { type: 'monarchyCard'    as const, label: '♚  MONARCHY'       },
+                  { type: 'kingsList'       as const, label: '♛  KINGS LIST'     },
+                  { type: 'lineageViewer'   as const, label: '⊳  LINEAGE VIEWER' },
+                ] as const).map(({ type, label }) => (
                   <button key={type} onClick={() => addTile(type)}
-                    style={{ display: 'block', width: '100%', padding: '9px 14px', background: 'transparent', border: 'none', borderBottom: type === 'noteCard' ? `1px solid ${BASE.borderDim}` : 'none', cursor: 'pointer', fontFamily: 'JetBrains Mono', fontSize: 7.5, color, letterSpacing: '0.1em', textAlign: 'left', transition: 'background 0.15s' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = `${BASE.gold}0a`)}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    style={{ display: 'block', width: '100%', padding: '9px 14px', background: 'transparent', border: 'none', borderBottom: type === 'noteCard' ? `1px solid ${BASE.borderDim}` : 'none', cursor: 'pointer', fontFamily: FONT.display, fontSize: 13, color: BASE.gold, letterSpacing: '0.1em', textAlign: 'left', transition: 'background 0.15s' }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = `${BASE.gold}14` }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
                   >{label}</button>
                 ))}
               </div>
             )}
             <button onClick={() => setAddOpen(o => !o)}
-              style={{ fontFamily: 'JetBrains Mono', fontSize: 7.5, color: addOpen ? BASE.gold : BASE.steel, letterSpacing: '0.12em', background: `${BASE.bgCard}cc`, border: `1px solid ${addOpen ? BASE.borderGold : BASE.borderDim}`, borderRadius: 8, padding: '6px 12px', cursor: 'pointer', transition: 'all 0.15s' }}>
+              style={{ fontFamily: FONT.display, fontSize: 13, color: addOpen ? BASE.gold : BASE.steel, letterSpacing: '0.12em', background: `${BASE.bgCard}cc`, border: `1px solid ${addOpen ? BASE.borderGold : BASE.borderDim}`, borderRadius: 8, padding: '6px 12px', cursor: 'pointer', transition: 'all 0.15s' }}>
               {addOpen ? '✕ CLOSE' : '+ ADD TILE'}
             </button>
           </div>

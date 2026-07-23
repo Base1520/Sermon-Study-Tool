@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import { BASE } from '../theme'
+import { BASE, FONT } from '../theme'
 import type { PhrasingAnalysis } from '../types/phrasing'
 
 interface SeriesPassage {
@@ -116,15 +116,26 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
       <div style={{ width: 280, background: `${BASE.bg}f8`, borderRight: `1px solid ${BASE.borderGold}`, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* Gold hairline top */}
+        <div style={{
+          height: 2, flexShrink: 0,
+          background: `linear-gradient(90deg, transparent, ${BASE.gold}88, ${BASE.gold}, ${BASE.gold}88, transparent)`,
+        }} />
         {/* Sidebar header */}
-        <div style={{ padding: '20px 16px 14px', borderBottom: `1px solid ${BASE.borderDim}`, flexShrink: 0 }}>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.gold, letterSpacing: '0.14em', marginBottom: 8 }}>SERMON SERIES</div>
+        <div style={{ padding: '16px 16px 14px', borderBottom: `1px solid ${BASE.borderDim}`, flexShrink: 0, background: `${BASE.olive}30` }}>
+          <div style={{ display: 'flex', alignItems: 'stretch', gap: 10, marginBottom: 12 }}>
+            <div style={{ width: 3, background: BASE.gold, borderRadius: 2 }} />
+            <div>
+              <div style={{ fontFamily: FONT.display, fontSize: 21, color: BASE.bone, letterSpacing: '0.1em', lineHeight: 1 }}>SERMON SERIES</div>
+              <div style={{ fontFamily: FONT.mono, fontSize: 6.5, color: BASE.steel, letterSpacing: '0.22em', marginTop: 4 }}>PLANNING · MULTI-WEEK ARCS</div>
+            </div>
+          </div>
           <button
             onClick={() => setCreating(true)}
             style={{
-              width: '100%', padding: '8px 12px', borderRadius: 8, cursor: 'pointer',
+              width: '100%', padding: '7px 12px', borderRadius: 8, cursor: 'pointer',
               background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`,
-              fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.gold, letterSpacing: '0.1em',
+              fontFamily: FONT.display, fontSize: 14, color: BASE.gold, letterSpacing: '0.12em',
             }}
           >
             + NEW SERIES
@@ -134,7 +145,7 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
         {/* Series list */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
           {series.length === 0 && !creating && (
-            <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.steel, padding: '16px', lineHeight: 1.6 }}>
+            <p style={{ fontFamily: FONT.serif, fontSize: 13, color: BASE.steel, padding: '16px', lineHeight: 1.6 }}>
               No series yet. Create one to group passages and track thematic threads across a preaching series.
             </p>
           )}
@@ -149,15 +160,15 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
                 transition: 'all 0.15s',
               }}
             >
-              <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 14, color: BASE.bone }}>{s.name}</div>
-              <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.08em', marginTop: 3 }}>
+              <div style={{ fontFamily: FONT.serif, fontSize: 14, color: BASE.bone }}>{s.name}</div>
+              <div style={{ fontFamily: FONT.mono, fontSize: 7, color: BASE.steel, letterSpacing: '0.08em', marginTop: 3 }}>
                 {s.passages.length} passage{s.passages.length !== 1 ? 's' : ''}
               </div>
             </button>
           ))}
         </div>
 
-        <button onClick={onClose} style={{ padding: '14px 16px', background: 'none', border: 'none', borderTop: `1px solid ${BASE.borderDim}`, cursor: 'pointer', fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.1em', flexShrink: 0 }}>
+        <button onClick={onClose} style={{ padding: '12px 16px', background: 'none', border: 'none', borderTop: `1px solid ${BASE.borderDim}`, cursor: 'pointer', fontFamily: FONT.display, fontSize: 13, color: BASE.steel, letterSpacing: '0.14em', flexShrink: 0 }}>
           CLOSE
         </button>
       </div>
@@ -169,25 +180,25 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
             <motion.div key="create" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
               style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <div style={{ width: 440, background: `${BASE.bgCard}f0`, border: `1px solid ${BASE.borderGold}`, borderRadius: 16, padding: 32 }}>
-                <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.gold, letterSpacing: '0.14em', marginBottom: 16 }}>NEW SERIES</div>
+                <div style={{ fontFamily: FONT.display, fontSize: 15, color: BASE.gold, letterSpacing: '0.12em', marginBottom: 16 }}>NEW SERIES</div>
                 <input
                   autoFocus value={newName} onChange={e => setNewName(e.target.value)}
                   placeholder="Series name (e.g. The Gospel of Mark)"
-                  style={{ width: '100%', background: BASE.goldDim, border: `1px solid ${BASE.borderDim}`, borderRadius: 10, padding: '11px 14px', fontSize: 14, color: BASE.bone, fontFamily: 'Crimson Pro, serif', outline: 'none', boxSizing: 'border-box', marginBottom: 12 }}
+                  style={{ width: '100%', background: BASE.goldDim, border: `1px solid ${BASE.borderDim}`, borderRadius: 10, padding: '11px 14px', fontSize: 14, color: BASE.bone, fontFamily: FONT.serif, outline: 'none', boxSizing: 'border-box', marginBottom: 12 }}
                   onKeyDown={e => e.key === 'Enter' && createSeries()}
                 />
                 <textarea
                   value={newDesc} onChange={e => setNewDesc(e.target.value)}
                   placeholder="Brief description or preaching goal (optional)"
                   rows={2}
-                  style={{ width: '100%', background: BASE.goldDim, border: `1px solid ${BASE.borderDim}`, borderRadius: 10, padding: '11px 14px', fontSize: 13, color: BASE.bone, fontFamily: 'Crimson Pro, serif', outline: 'none', resize: 'none', boxSizing: 'border-box', marginBottom: 20 }}
+                  style={{ width: '100%', background: BASE.goldDim, border: `1px solid ${BASE.borderDim}`, borderRadius: 10, padding: '11px 14px', fontSize: 13, color: BASE.bone, fontFamily: FONT.serif, outline: 'none', resize: 'none', boxSizing: 'border-box', marginBottom: 20 }}
                 />
                 <div style={{ display: 'flex', gap: 10 }}>
-                  <button onClick={createSeries} style={{ flex: 1, padding: '10px', borderRadius: 10, cursor: 'pointer', background: BASE.goldMid, border: `1px solid ${BASE.borderGold}`, color: BASE.gold, fontFamily: 'Crimson Pro, serif', fontSize: 14 }}>
-                    Create Series
+                  <button onClick={createSeries} style={{ flex: 1, padding: '9px', borderRadius: 10, cursor: 'pointer', background: BASE.gold, border: 'none', color: BASE.bg, fontFamily: FONT.display, fontSize: 15, letterSpacing: '0.12em' }}>
+                    CREATE SERIES
                   </button>
-                  <button onClick={() => setCreating(false)} style={{ padding: '10px 18px', borderRadius: 10, cursor: 'pointer', background: 'none', border: `1px solid ${BASE.borderDim}`, color: BASE.steel, fontFamily: 'Crimson Pro, serif', fontSize: 14 }}>
-                    Cancel
+                  <button onClick={() => setCreating(false)} style={{ padding: '9px 18px', borderRadius: 10, cursor: 'pointer', background: 'none', border: `1px solid ${BASE.borderDim}`, color: BASE.steel, fontFamily: FONT.display, fontSize: 14, letterSpacing: '0.1em' }}>
+                    CANCEL
                   </button>
                 </div>
               </div>
@@ -197,8 +208,8 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
           {!creating && !selected && (
             <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <div style={{ textAlign: 'center', maxWidth: 380 }}>
-                <div style={{ fontFamily: 'JetBrains Mono', fontSize: 40, color: BASE.borderDim, marginBottom: 20 }}>≡</div>
-                <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 16, color: BASE.steel, lineHeight: 1.7 }}>
+                <div style={{ fontFamily: FONT.mono, fontSize: 40, color: BASE.borderDim, marginBottom: 20 }}>≡</div>
+                <p style={{ fontFamily: FONT.serif, fontSize: 16, color: BASE.steel, lineHeight: 1.7 }}>
                   Select a series to manage passages, or create a new one to start tracking a preaching series.
                 </p>
               </div>
@@ -210,10 +221,10 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
               {/* Series header */}
               <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 28 }}>
                 <div>
-                  <h1 style={{ fontFamily: 'Crimson Pro, serif', fontSize: 28, color: BASE.bone, fontWeight: 400, margin: 0 }}>{selected.name}</h1>
-                  {selected.description && <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 14, color: BASE.steel, margin: '6px 0 0' }}>{selected.description}</p>}
+                  <h1 style={{ fontFamily: FONT.display, fontSize: 30, color: BASE.bone, fontWeight: 400, letterSpacing: '0.08em', lineHeight: 1, margin: 0 }}>{selected.name}</h1>
+                  {selected.description && <p style={{ fontFamily: FONT.serif, fontSize: 14, color: BASE.steel, margin: '6px 0 0' }}>{selected.description}</p>}
                 </div>
-                <button onClick={() => deleteSeries(selected.id)} style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, background: 'none', border: `1px solid ${BASE.borderDim}`, borderRadius: 6, padding: '5px 10px', cursor: 'pointer', letterSpacing: '0.08em' }}>
+                <button onClick={() => deleteSeries(selected.id)} style={{ fontFamily: FONT.mono, fontSize: 7, color: BASE.steel, background: 'none', border: `1px solid ${BASE.borderDim}`, borderRadius: 6, padding: '5px 10px', cursor: 'pointer', letterSpacing: '0.08em' }}>
                   DELETE
                 </button>
               </div>
@@ -222,19 +233,19 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
               {currentAnalysis && (
                 <div style={{ marginBottom: 24, padding: '12px 16px', background: `${BASE.gold}08`, border: `1px solid ${BASE.gold}22`, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <div>
-                    <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.gold, letterSpacing: '0.1em', marginBottom: 3 }}>CURRENT PASSAGE</div>
-                    <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 14, color: BASE.bone }}>{currentAnalysis.reference}</div>
+                    <div style={{ fontFamily: FONT.mono, fontSize: 7, color: BASE.gold, letterSpacing: '0.1em', marginBottom: 3 }}>CURRENT PASSAGE</div>
+                    <div style={{ fontFamily: FONT.serif, fontSize: 14, color: BASE.bone }}>{currentAnalysis.reference}</div>
                   </div>
                   <button
                     onClick={() => addCurrent(selected.id)}
                     disabled={addingTo === selected.id || selected.passages.some(p => p.reference === currentAnalysis.reference)}
                     style={{
-                      padding: '7px 16px', borderRadius: 8, cursor: 'pointer',
+                      padding: '5px 16px', borderRadius: 8, cursor: 'pointer',
                       background: selected.passages.some(p => p.reference === currentAnalysis.reference) ? `${BASE.moss}18` : BASE.goldDim,
                       border: `1px solid ${selected.passages.some(p => p.reference === currentAnalysis.reference) ? BASE.moss : BASE.borderGold}`,
-                      fontFamily: 'JetBrains Mono', fontSize: 7,
+                      fontFamily: FONT.display, fontSize: 14,
                       color: selected.passages.some(p => p.reference === currentAnalysis.reference) ? BASE.moss : BASE.gold,
-                      letterSpacing: '0.1em',
+                      letterSpacing: '0.12em',
                     }}
                   >
                     {addingTo === selected.id ? 'ADDING…' : selected.passages.some(p => p.reference === currentAnalysis.reference) ? '✓ ADDED' : '+ ADD TO SERIES'}
@@ -244,21 +255,21 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
 
               {/* Passages */}
               <div style={{ marginBottom: 32 }}>
-                <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 12 }}>PASSAGES IN SERIES</div>
+                <div style={{ fontFamily: FONT.display, fontSize: 14, color: BASE.khaki, letterSpacing: '0.12em', marginBottom: 12 }}>PASSAGES IN SERIES</div>
                 {selected.passages.length === 0 && (
-                  <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.steel }}>No passages yet. Add the current passage above.</p>
+                  <p style={{ fontFamily: FONT.serif, fontSize: 13, color: BASE.steel }}>No passages yet. Add the current passage above.</p>
                 )}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {selected.passages.map((p, i) => (
                     <div key={p.reference} style={{ display: 'flex', alignItems: 'flex-start', gap: 14, padding: '12px 16px', background: `${BASE.bgCard}80`, border: `1px solid ${BASE.borderDim}`, borderRadius: 10 }}>
-                      <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.gold, opacity: 0.5, marginTop: 3, flexShrink: 0, minWidth: 48 }}>WK {i + 1}</div>
+                      <div style={{ fontFamily: FONT.type, fontSize: 10, color: BASE.gold, opacity: 0.6, marginTop: 3, flexShrink: 0, minWidth: 48, letterSpacing: '0.06em' }}>WK {i + 1}</div>
                       <div style={{ flex: 1 }}>
-                        <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 15, color: BASE.bone, marginBottom: 3 }}>{p.reference}</div>
-                        <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel, lineHeight: 1.5 }}>{p.mainTheme}</div>
+                        <div style={{ fontFamily: FONT.serif, fontSize: 15, color: BASE.bone, marginBottom: 3 }}>{p.reference}</div>
+                        <div style={{ fontFamily: FONT.serif, fontSize: 12, color: BASE.steel, lineHeight: 1.5 }}>{p.mainTheme}</div>
                         {p.biblicalThemes.length > 0 && (
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
                             {p.biblicalThemes.slice(0, 4).map(t => (
-                              <span key={t} style={{ fontFamily: 'Crimson Pro, serif', fontSize: 10.5, color: BASE.khaki, background: `${BASE.khaki}10`, border: `1px solid ${BASE.khaki}25`, borderRadius: 10, padding: '1px 8px' }}>{t}</span>
+                              <span key={t} style={{ fontFamily: FONT.serif, fontSize: 10.5, color: BASE.khaki, background: `${BASE.khaki}10`, border: `1px solid ${BASE.khaki}25`, borderRadius: 10, padding: '1px 8px' }}>{t}</span>
                             ))}
                           </div>
                         )}
@@ -279,16 +290,16 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
                     onClick={synthesize}
                     disabled={synthesizing}
                     style={{
-                      padding: '12px 24px', borderRadius: 10, cursor: synthesizing ? 'default' : 'pointer',
+                      padding: '9px 24px', borderRadius: 10, cursor: synthesizing ? 'default' : 'pointer',
                       background: synthesizing ? `${BASE.moss}10` : `${BASE.moss}18`,
                       border: `1px solid ${synthesizing ? BASE.moss + '40' : BASE.moss + '60'}`,
-                      fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.moss, letterSpacing: '0.12em',
+                      fontFamily: FONT.display, fontSize: 15, color: BASE.moss, letterSpacing: '0.12em',
                       transition: 'all 0.2s',
                     }}
                   >
                     {synthesizing ? 'SYNTHESIZING SERIES…' : '◈ SYNTHESIZE SERIES ARC'}
                   </button>
-                  <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel, marginTop: 6 }}>
+                  <div style={{ fontFamily: FONT.serif, fontSize: 12, color: BASE.steel, marginTop: 6 }}>
                     Opus analyzes all passages together — finds the unifying thread, week-by-week roles, and suggests a series title.
                   </div>
                 </div>
@@ -298,40 +309,40 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
               {synthesis && (
                 <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
                   <div style={{ padding: '20px 24px', background: `${BASE.moss}08`, border: `1px solid ${BASE.moss}30`, borderRadius: 12 }}>
-                    <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.moss, letterSpacing: '0.14em', marginBottom: 10 }}>SUGGESTED SERIES TITLE</div>
-                    <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 22, color: BASE.bone, fontWeight: 400 }}>{synthesis.suggestedSeriesTitle}</div>
+                    <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.moss, letterSpacing: '0.14em', marginBottom: 10 }}>SUGGESTED SERIES TITLE</div>
+                    <div style={{ fontFamily: FONT.display, fontSize: 26, color: BASE.bone, fontWeight: 400, letterSpacing: '0.08em', lineHeight: 1.1 }}>{synthesis.suggestedSeriesTitle}</div>
                   </div>
 
                   <div>
-                    <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 8 }}>UNIFYING THEME</div>
-                    <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 15, color: BASE.boneMid, lineHeight: 1.7, margin: 0 }}>{synthesis.unifyingTheme}</p>
+                    <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.14em', marginBottom: 8 }}>UNIFYING THEME</div>
+                    <p style={{ fontFamily: FONT.serif, fontSize: 15, color: BASE.boneMid, lineHeight: 1.7, margin: 0 }}>{synthesis.unifyingTheme}</p>
                   </div>
 
                   <div>
-                    <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 8 }}>SERIES ARC</div>
-                    <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 14, color: BASE.boneMid, lineHeight: 1.7, margin: 0 }}>{synthesis.seriesArc}</p>
+                    <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.14em', marginBottom: 8 }}>SERIES ARC</div>
+                    <p style={{ fontFamily: FONT.serif, fontSize: 14, color: BASE.boneMid, lineHeight: 1.7, margin: 0 }}>{synthesis.seriesArc}</p>
                   </div>
 
                   {synthesis.recurringThemes.length > 0 && (
                     <div>
-                      <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 8 }}>RECURRING THREADS</div>
+                      <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.14em', marginBottom: 8 }}>RECURRING THREADS</div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                         {synthesis.recurringThemes.map(t => (
-                          <span key={t} style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.gold, background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`, borderRadius: 12, padding: '2px 10px' }}>{t}</span>
+                          <span key={t} style={{ fontFamily: FONT.serif, fontSize: 12, color: BASE.gold, background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`, borderRadius: 12, padding: '2px 10px' }}>{t}</span>
                         ))}
                       </div>
                     </div>
                   )}
 
                   <div>
-                    <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 10 }}>WEEK BY WEEK</div>
+                    <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.14em', marginBottom: 10 }}>WEEK BY WEEK</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {synthesis.weekByWeek.map((w, i) => (
                         <div key={i} style={{ padding: '12px 16px', background: `${BASE.bgCard}80`, border: `1px solid ${BASE.borderDim}`, borderRadius: 8, display: 'flex', gap: 14 }}>
-                          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.gold, flexShrink: 0, minWidth: 80, marginTop: 2 }}>{w.reference}</div>
+                          <div style={{ fontFamily: FONT.type, fontSize: 10, color: BASE.gold, flexShrink: 0, minWidth: 80, marginTop: 2, letterSpacing: '0.04em' }}>{w.reference}</div>
                           <div>
-                            <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.bone, marginBottom: 4 }}>{w.role}</div>
-                            <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel }}>{w.distinctiveContribution}</div>
+                            <div style={{ fontFamily: FONT.serif, fontSize: 13, color: BASE.bone, marginBottom: 4 }}>{w.role}</div>
+                            <div style={{ fontFamily: FONT.serif, fontSize: 12, color: BASE.steel }}>{w.distinctiveContribution}</div>
                           </div>
                         </div>
                       ))}
@@ -340,12 +351,12 @@ export function SeriesPanel({ isOpen, onClose, currentAnalysis, apiKey }: Props)
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                     <div style={{ padding: '16px', background: `${BASE.bgCard}80`, border: `1px solid ${BASE.borderDim}`, borderRadius: 10 }}>
-                      <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.12em', marginBottom: 8 }}>WEEK 1 INTRODUCTION</div>
-                      <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, lineHeight: 1.65, margin: 0 }}>{synthesis.introductionIdeas}</p>
+                      <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.12em', marginBottom: 8 }}>WEEK 1 INTRODUCTION</div>
+                      <p style={{ fontFamily: FONT.serif, fontSize: 13, color: BASE.boneMid, lineHeight: 1.65, margin: 0 }}>{synthesis.introductionIdeas}</p>
                     </div>
                     <div style={{ padding: '16px', background: `${BASE.bgCard}80`, border: `1px solid ${BASE.borderDim}`, borderRadius: 10 }}>
-                      <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.steel, letterSpacing: '0.12em', marginBottom: 8 }}>FINAL WEEK LANDING</div>
-                      <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, lineHeight: 1.65, margin: 0 }}>{synthesis.conclusionIdeas}</p>
+                      <div style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.12em', marginBottom: 8 }}>FINAL WEEK LANDING</div>
+                      <p style={{ fontFamily: FONT.serif, fontSize: 13, color: BASE.boneMid, lineHeight: 1.65, margin: 0 }}>{synthesis.conclusionIdeas}</p>
                     </div>
                   </div>
                 </motion.div>

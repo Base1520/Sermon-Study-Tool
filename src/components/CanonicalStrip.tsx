@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import type { CanonicalContext, GenreAnalysis } from '../types/phrasing'
-import { BASE } from '../theme'
+import { BASE, FONT } from '../theme'
 
 interface Props { context: CanonicalContext; reference: string; genre?: GenreAnalysis }
 
@@ -47,7 +47,7 @@ export function CanonicalStrip({ context, reference, genre }: Props) {
 
         {/* Reference */}
         <div style={{ flexShrink: 0 }}>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 3 }}>
+          <div style={{ fontFamily: FONT.display, fontSize: 12, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3 }}>
             reference
           </div>
           <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 16, color: BASE.bone, letterSpacing: '0.03em', fontWeight: 500 }}>
@@ -67,7 +67,7 @@ export function CanonicalStrip({ context, reference, genre }: Props) {
                 display: 'flex', flexDirection: 'column', gap: 4, textAlign: 'left',
               }}
             >
-              <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.steel, letterSpacing: '0.14em' }}>
+              <div style={{ fontFamily: FONT.display, fontSize: 12, color: BASE.steel, letterSpacing: '0.1em' }}>
                 genre
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -95,7 +95,7 @@ export function CanonicalStrip({ context, reference, genre }: Props) {
 
         {/* Passage role */}
         <div style={{ flex: 1, minWidth: 140, overflow: 'hidden' }}>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 3, whiteSpace: 'nowrap' }}>
+          <div style={{ fontFamily: FONT.display, fontSize: 12, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 3, whiteSpace: 'nowrap' }}>
             passage role
           </div>
           <div style={{
@@ -111,7 +111,7 @@ export function CanonicalStrip({ context, reference, genre }: Props) {
 
         {/* Themes */}
         <div style={{ flexShrink: 0 }}>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 6 }}>
+          <div style={{ fontFamily: FONT.display, fontSize: 12, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 6 }}>
             themes
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
@@ -134,7 +134,7 @@ export function CanonicalStrip({ context, reference, genre }: Props) {
           <>
             <div style={{ width: 1, height: 36, background: BASE.borderDim, flexShrink: 0, opacity: 0.6, marginTop: 2 }} />
             <div style={{ flexShrink: 0 }}>
-              <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 6 }}>
+              <div style={{ fontFamily: FONT.display, fontSize: 12, color: BASE.steel, letterSpacing: '0.1em', marginBottom: 6 }}>
                 key words
               </div>
               <div style={{ display: 'flex', gap: 4 }}>
@@ -174,8 +174,8 @@ export function CanonicalStrip({ context, reference, genre }: Props) {
               {/* Header */}
               <div style={{ flexShrink: 0, minWidth: 120 }}>
                 <div style={{
-                  fontFamily: 'JetBrains Mono', fontSize: 8, color: gStyle.color,
-                  letterSpacing: '0.16em', marginBottom: 6,
+                  fontFamily: FONT.display, fontSize: 13, color: gStyle.color,
+                  letterSpacing: '0.1em', marginBottom: 6,
                 }}>
                   HOW TO READ THIS GENRE
                 </div>

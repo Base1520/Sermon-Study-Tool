@@ -4,3 +4,6 @@ dist-electron/
 .env
 *.local
 .env.beta
+
+# 6.7MB commentary corpus — never let `git add -A` swallow this
+resources/theology-retrieval/library.sqlite3

@@ -1,11 +1,20 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, dialog } = require('electron')
+const { app, BrowserWindow, Menu, ipcMain, shell, dialog, safeStorage } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const { execFile } = require('child_process')
+const packageMetadata = require('../package.json')
+const {
+  isRetrievalEnabled,
+  passageBook,
+  selectScopedResults,
+  validateCommentarySynthesis,
+} = require('./commentary-contract')
 const isDev = process.env.NODE_ENV === 'development'
 
-// Auto-updater (only in production)
+// Manual beta builds do not have a trusted update channel yet. Updates stay
+// off unless a future signed release explicitly enables them at launch.
 let autoUpdater
-if (!isDev) {
+if (!isDev && process.env.BASE1520_ENABLE_AUTO_UPDATE === 'true') {
   try {
     autoUpdater = require('electron-updater').autoUpdater
     autoUpdater.autoDownload = true
@@ -14,7 +23,7 @@ if (!isDev) {
       dialog.showMessageBox({
         type: 'info',
         title: 'Update Ready',
-        message: 'A new version of BASE 1520 has been downloaded. It will install when you restart the app.',
+        message: 'A new version of The Operator has been downloaded. It will install when you restart the app.',
         buttons: ['Restart Now', 'Later'],
       }).then(({ response }) => {
         if (response === 0) autoUpdater.quitAndInstall()
@@ -28,6 +37,44 @@ if (!isDev) {
 
 // electron-store loaded after app path is set
 let store
+
+const SECRET_STORE_KEY = 'encrypted-api-secrets'
+const SECRET_NAMES = ['ANTHROPIC_KEY', 'ESV_KEY', 'OPENAI_KEY']
+
+function secretStatus() {
+  return Object.fromEntries(SECRET_NAMES.map((name) => [name, Boolean(readSecret(name))]))
+}
+
+function readSecret(name) {
+  const encrypted = store?.get(SECRET_STORE_KEY, {})?.[name]
+  if (!encrypted || !safeStorage.isEncryptionAvailable()) return ''
+  try {
+    return safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
+  } catch {
+    return ''
+  }
+}
+
+function saveSecrets(values = {}) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Secure credential storage is unavailable on this computer.')
+  }
+  const encrypted = { ...(store?.get(SECRET_STORE_KEY, {}) ?? {}) }
+  for (const name of SECRET_NAMES) {
+    const value = typeof values[name] === 'string' ? values[name].trim() : ''
+    if (!value) continue
+    if (value.length > 1024) throw new Error(`Invalid ${name}.`)
+    encrypted[name] = safeStorage.encryptString(value).toString('base64')
+  }
+  store?.set(SECRET_STORE_KEY, encrypted)
+  return secretStatus()
+}
+
+function requireSecret(name, label) {
+  const value = readSecret(name)
+  if (!value) throw new Error(`${label} API key required — add it in Settings.`)
+  return value
+}
 
 function buildMenu() {
   const template = [
@@ -61,7 +108,16 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
     },
+  })
+
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', (event, url) => {
+    const allowed = isDev
+      ? url.startsWith('http://localhost:5173')
+      : url.startsWith('file://')
+    if (!allowed) event.preventDefault()
   })
 
   if (isDev) {
@@ -130,7 +186,98 @@ function parseModelJSON(res) {
   }
 }
 
+function theologyRetrievalRoot() {
+  if (process.env.THEOLOGY_RETRIEVAL_PATH) return process.env.THEOLOGY_RETRIEVAL_PATH
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'theology-retrieval')
+    : path.join(__dirname, '../resources/theology-retrieval')
+}
+
+function runTheologyRetrieval(query) {
+  const root = theologyRetrievalRoot()
+  const script = path.join(root, 'theology_retrieval.py')
+  const db = path.join(root, 'library.sqlite3')
+  return new Promise((resolve, reject) => {
+    execFile('python3', [script, '--db', db, 'query', query, '--limit', '64', '--source-type', 'commentary', '--json'], {
+      cwd: root,
+      timeout: 15000,
+      maxBuffer: 4 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        console.error('[theology-retrieval] failed:', stderr || error.message)
+        reject(new Error('The local commentary library could not be searched.'))
+        return
+      }
+      try {
+        resolve(JSON.parse(stdout))
+      } catch {
+        reject(new Error('The local commentary library returned malformed data.'))
+      }
+    })
+  })
+}
+
+function loadRetrievalManifest() {
+  const manifestPath = path.join(theologyRetrievalRoot(), 'bundle-manifest.json')
+  return JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+}
+
 ipcMain.handle('get-app-version', () => app.getVersion())
+
+ipcMain.handle('secret-status', () => secretStatus())
+
+ipcMain.handle('save-api-keys', (_, values) => saveSecrets(values))
+
+ipcMain.handle('migrate-legacy-api-keys', (_, rendererValues = {}) => {
+  const migrated = {}
+  for (const name of SECRET_NAMES) {
+    const value = typeof rendererValues[name] === 'string' ? rendererValues[name].trim() : ''
+    if (value) migrated[name] = value
+  }
+
+  const dir = path.join(app.getPath('documents'), 'BASE1520')
+  const file = path.join(dir, 'keys.txt')
+  if (fs.existsSync(file)) {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      const match = line.match(/^\s*(ANTHROPIC_KEY|ESV_KEY|OPENAI_KEY)\s*=\s*(.+)\s*$/)
+      if (match && match[2].trim() && !match[2].trim().startsWith('#')) {
+        migrated[match[1]] = match[2].trim()
+      }
+    }
+  }
+
+  if (Object.keys(migrated).length) saveSecrets(migrated)
+
+  if (fs.existsSync(file)) {
+    fs.writeFileSync(file, `# BASE 1520 API keys were migrated into protected app storage.
+# Manage or replace them from Settings inside BASE 1520.
+
+ANTHROPIC_KEY=
+ESV_KEY=
+OPENAI_KEY=
+`, { mode: 0o600 })
+    try { fs.chmodSync(file, 0o600) } catch {}
+  }
+
+  return secretStatus()
+})
+
+// A saved key is not the same thing as a usable key. Test the exact model the
+// study path needs before onboarding tells a reader setup is complete. This is
+// intentionally a one-token request: model-list endpoints can verify a key while
+// missing an exhausted credit balance, which is the failure this check exists to
+// catch.
+ipcMain.handle('test-anthropic-key', async (_, rawKey) => {
+  const apiKey = String(rawKey ?? '').trim()
+  if (!apiKey) throw new Error('An Anthropic API key is required.')
+  const client = new Anthropic.default({ apiKey })
+  await client.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 1,
+    messages: [{ role: 'user', content: 'Reply OK.' }],
+  })
+  return { ok: true, model: 'claude-opus-4-8' }
+})
 
 // ── UI zoom — visible accessibility control, persisted across launches ──
 ipcMain.handle('set-ui-zoom', (event, factor) => {
@@ -141,39 +288,72 @@ ipcMain.handle('set-ui-zoom', (event, factor) => {
 })
 ipcMain.handle('get-ui-zoom', () => store?.get('ui-zoom', 1) ?? 1)
 
-ipcMain.handle('analyze-passage', async (event, { text, reference, apiKey, streamId }) => {
+function explicitGeoReferences(raw, passageText) {
+  if (!Array.isArray(raw) || !passageText) return []
+  const nonMappable = new Set([
+    'earth',
+    'sea',
+    'heaven',
+    'hades',
+    'four corners of the earth',
+    'broad plain of the earth',
+    'beloved city',
+    'gog',
+    'magog',
+    'gog and magog',
+  ])
+  const normalizedText = String(passageText)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+
+  return raw.filter((entry) => {
+    const place = String(entry?.place ?? '')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (!place || nonMappable.has(place)) return false
+    return ` ${normalizedText} `.includes(` ${place} `)
+  }).slice(0, 8)
+}
+
+ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) => {
   const stage = (name) => { try { if (streamId) event.sender.send('analysis-progress', { streamId, stage: name }) } catch {} }
   stage('start')
-  // Load preacher profile first — used for cache key and prompt injection
-  const analysisProfile = store?.get('scholar-profile', null)
-  const hermeneuticsNote = analysisProfile?.hermeneutics
-    ? `\n\nPreacher hermeneutics (filter all interpretation through this): ${analysisProfile.hermeneutics}`
-    : ''
-  const theologyNote = analysisProfile?.theology
-    ? `\nPreacher theology: ${analysisProfile.theology}`
-    : ''
-
-  // ── Cache check — keyed on passage + hermeneutics so profile changes bust cache ──
-  const profileVersion = analysisProfile?.hermeneutics ? analysisProfile.hermeneutics.slice(0, 16).replace(/\s+/g, '-') : 'no-profile'
+  // Core exegesis is source-bound. Personal theology and profile data belong in
+  // later pastoral/delivery surfaces, not in the passage analysis request.
   const textHash = require('crypto').createHash('md5').update(text.trim()).digest('hex').slice(0, 8)
-  const cacheKey = `analysis-cache-v3-${profileVersion}-${reference.trim().toLowerCase().replace(/\s+/g, '-')}-${textHash}`
+  const cacheKey = `analysis-cache-v6-${reference.trim().toLowerCase().replace(/\s+/g, '-')}-${textHash}`
   if (store) {
     const cached = store.get(cacheKey, null)
     if (cached) {
       console.log('[analyze-passage] cache hit:', reference)
+      const safeCached = {
+        ...cached,
+        reference,
+        passageText: cached.passageText ?? text,
+        passageReference: reference,
+        geoReferences: explicitGeoReferences(cached.geoReferences, text),
+      }
+      store.set(cacheKey, safeCached)
       // Re-surface in history so a re-analyzed passage moves to the top
       const history = store.get('history', [])
-      const existing = history.find(e => e.analysis?.reference === cached.reference)
+      const existing = history.find(e => e.analysis?.reference === safeCached.reference)
       if (existing) {
-        store.set('history', [existing, ...history.filter(e => e.id !== existing.id)])
+        store.set('history', [
+          { ...existing, analysis: safeCached },
+          ...history.filter(e => e.id !== existing.id),
+        ])
       } else {
-        const entry = { id: Date.now().toString(), savedAt: new Date().toISOString(), analysis: cached, annotations: {} }
+        const entry = { id: Date.now().toString(), savedAt: new Date().toISOString(), analysis: safeCached, annotations: {} }
         store.set('history', [entry, ...history].slice(0, 100))
       }
-      return cached
+      return safeCached
     }
   }
 
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
 
   const verseCount = Math.max(
@@ -191,6 +371,15 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, apiKey, strea
   // ── Enrichment prompt (cultural notes + genre) — always parallel + non-fatal ──
   const enrichPrompt = `You are a biblical scholar identifying cultural background, genre, and geographic references for sermon preparation.
 
+SOURCE DISCIPLINE:
+- The supplied passage controls. Separate what it explicitly says from historical background and interpretive inference.
+- Never state a debated identification, chronology, symbolic referent, or theological system as settled fact.
+- If a background claim is disputed, say so inside the explanation and mark claimStatus "disputed".
+- If a claim is a reasonable synthesis rather than documented background, mark claimStatus "inferred".
+- Do not invent a Roman custom, Jewish practice, ancient memory, geography, or lexical claim.
+- A mixed audience must stay mixed. Do not describe every church in Revelation as persecuted; the seven churches include faithful, pressured, compromised, and complacent congregations.
+- In apocalyptic, name inherited imagery without pretending every symbol has one undisputed decoding.
+
 Return ONLY valid JSON, no markdown:
 {
   "geoReferences": [
@@ -207,7 +396,9 @@ Return ONLY valid JSON, no markdown:
       "term": "specific word, phrase, or custom",
       "category": "greco-roman|jewish|roman-legal|ane|hellenistic|household-code|honor-shame",
       "explanation": "2-4 sentences on what this meant to the original audience and why a modern reader misses it",
-      "significance": "one sentence on how this changes interpretation"
+      "significance": "one sentence on how this changes interpretation",
+      "claimStatus": "well-attested|inferred|disputed",
+      "sourceBasis": "passage|biblical-intertext|historical-background"
     }
   ],
   "questionsToConsider": [
@@ -220,7 +411,7 @@ Return ONLY valid JSON, no markdown:
   }
 }
 
-For geoReferences: include the primary city the letter/book is addressed TO or written FROM, plus any places explicitly named in the text. For epistles, always include the recipient city (e.g. Romans → Rome, 1 Corinthians → Corinth, Ephesians → Ephesus). For Revelation 2-3, include all seven churches addressed: Ephesus, Smyrna, Pergamum, Thyatira, Sardis, Philadelphia, Laodicea. Use these exact spellings. Empty array if truly no locations. Maximum 8 locations.
+For geoReferences: include ONLY a city, region, river, mountain, sea, or land explicitly named in the supplied passage text. Do not add a recipient city from the book title, a place named in another chapter, or an interpretive identification of a symbol. Do not treat a person, generic terrain, symbolic label, or disputed identification as a map location; "Gog and Magog" is not one mappable place. If the passage itself names no certain mappable location, return an empty array. Maximum 8 locations.
 
 Identify culturally embedded references a first-century reader would grasp but a modern reader misses. Only include references actually present in the text. Maximum 6 cultural notes.`
 
@@ -257,6 +448,13 @@ HIERARCHY IS REQUIRED: You MUST assign parentId relationships. The first phrase 
 
     const contextPrompt = `You are a biblical scholar providing sermon context analysis.
 
+Do not turn inference into text. If the passage leaves the speaker, throne
+occupant, chronology, symbolic referent, or judgment participants unnamed, keep
+that limit visible. Use "Hades" when the text says Hades, not "hell." Describe a
+book's recipients in their actual mixed conditions rather than reducing them all
+to one pressure. Do not import a preacher's theological profile into the
+passage's meaning.
+
 Return ONLY valid JSON — no markdown, no extra text:
 {
   "mainTheme": "one sentence capturing the central truth of the passage",
@@ -265,7 +463,7 @@ Return ONLY valid JSON — no markdown, no extra text:
     "inOrderThat": "the response this text is designed to produce, phrased as: 'in order that ...'"
   },
   "outline": [
-    { "point": "I.", "label": "Main point (7 words max)", "sub": [{ "point": "A.", "label": "sub-point (5 words max)" }] }
+    { "point": "I.", "verses": "vv. 7-10", "label": "Main point (7 words max)", "sub": [{ "point": "A.", "label": "sub-point (5 words max)" }] }
   ],
   "canonicalContext": {
     "bookTheme": "7 words max",
@@ -276,7 +474,10 @@ Return ONLY valid JSON — no markdown, no extra text:
   }
 }
 
-STRICT: Max 4 outline points, max 2 sub-points each. All strings concise.${hermeneuticsNote}${theologyNote}`
+STRICT: Max 4 outline points, max 2 sub-points each. Every top-level outline
+point must carry the exact verse range it covers. The ranges must follow the
+passage in order and cover every supplied verse once, with no gaps or overlap.
+All strings concise.`
 
     console.log('[analyze-passage] long passage — running 3 parallel calls')
     stage('calls-dispatched')
@@ -326,6 +527,13 @@ STRICT: Max 4 outline points, max 2 sub-points each. All strings concise.${herme
     // ── SHORT PASSAGE: 2 parallel calls (core + enrichment) ───────────────────
     const corePrompt = `You are an expert biblical scholar specializing in grammatical phrasing analysis for sermon preparation.
 
+Do not turn inference into text. If the passage leaves the speaker, throne
+occupant, chronology, symbolic referent, or judgment participants unnamed, keep
+that limit visible. Use "Hades" when the text says Hades, not "hell." Describe a
+book's recipients in their actual mixed conditions rather than reducing them all
+to one pressure. Do not import a preacher's theological profile into the
+passage's meaning.
+
 Return ONLY valid JSON. No markdown. No trailing commas. No extra text before or after the JSON object.
 
 {
@@ -349,7 +557,7 @@ Return ONLY valid JSON. No markdown. No trailing commas. No extra text before or
     }
   ],
   "outline": [
-    { "point": "I.", "label": "Main point (8 words max)", "sub": [{ "point": "A.", "label": "sub-point (6 words max)" }] }
+    { "point": "I.", "verses": "vv. 1-3", "label": "Main point (8 words max)", "sub": [{ "point": "A.", "label": "sub-point (6 words max)" }] }
   ],
   "canonicalContext": {
     "bookTheme": "8 words max",
@@ -360,7 +568,10 @@ Return ONLY valid JSON. No markdown. No trailing commas. No extra text before or
   }
 }
 
-STRICT LIMITS: max 16 phrases, 5-word theologicalNotes, max 4 outline points with 3 sub-points each.${hermeneuticsNote}${theologyNote}`
+STRICT LIMITS: max 16 phrases, 5-word theologicalNotes, max 4 outline points
+with 3 sub-points each. Every top-level outline point must carry the exact verse
+range it covers. The ranges must follow the passage in order and cover every
+supplied verse once, with no gaps or overlap.`
 
     stage('calls-dispatched')
     const [coreSettled, enrichSettled] = await Promise.allSettled([
@@ -388,6 +599,10 @@ STRICT LIMITS: max 16 phrases, 5-word theologicalNotes, max 4 outline points wit
     result = { ...core, culturalNotes: enrich.culturalNotes ?? [], genre: enrich.genre ?? null, geoReferences: enrich.geoReferences ?? [], questionsToConsider: enrich.questionsToConsider ?? [] }
   }
 
+  // The model never controls the canonical reference. The trusted input wins.
+  result.reference = reference
+  result.geoReferences = explicitGeoReferences(result.geoReferences, text)
+
   // Store raw passage text so the desk can render all-verses mode
   result.passageText = text
   result.passageReference = reference
@@ -403,6 +618,216 @@ STRICT LIMITS: max 16 phrases, 5-word theologicalNotes, max 4 outline points wit
   }
 
   return result
+})
+
+// ── PLAIN READ — the reader mode of the same engine ──────────────────────────
+// Same analysis in, a document aimed at understanding and obedience out. No
+// outline, no points, no delivery notes — pipeline.js and validate.js enforce
+// that; this handler only supplies plumbing.
+//
+// PRIVACY — READ BEFORE EDITING: this handler must NEVER read the
+// 'scholar-profile' store key. That key holds the pastor's hermeneutics string
+// and up to three full sermon manuscripts. PLAIN READ is for a reader who is
+// not the pastor, so none of it may cross this boundary. Do not add a
+// store.get('scholar-profile') here, and do not pass a profile through the
+// payload. The only thing that goes to the model is the passage analysis.
+const { plainRead } = require('./plainread/pipeline')
+
+// `level` is optional and passed straight through. Omitted, pipeline.js falls
+// back to DEFAULT_LEVEL, whose system prompt is byte-identical to the one used
+// before levels existed — so a renderer that never sends it is unaffected.
+//
+// THE CLAIM CHECK IS OFF THE CRITICAL PATH. This handler used to await two full
+// Opus calls — the generation, then an adversarial checker whose entire output
+// is invisible to the reader — before returning one word. Three minutes of
+// spinner for a pass nobody sees. It now returns the document as soon as it is
+// generated and pushes the checked version afterward.
+//
+// THE RENDERER CONTRACT — event 'plain-read-verified', payload:
+//   { requestId, requestedReference, reference, readingLevel, doc }
+//
+//   * Fires AT MOST ONCE per plain-read call, and only when the returned
+//     document came back with doc.verification.status === 'pending'. Any other
+//     status — 'ok' from the cache, 'failed', 'skipped' — is already final and
+//     no event will ever follow it.
+//   * `doc` is the whole corrected document, ready to swap in wholesale. The
+//     checker cuts refuted sentences and appends to `unknowns`; it never
+//     restructures. Replace, do not merge.
+//   * MATCH BEFORE YOU SWAP. Two passages requested in quick succession produce
+//     two independent checks, and the first can land after the second document
+//     is on screen. Compare `requestId` if you sent one, otherwise `reference`
+//     AND `readingLevel`, against what is currently displayed, and drop the
+//     event if it does not match. Nothing upstream can do this for you.
+//   * A pending document must NOT be written to any store, history entry, or
+//     export. It is unverified by definition; the cache in this file refuses it
+//     for exactly that reason.
+//   * NO SPINNER. See the note in PlainRead.tsx: the check stays invisible. The
+//     reader is reading; corrections land silently or not at all.
+ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force, level, requestId }) => {
+  return plainRead({
+    analysis,
+    apiKey: requireSecret('ANTHROPIC_KEY', 'Anthropic'),
+    requestedReference,
+    force: Boolean(force),
+    ...(level ? { level } : {}),
+    createClient: (k) => new Anthropic.default({ apiKey: k }),
+    cache: {
+      get: (k) => store?.get(k, null) ?? null,
+      set: (k, v) => { if (store) store.set(k, v) },
+    },
+    retry: withRetry,
+    parse: parseModelJSON,
+    deferVerify: true,
+    // Same shape as the 'analysis-progress' send above, and guarded the same
+    // way plus one: a check that outlives the window it was started for must
+    // not touch a destroyed webContents. The catch is the backstop — this runs
+    // with no caller left to reject to.
+    onVerified: (verifiedDoc) => {
+      try {
+        if (!event.sender || event.sender.isDestroyed()) return
+        event.sender.send('plain-read-verified', {
+          requestId: requestId ?? null,
+          requestedReference: requestedReference ?? null,
+          reference: verifiedDoc?.reference ?? null,
+          readingLevel: verifiedDoc?.readingLevel ?? null,
+          doc: verifiedDoc,
+        })
+      } catch {}
+    },
+  })
+})
+
+// ── COVENANT GROUP GUIDE ────────────────────────────────────────────────────
+// A passage-bound teaching surface with separate participant and leader pages.
+// It deliberately receives no scholar profile, sermon draft, or manuscript.
+const {
+  generateGroupGuide,
+  verifyGroupGuideDraft,
+  validateGroupGuide,
+  renderGuideHtml,
+  guideKeyFor,
+} = require('./groupguide')
+
+ipcMain.handle('group-guide-load', async (_, { analysis }) => {
+  if (!analysis) return null
+  return store?.get(guideKeyFor(analysis), null) ?? null
+})
+
+ipcMain.handle('group-guide-generate', async (_, { analysis, plainDoc, force }) => {
+  const key = guideKeyFor(analysis)
+  if (!force) {
+    const cached = store?.get(key, null) ?? null
+    if (cached) return cached
+  }
+
+  const guide = await generateGroupGuide({
+    analysis,
+    plainDoc,
+    apiKey: requireSecret('ANTHROPIC_KEY', 'Anthropic'),
+    createClient: (value) => new Anthropic.default({ apiKey: value }),
+    retry: withRetry,
+    parse: parseModelJSON,
+  })
+  if (store) store.set(key, guide)
+  return guide
+})
+
+ipcMain.handle('group-guide-save', async (_, { analysis, plainDoc, guide }) => {
+  const verified = await verifyGroupGuideDraft({
+    guide,
+    analysis,
+    plainDoc,
+    apiKey: requireSecret('ANTHROPIC_KEY', 'Anthropic'),
+    createClient: (value) => new Anthropic.default({ apiKey: value }),
+    retry: withRetry,
+    parse: parseModelJSON,
+  })
+  if (store) store.set(guideKeyFor(analysis), verified)
+  return verified
+})
+
+ipcMain.handle('group-guide-export-pdf', async (_, { guide: rawGuide, variant }) => {
+  const guide = validateGroupGuide(rawGuide, { reference: rawGuide?.reference })
+  const mode = variant === 'leader' ? 'leader' : 'participant'
+  const html = renderGuideHtml(guide, mode)
+  const safeRef = guide.reference.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '')
+  const { filePath } = await dialog.showSaveDialog({
+    defaultPath: `${safeRef}_${mode}_group_guide.pdf`,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  })
+  if (!filePath) return null
+
+  const pdfWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      javascript: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  })
+
+  try {
+    await pdfWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+    const pdf = await pdfWindow.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'Letter',
+      preferCSSPageSize: true,
+    })
+    fs.writeFileSync(filePath, pdf)
+    await shell.openPath(filePath)
+    return filePath
+  } finally {
+    if (!pdfWindow.isDestroyed()) pdfWindow.destroy()
+  }
+})
+
+// ── PLAIN READ — "Ask the Operator" ──────────────────────────────────────────
+// One question about one passage, answered from the document already on screen.
+//
+// PRIVACY — READ BEFORE EDITING: like 'plain-read' above, this handler must
+// NEVER read the 'scholar-profile' store key. That key holds the pastor's
+// hermeneutics string and up to three full sermon manuscripts. The reader in
+// this mode is not the pastor, so none of it may cross this boundary. Do not
+// add a store.get('scholar-profile') here and do not pass a profile through
+// the payload. The only things that go to the model are the passage analysis,
+// the finished PLAIN READ document, and the committed vault notes.
+//
+// No cache: an answer is one-off and question-specific, so there is nothing to
+// re-serve. ask.js caps the history, the question, and max_tokens, and makes
+// exactly one model call per question — see the cost arithmetic in its header.
+const { askAboutPassage, generateStarters } = require('./plainread/ask')
+const { lookupPassage: lookupVaultPassage } = require('./plainread/vault/index.js')
+
+ipcMain.handle('plain-ask', async (_, { doc, analysis, question, history, vaultNotes }) => {
+  // No question yet — the reader just opened the box. Hand back the example
+  // questions, derived from the document already on screen. No model call, no
+  // key, no cost. Same return shape as a real answer so the renderer has one
+  // contract to code against.
+  if (!question || !String(question).trim()) {
+    return { answer: null, refusal: null, suggested: generateStarters({ doc, analysis }) }
+  }
+
+  // Grounding notes are a bonus, never a dependency — a missing or unreadable
+  // pack must not be able to kill a question.
+  let notes = vaultNotes
+  if (!notes) {
+    try {
+      const ref = doc?.reference || analysis?.reference || analysis?.passageReference || ''
+      notes = ref ? (lookupVaultPassage(ref)?.notes ?? null) : null
+    } catch { notes = null }
+  }
+
+  return askAboutPassage({
+    doc,
+    analysis,
+    question,
+    history,
+    apiKey: requireSecret('ANTHROPIC_KEY', 'Anthropic'),
+    vaultNotes: notes,
+    createClient: (k) => new Anthropic.default({ apiKey: k }),
+    retry: withRetry,
+    parse: parseModelJSON,
+  })
 })
 
 // ── Scholar Profile (persistent memory) ──────────────────────────────────────
@@ -463,8 +888,9 @@ ipcMain.handle('profile-get-sermon', (_, id) => {
   return (profile.sermons ?? []).find(s => s.id === id) ?? null
 })
 
-ipcMain.handle('profile-extract-insights', async (_, { messages, apiKey }) => {
+ipcMain.handle('profile-extract-insights', async (_, { messages }) => {
   if (!store || messages.length < 2) return
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store.get('scholar-profile', INITIAL_PROFILE)
 
@@ -495,7 +921,8 @@ Return a JSON array of new insight strings (empty array [] if nothing new). Each
 })
 
 // ── Sermon Draft (3-agent pipeline) ──────────────────────────────────────────
-ipcMain.handle('draft-sermon', async (_, { analysis, apiKey }) => {
+ipcMain.handle('draft-sermon', async (_, { analysis }) => {
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)
 
@@ -692,7 +1119,8 @@ ipcMain.handle('series-delete', (_, id) => {
   store?.set('series', (store?.get('series', []) ?? []).filter(s => s.id !== id))
 })
 
-ipcMain.handle('series-synthesize', async (_, { series, apiKey }) => {
+ipcMain.handle('series-synthesize', async (_, { series }) => {
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const passageSummaries = series.passages.map((p, i) =>
     `Week ${i + 1}: ${p.reference}\nTheme: ${p.mainTheme}\nThemes: ${(p.biblicalThemes ?? []).join(', ')}\nOutline: ${(p.outline ?? []).map(o => `${o.point} ${o.label}`).join(' | ')}`
@@ -754,7 +1182,8 @@ ipcMain.handle('session-load-latest', () => {
 })
 
 // ── Cross-references ──────────────────────────────────────────────────────────
-ipcMain.handle('get-cross-refs', async (_, { reference, mainTheme, biblicalThemes, apiKey }) => {
+ipcMain.handle('get-cross-refs', async (_, { reference, mainTheme, biblicalThemes }) => {
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const response = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
@@ -768,31 +1197,107 @@ ipcMain.handle('get-cross-refs', async (_, { reference, mainTheme, biblicalTheme
 })
 
 // ── Word study ────────────────────────────────────────────────────────────────
-ipcMain.handle('word-study', async (_, { word, clauseText, reference, apiKey }) => {
+ipcMain.handle('word-study', async (_, { word, clauseText, reference }) => {
+  const cacheKey = require('crypto')
+    .createHash('sha256')
+    .update(`v2|${reference}|${clauseText}|${word}`)
+    .digest('hex')
+  const wordStudyCache = store?.get('word-study-cache-v2', {}) ?? {}
+  if (wordStudyCache[cacheKey]) return wordStudyCache[cacheKey]
+
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const response = await withRetry(() => client.messages.create({
     model: 'claude-opus-4-8',
-    max_tokens: 1024,
+    max_tokens: 1800,
+    output_config: {
+      effort: 'low',
+      format: {
+        type: 'json_schema',
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          required: [
+            'word',
+            'original',
+            'transliteration',
+            'strongs',
+            'gloss',
+            'parsing',
+            'semanticRange',
+            'translationNote',
+            'whyItMatters',
+            'confidence',
+            'limits',
+            'keyUses',
+          ],
+          properties: {
+            word: { type: 'string' },
+            original: { type: 'string' },
+            transliteration: { type: 'string' },
+            strongs: { type: 'string' },
+            gloss: { type: 'string' },
+            parsing: { type: 'string' },
+            semanticRange: { type: 'string' },
+            translationNote: { type: 'string' },
+            whyItMatters: { type: 'string' },
+            confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+            limits: { type: 'string' },
+            keyUses: { type: 'array', items: { type: 'string' } },
+          },
+        },
+      },
+    },
     messages: [{
       role: 'user',
-      content: `Provide a concise word study for the word "${word}" as it appears in ${reference}: "${clauseText}". Return ONLY JSON: {"word":"${word}","original":"Greek or Hebrew word","transliteration":"romanized","strongs":"G#### or H####","gloss":"short definition","parsing":"grammatical parsing if verb/noun","semanticRange":"2-3 sentence note on the word's range of meaning in its biblical context","keyUses":["1-2 other key passages using this word"]}. No markdown.`,
+      content: `Provide a source-disciplined word study for the English word "${word}" as it appears in ${reference}: "${clauseText}".
+
+Identify the underlying Hebrew or Greek form and lemma only when you can do so
+from this exact context. If the English word represents more than one original
+word, or the form is uncertain, say so and lower confidence. Never derive
+meaning from a word's roots, parts, or history. Immediate syntax and usage
+control the meaning. Do not import every dictionary gloss into this verse.
+
+"semanticRange" explains the legitimate range and which sense the sentence
+selects. "translationNote" compares the displayed English form with the
+original grammar and explains any difference in tense, voice, number, syntax,
+or idiom. If the rendering is straightforward, say that briefly. For a proper
+name, explain that it is transliterated rather than translated.
+"whyItMatters" gives 1-2 direct sentences on what this exact word contributes
+to the verse's argument or image. It is not a sermon application.
+"limits" names what this word study cannot prove. "keyUses" lists no more than
+two references using the same lemma, not merely the same English translation.
+Use "uncertain" for a Strong's number you cannot identify responsibly.`,
     }],
   }))
-  return parseModelJSON(response)
+  if (response?.stop_reason === 'max_tokens') {
+    throw new Error('The word study was cut off before it finished.')
+  }
+  const result = parseModelJSON(response)
+  const nextWordStudyCache = Object.fromEntries([
+    ...Object.entries(wordStudyCache),
+    [cacheKey, result],
+  ].slice(-200))
+  store?.set('word-study-cache-v2', nextWordStudyCache)
+  return result
 })
 
 // ── Bible fetch — public domain translations + ESV (if key provided) ──────────
-ipcMain.handle('fetch-bible', async (_, { reference, translation = 'kjv', esvKey = '' }) => {
+ipcMain.handle('fetch-bible', async (_, { reference, translation = 'kjv' }) => {
   const ref = reference.trim()
 
   // ESV via api.esv.org (requires key)
   if (translation === 'esv') {
-    if (!esvKey) throw new Error('ESV API key required — add it in Settings')
+    const esvKey = requireSecret('ESV_KEY', 'ESV')
     const params = new URLSearchParams({
       q: ref,
       'include-headings': 'false',
       'include-footnotes': 'false',
-      'include-verse-numbers': 'false',
+      // Verse numbers stay ON. The outline units in PLAIN READ carry refs like
+      // "vv. 1-7"; without markers in the text there is nothing to align them
+      // to and the highlight can never light. ESV returns them bracketed —
+      // "[1] Paul, a servant..." — which parseVerses trusts on its own.
+      'include-verse-numbers': 'true',
       'include-short-copyright': 'false',
       'include-passage-references': 'false',
       'include-selahs': 'false',
@@ -820,7 +1325,8 @@ ipcMain.handle('fetch-bible', async (_, { reference, translation = 'kjv', esvKey
 })
 
 // ── Scholar Chat ──────────────────────────────────────────────────────────────
-ipcMain.handle('scholar-chat', async (event, { messages, passageContext, apiKey, streamId }) => {
+ipcMain.handle('scholar-chat', async (event, { messages, passageContext, streamId }) => {
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)
 
@@ -933,19 +1439,45 @@ ${preacherContext}`
 
 // ── PDF export ────────────────────────────────────────────────────────────────
 ipcMain.handle('export-pdf', async (_, { html, reference }) => {
+  if (typeof html !== 'string' || html.length > 5 * 1024 * 1024) {
+    throw new Error('Export content is invalid or too large.')
+  }
+  const safeRef = String(reference ?? 'study')
+    .replace(/[^a-z0-9]+/gi, '_')
+    .replace(/^_+|_+$/g, '')
   const { filePath } = await dialog.showSaveDialog({
-    defaultPath: `${reference.replace(/[^a-z0-9]/gi, '_')}_phrasing.html`,
-    filters: [{ name: 'HTML', extensions: ['html'] }],
+    defaultPath: `${safeRef || 'study'}.pdf`,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
   })
   if (!filePath) return null
-  const fs = require('fs')
-  fs.writeFileSync(filePath, html)
-  shell.openPath(filePath)
-  return filePath
+
+  const pdfWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      javascript: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  })
+
+  try {
+    await pdfWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+    const pdf = await pdfWindow.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'Letter',
+      preferCSSPageSize: true,
+    })
+    fs.writeFileSync(filePath, pdf)
+    await shell.openPath(filePath)
+    return filePath
+  } finally {
+    if (!pdfWindow.isDestroyed()) pdfWindow.destroy()
+  }
 })
 
 // ── Specialist Agent Chat (Exegetical / Theological / Homiletical) ────────────
-ipcMain.handle('agent-chat', async (event, { agentType, messages, passageContext, apiKey, streamId }) => {
+ipcMain.handle('agent-chat', async (event, { agentType, messages, passageContext, streamId }) => {
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)
 
@@ -1054,43 +1586,125 @@ Filter every response through this preacher's hermeneutics. If they hold covenan
   return response.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
 })
 
-// ── Commentary Insights (public domain) ──────────────────────────────────────
-ipcMain.handle('fetch-commentary', async (_, { reference, mainTheme, apiKey }) => {
+// ── Commentary Insights (retrieved public-domain excerpts only) ─────────────
+ipcMain.handle('fetch-commentary', async (_, { reference, passageText, mainTheme }) => {
+  const retrievalEnabled = isRetrievalEnabled(packageMetadata.featureFlags)
+  if (!retrievalEnabled) {
+    return {
+      status: 'disabled',
+      message: 'The citation-first commentary library is not enabled in this build.',
+      sources: [],
+      voices: [],
+    }
+  }
+
+  const manifest = loadRetrievalManifest()
+  const book = passageBook(reference)
+  const hasCoverage = manifest.sources.some(source => source.rightsTier === 'public_domain' && source.bookRanges?.[book])
+
+  if (!hasCoverage) {
+    return {
+      status: 'no_result',
+      message: `No verified public-domain commentary in the local library currently covers ${reference}. Nothing was generated from memory.`,
+      sources: [],
+      voices: [],
+    }
+  }
+
+  const retrieval = await runTheologyRetrieval(`${reference} ${mainTheme} ${String(passageText ?? '').slice(0, 1200)}`.trim())
+  const retrieved = selectScopedResults(retrieval.results ?? [], manifest, reference).results
+
+  if (retrieved.length === 0) {
+    return {
+      status: 'no_result',
+      message: `The local library covers ${book}, but no relevant excerpt was found for ${reference}. Nothing was generated from memory.`,
+      sources: [],
+      voices: [],
+    }
+  }
+
+  const sources = retrieved.map(result => ({
+    citationId: `SRC:${result.source_id}:${result.chunk_id}`,
+    author: result.author,
+    title: result.title,
+    publicationYear: result.publication_year,
+    edition: result.edition,
+    locator: result.locator,
+    rightsTier: result.rights_tier,
+    canonicalUrl: result.canonical_url,
+    excerpt: result.content,
+    provenance: 'SOURCE TEXT',
+  }))
+  const apiKey = readSecret('ANTHROPIC_KEY')
+  if (!apiKey) {
+    return {
+      status: 'grounded',
+      message: 'Source excerpts found. Add an API key to synthesize them.',
+      sources,
+      voices: [],
+    }
+  }
+
   const client = new Anthropic.default({ apiKey })
   const response = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 2000,
     messages: [{
       role: 'user',
-      content: `Summarize what the following public domain commentators say about ${reference} (main theme: "${mainTheme}"):
-- Matthew Henry (Exposition of the Old and New Testaments, 1710)
-- John Calvin (Commentaries, 1540s-1560s)
-- Charles Spurgeon (Treasury of David for Psalms; Metropolitan Tabernacle Pulpit for NT)
-- John Chrysostom (Homilies, 4th c.) if applicable
+      content: `Synthesize only the retrieved public-domain excerpts below for ${reference} (main theme: "${mainTheme}").
 
 Return ONLY valid JSON, no markdown:
 {
-  "commentators": [
+  "voices": [
     {
-      "name": "Matthew Henry",
-      "era": "1710",
-      "summary": "2-3 sentences capturing his main interpretive emphasis on this passage",
-      "distinctiveContribution": "one sentence on what makes his reading unique or particularly useful"
+      "name": "exact retrieved author name",
+      "era": "publication year",
+      "claims": [
+        {
+          "text": "one concise claim supported by the excerpts",
+          "provenance": "THEOLOGICAL SYNTHESIS",
+          "citationIds": ["SRC:source-id:chunk-id"]
+        }
+      ]
     }
   ],
-  "convergence": "one sentence on what all commentators agree on",
-  "divergence": "one sentence on where they differ, if at all"
+  "convergence": {
+    "text": "one supported sentence",
+    "provenance": "THEOLOGICAL SYNTHESIS",
+    "citationIds": ["all supporting citation IDs"]
+  },
+  "divergence": null
 }
 
-Only include commentators with substantive things to say about this specific passage. Accuracy matters — only include what they actually wrote.`,
+Rules:
+- Use only the excerpts below. Do not rely on memory or outside knowledge.
+- Every non-empty claim must cite one or more supplied citation IDs.
+- Never invent a citation ID, quotation, author, position, agreement, or disagreement.
+- Use THEOLOGICAL SYNTHESIS for your prose. SOURCE TEXT is reserved for verbatim excerpts rendered separately.
+- Omit a voice without substantive passage-specific support.
+- Return convergence or divergence as null unless the cited excerpts actually establish it.
+
+RETRIEVED EXCERPTS:
+${sources.map(source => [
+  `[${source.citationId}]`,
+  `${source.author}, ${source.title} (${source.publicationYear}), ${source.locator}`,
+  source.excerpt,
+].join('\n')).join('\n\n---\n\n')}`,
     }],
   }))
-  return parseModelJSON(response)
+  const synthesis = validateCommentarySynthesis(parseModelJSON(response), sources)
+  return {
+    status: 'grounded',
+    message: 'Synthesized only from the cited local excerpts.',
+    sources,
+    ...synthesis,
+  }
 })
 
 // ── Eisegesis / Doctrine Check ────────────────────────────────────────────────
-ipcMain.handle('eisegesis-check', async (_, { manuscriptText, passageContext, apiKey }) => {
+ipcMain.handle('eisegesis-check', async (_, { manuscriptText, passageContext }) => {
   if (!manuscriptText || manuscriptText.trim().length < 60) return { flags: [] }
+  const apiKey = readSecret('ANTHROPIC_KEY')
   if (!apiKey) return { flags: [], error: 'No API key' }
 
   try {
@@ -1131,7 +1745,8 @@ If no problems exist, return {"flags":[]}.`,
 })
 
 // ── Mission Brief — 5-paragraph OPORD-style sermon summary ───────────────────
-ipcMain.handle('mission-brief', async (_, { analysis, draft, apiKey }) => {
+ipcMain.handle('mission-brief', async (_, { analysis, draft }) => {
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const response = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
@@ -1159,6 +1774,8 @@ Return ONLY valid JSON, no markdown:
 })
 
 // ── Delivery Review — record or upload, Whisper transcribes, Claude critiques ─
+const approvedMediaFiles = new Map()
+
 ipcMain.handle('pick-media-file', async () => {
   const { filePaths } = await dialog.showOpenDialog({
     title: 'Choose sermon audio or video',
@@ -1166,19 +1783,31 @@ ipcMain.handle('pick-media-file', async () => {
     properties: ['openFile'],
   })
   if (!filePaths?.length) return null
-  const stat = fs.statSync(filePaths[0])
-  return { path: filePaths[0], sizeMB: Math.round(stat.size / 1048576 * 10) / 10 }
+  const selectedPath = fs.realpathSync(filePaths[0])
+  const stat = fs.statSync(selectedPath)
+  const token = require('crypto').randomUUID()
+  approvedMediaFiles.set(token, { path: selectedPath, expiresAt: Date.now() + 10 * 60 * 1000 })
+  return { token, sizeMB: Math.round(stat.size / 1048576 * 10) / 10 }
 })
 
-ipcMain.handle('review-delivery', async (_, { filePath, audioBase64, mimeType, openaiKey, apiKey, manuscript, reference }) => {
-  if (!openaiKey) throw new Error('OpenAI key required for transcription — add it in the panel')
+ipcMain.handle('review-delivery', async (_, { fileToken, audioBase64, mimeType, manuscript, reference }) => {
+  const openaiKey = requireSecret('OPENAI_KEY', 'OpenAI')
+  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
 
   // 1) Get the media bytes
   let buf, name
-  if (filePath) {
-    buf = fs.readFileSync(filePath)
-    name = path.basename(filePath)
+  if (fileToken) {
+    const approved = approvedMediaFiles.get(fileToken)
+    approvedMediaFiles.delete(fileToken)
+    if (!approved || approved.expiresAt < Date.now()) {
+      throw new Error('That file approval expired — choose the media file again.')
+    }
+    buf = fs.readFileSync(approved.path)
+    name = path.basename(approved.path)
   } else if (audioBase64) {
+    if (audioBase64.length > 35 * 1024 * 1024) {
+      throw new Error('Recording exceeds the 25MB transcription limit.')
+    }
     buf = Buffer.from(audioBase64, 'base64')
     name = 'rehearsal.webm'
   } else {
@@ -1235,43 +1864,6 @@ Return ONLY valid JSON, no markdown:
   return { ...critique, transcript: transcript.slice(0, 2000), durationMin }
 })
 
-// ── Local keys file — one place for all API keys ─────────────────────────────
-// Reads Documents/BASE1520/keys.txt (created with a template on first run).
-// Non-empty values are pulled into the app on every launch.
-ipcMain.handle('get-local-keys', () => {
-  try {
-    const dir = path.join(app.getPath('documents'), 'BASE1520')
-    const file = path.join(dir, 'keys.txt')
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    if (!fs.existsSync(file)) {
-      fs.writeFileSync(file, `# BASE 1520 — API keys
-# Paste your keys after the = signs. The app reads this file every time it starts.
-# Keep this file private — do not share or upload it.
-
-ANTHROPIC_KEY=
-ESV_KEY=
-OPENAI_KEY=
-`)
-      return { created: file }
-    }
-    const out = {}
-    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-      const m = line.match(/^\s*(ANTHROPIC_KEY|ESV_KEY|OPENAI_KEY)\s*=\s*(.+)\s*$/)
-      if (m && m[2].trim() && !m[2].trim().startsWith('#')) out[m[1]] = m[2].trim()
-    }
-    return out
-  } catch (e) {
-    console.error('[get-local-keys]', e?.message)
-    return {}
-  }
-})
-
-ipcMain.handle('open-keys-folder', () => {
-  const dir = path.join(app.getPath('documents'), 'BASE1520')
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  shell.openPath(dir)
-})
-
 // ── Sermon Calendar ───────────────────────────────────────────────────────────
 // Keyed by ISO date 'YYYY-MM-DD' → { reference, title, seriesName, notes }
 ipcMain.handle('calendar-get', () => store?.get('sermon-calendar', {}) ?? {})
@@ -1309,7 +1901,11 @@ function scanFolder(folderPath) {
 }
 
 ipcMain.handle('open-external', async (_, url) => {
-  await shell.openExternal(url)
+  const parsed = new URL(String(url ?? ''))
+  if (parsed.protocol !== 'https:' || parsed.hostname !== 'www.canva.com') {
+    throw new Error('That external link is not allowed.')
+  }
+  await shell.openExternal(parsed.toString())
 })
 
 ipcMain.handle('scan-asset-images', async () => {

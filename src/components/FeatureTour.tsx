@@ -50,7 +50,7 @@ const SECTIONS: Section[] = [
         icon: '✎',
         name: 'Study Notes',
         desc: 'Free-form note cards you can place anywhere on the infinite canvas.',
-        how: 'Click + ADD TILE → ✦ BLANK NOTE. Rename the title by clicking it.',
+        how: 'Click + ADD TILE → ✎ BLANK NOTE. Rename the title by clicking it.',
       },
       {
         icon: '♛',
@@ -63,7 +63,7 @@ const SECTIONS: Section[] = [
         icon: '✦',
         name: 'OT Worship Structures',
         desc: 'Interactive floor plans for the Tabernacle, Solomon\'s Temple, and Herod\'s Temple. Click any zone (Holy of Holies, altar, court of Gentiles, the Veil) for theological details and verse references.',
-        how: 'Click + ADD TILE → ✦ WORSHIP PLAN. Switch structures using the tab bar.',
+        how: 'Click + ADD TILE → ⌂ WORSHIP PLAN. Switch structures using the tab bar.',
         badge: 'new',
       },
       {
@@ -185,10 +185,24 @@ const SECTIONS: Section[] = [
         badge: 'top toolbar',
       },
       {
+        icon: '◐',
+        name: 'Plain Read',
+        desc: 'A second mode for reading a passage you are not going to teach. Same engine, aimed at understanding and obedience instead of delivery: the shape of the text as an exegetical outline keyed to verse ranges, the six steps of how the meaning was reached, what the passage will not support, and one honest thing to do about it. No outlines for a talk, no points, no illustrations. The maps, lineage, kings, timeline and temple plans all come with it.',
+        how: 'Analyze a passage, then click the PULPIT / PLAIN switch in the top toolbar. Click it again to come back.',
+        badge: 'top toolbar',
+      },
+      {
         icon: '↷',
         name: 'Passage History',
         desc: 'Every passage you\'ve studied is saved. Reload any previous session instantly.',
         how: 'Click the history icon in the top toolbar. Click any entry to reload it.',
+        badge: 'top toolbar',
+      },
+      {
+        icon: '⌕',
+        name: 'Search Your Studies',
+        desc: 'Search-as-you-type across every study you have ever run — the reference, the passage text, the meaning, the outline headings, and every note you wrote yourself. Notes you wrote rank above passage text.',
+        how: 'Click ⌕ in the top toolbar. Opening a result costs nothing — it loads from what is already saved.',
         badge: 'top toolbar',
       },
       {
@@ -215,7 +229,7 @@ const SECTIONS: Section[] = [
       {
         icon: '⚙',
         name: 'API Keys',
-        desc: 'Manage your Anthropic and ESV Bible API keys. Keys are stored locally, never sent to any server.',
+        desc: 'Manage your Anthropic and ESV Bible API keys. Keys are protected on this computer and sent only to the API services you connect.',
         how: 'Click the ⚙ gear in the top toolbar.',
         badge: 'top toolbar',
       },

@@ -119,7 +119,7 @@ const CORNERS = [
 ]
 
 // ── Main export ────────────────────────────────────────────────────────────────
-export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, onOpenAgent, currentTab: propTab }: Props) {
+export function CorePulse({ analysis, selectedId, onSelect, onSwitchTab, currentTab: propTab }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [dims, setDims]                     = useState({ w: 0, h: 0 })
   const [hoveredId, setHoveredId]           = useState<string | null>(null)

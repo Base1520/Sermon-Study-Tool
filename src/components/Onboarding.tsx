@@ -15,7 +15,7 @@ interface Step {
 
 const STEPS: Step[] = [
   {
-    title: 'Welcome to BASE 1520',
+    title: 'Welcome to The Operator',
     body: 'Scripture study built for the pulpit. A living passage analysis engine, AI scholar, and real-time eisegesis guard — all in one. Quick three-step tour and you\'re ready.',
     cta: 'Begin Tour',
     spotlight: null,

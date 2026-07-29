@@ -1,6 +1,7 @@
-import { useState, useCallback, useMemo, useEffect, lazy, Suspense } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } from 'react'
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels'
 import { motion, AnimatePresence } from 'motion/react'
+import { friendlyApiError, type FriendlyError } from './lib/apiErrors'
 import { PassageInput } from './components/PassageInput'
 import { Desk } from './components/Desk'
 import { CanonicalStrip } from './components/CanonicalStrip'
@@ -26,23 +27,26 @@ import bIcon from './assets/b-icon.png'
 const SeriesPanel     = lazy(() => import('./components/SeriesPanel').then(m => ({ default: m.SeriesPanel })))
 const FeatureTour     = lazy(() => import('./components/FeatureTour').then(m => ({ default: m.FeatureTour })))
 const ExegesisAcademy = lazy(() => import('./components/ExegesisAcademy').then(m => ({ default: m.ExegesisAcademy })))
-const BetaFeedback    = lazy(() => import('./components/BetaFeedback').then(m => ({ default: m.BetaFeedback })))
 const BookCompass     = lazy(() => import('./components/BookCompass').then(m => ({ default: m.BookCompass })))
 const HymnSelector    = lazy(() => import('./components/HymnSelector').then(m => ({ default: m.HymnSelector })))
 const CommandPalette  = lazy(() => import('./components/CommandPalette').then(m => ({ default: m.CommandPalette })))
 const SermonCalendar  = lazy(() => import('./components/SermonCalendar').then(m => ({ default: m.SermonCalendar })))
 const PreachChecklist = lazy(() => import('./components/PreachChecklist').then(m => ({ default: m.PreachChecklist })))
 const RehearsalReview = lazy(() => import('./components/RehearsalReview').then(m => ({ default: m.RehearsalReview })))
+const PlainRead       = lazy(() => import('./components/PlainRead').then(m => ({ default: m.PlainRead })))
+const StudyHistory    = lazy(() => import('./components/StudyHistory').then(m => ({ default: m.StudyHistory })))
+const GroupGuide      = lazy(() => import('./components/GroupGuide').then(m => ({ default: m.GroupGuide })))
 import { BASE } from './theme'
-import type { PhrasingAnalysis, Phrase, WordStudy, HistoryEntry, ChatMessage } from './types/phrasing'
+import type { PhrasingAnalysis, Phrase, WordStudy, HistoryEntry, ChatMessage, PlainReadDoc, PlainReadCorrection } from './types/phrasing'
 
 type Tab = 'desk' | 'scholar'
 
+const STORED_KEY = 'stored'
 
 export default function App() {
-  const [apiKey, setApiKey]       = useState(() => localStorage.getItem('sermon-tool-key') ?? '')
-  const [esvKey, setEsvKey]       = useState(() => localStorage.getItem('sermon-tool-esv-key') ?? '')
-  const [showKeyModal, setShowKeyModal] = useState(!localStorage.getItem('sermon-tool-key'))
+  const [apiKey, setApiKey]       = useState('')
+  const [esvKey, setEsvKey]       = useState('')
+  const [showKeyModal, setShowKeyModal] = useState(false)
   const [analysis, setAnalysis]   = useState<PhrasingAnalysis | null>(null)
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState<string | null>(null)
@@ -53,6 +57,9 @@ export default function App() {
   const [profileOpen, setProfileOpen] = useState(false)
   const [wordStudy, setWordStudy] = useState<WordStudy | null>(null)
   const [wordStudyLoading, setWordStudyLoading] = useState(false)
+  const [wordStudyError, setWordStudyError] = useState<FriendlyError | null>(null)
+  const [lastWordRequest, setLastWordRequest] = useState<{ word: string; clauseText: string } | null>(null)
+  const wordStudyRequest = useRef(0)
   const [prefillRef, setPrefillRef] = useState<string | null>(null)
   const [agentPanel, setAgentPanel] = useState<AgentType | null>(null)
   // Only show onboarding after API key is saved — never overlap with the key modal
@@ -63,11 +70,11 @@ export default function App() {
   const [showHymns, setShowHymns] = useState(false)
   const [showBookCompass, setShowBookCompass] = useState(false)
   const [showAcademy, setShowAcademy] = useState(false)
-  const [showFeedback, setShowFeedback] = useState(false)
   const [showPalette, setShowPalette] = useState(false)
   const [showCalendar, setShowCalendar] = useState(false)
   const [showChecklist, setShowChecklist] = useState(false)
   const [showRehearsal, setShowRehearsal] = useState(false)
+  const [showGroupGuide, setShowGroupGuide] = useState(false)
 
   // ⌘K / Ctrl+K opens the command palette
   useEffect(() => {
@@ -86,26 +93,170 @@ export default function App() {
   const [passagePanel, setPassagePanel] = useState<{ text: string; reference: string } | null>(null)
   const [phraseMode, setPhraseMode] = useState<'key' | 'all'>('key')
 
-  // Pull keys from Documents/BASE1520/keys.txt on launch — the one-folder setup.
-  // Non-empty file values win over what's stored, so rotating a key = edit the file.
+  // ── PLAIN READ — the reader mode. Same engine, different endpoint. ─────────
+  const [plainMode, setPlainMode]       = useState(
+    () => localStorage.getItem('sermon-tool-view-mode') !== 'pulpit'
+  )
+  const [plainDoc, setPlainDoc]         = useState<PlainReadDoc | null>(null)
+  const [plainLoading, setPlainLoading] = useState(false)
+  const [plainError, setPlainError]     = useState<FriendlyError | null>(null)
+  // What the reader actually typed, kept so the widening notice can be honest
+  // about a single verse having been opened out to its paragraph.
+  const [requestedRef, setRequestedRef] = useState<string | null>(null)
+  const [plainNonce, setPlainNonce]     = useState(0)
+  /* The token sent with THIS reading request. The background claim check lands
+     on an event long after plainRead() resolved, and two passages studied in
+     quick succession produce two checks whose order is not guaranteed — so a
+     correction is matched against this before it is allowed to replace what is
+     on screen. A ref, not state: the subscription below is mounted once and
+     would otherwise close over the id that was current when it mounted. */
+  const plainRequestRef = useRef<string | null>(null)
+  /* ── THE PASSAGE, HELD BACK NO LONGER ─────────────────────────────────────
+     The Scripture text is fetched BEFORE anything is sent to a model — it is
+     what gets sent. It was then held in a local variable inside handleAnalyze
+     and thrown away, so the reader saw nothing at all until two model calls
+     had finished, which is minutes. Keeping it in state costs nothing and puts
+     the passage on screen about a second after SEND IT. `analysis` still owns
+     the text once it lands; this is only what stands in until then. */
+  const [pendingPassage, setPendingPassage] = useState<{ text: string; reference: string } | null>(null)
+  /* The token sent with 'analyze-passage', so the reader view can tell this
+     run's progress messages from an abandoned run's. */
+  const [analysisStreamId, setAnalysisStreamId] = useState<string | null>(null)
+  // Searchable study history — nothing studied should ever be lost, and
+  // reopening a saved study is served from cache, so it costs nothing.
+  const [showStudySearch, setShowStudySearch] = useState(false)
+  const [demoMode, setDemoMode] = useState(false)
+
   useEffect(() => {
-    ;(window as any).electronAPI.getLocalKeys?.().then((k: any) => {
-      if (!k) return
-      if (k.ANTHROPIC_KEY) {
-        setApiKey(k.ANTHROPIC_KEY); localStorage.setItem('sermon-tool-key', k.ANTHROPIC_KEY)
-        setShowKeyModal(false)
-      }
-      if (k.ESV_KEY)    { setEsvKey(k.ESV_KEY); localStorage.setItem('sermon-tool-esv-key', k.ESV_KEY) }
-      if (k.OPENAI_KEY) { localStorage.setItem('sermon-tool-openai-key', k.OPENAI_KEY) }
-    }).catch(() => {})
+    if (!plainMode || !analysis || demoMode) return
+    if (!apiKey) {
+      setPlainError({
+        headline: 'No API key yet',
+        detail: 'Add your key in settings and the study will run.',
+      })
+      return
+    }
+    let cancelled = false
+    const requestId = `pr-${Date.now()}-${plainNonce}`
+    plainRequestRef.current = requestId
+    setPlainDoc(null); setPlainError(null); setPlainLoading(true)
+    ;(window as any).electronAPI.plainRead({
+      analysis,
+      apiKey,
+      requestedReference: requestedRef ?? analysis.reference,
+      /* Echoed back on the 'plain-read-verified' event so a correction can be
+         matched to the run that produced it. Older main processes ignore an
+         extra field, so sending it is safe either way. */
+      requestId,
+    })
+      .then((doc: PlainReadDoc) => { if (!cancelled) setPlainDoc(doc) })
+      .catch((e: any) => { if (!cancelled) setPlainError(friendlyApiError(e)) })
+      .finally(() => { if (!cancelled) setPlainLoading(false) })
+    return () => {
+      cancelled = true
+      /* This run is abandoned. Drop its token so a check that finishes after
+         the reader moved on cannot swap a document into a view that is now
+         showing something else. */
+      if (plainRequestRef.current === requestId) plainRequestRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plainMode, analysis, apiKey, plainNonce, demoMode])
+
+  /* ── THE BACKGROUND CLAIM CHECK, LANDING ───────────────────────────────────
+     The reading is handed over as soon as it is written; the adversarial check
+     runs after, off the critical path, and pushes a corrected document on
+     'plain-read-verified' (electron/preload.js → onPlainReadVerified). The
+     contract in electron/main.js is explicit about three things, and all three
+     are honoured here:
+
+       · The payload's `doc` is the WHOLE corrected document. Swap it in; do
+         not merge it.
+       · MATCH BEFORE YOU SWAP. Two passages in quick succession produce two
+         independent checks and the first can land second.
+       · NO UI. No badge, no toast, no tick, no flash. The corrections land
+         silently or not at all. A step's wording may change under the reader;
+         that is the accepted cost. Telling the reader is not.
+
+     Subscribed defensively — a build whose preload predates the event simply
+     never subscribes, and the reading behaves exactly as it does today. */
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (typeof api?.onPlainReadVerified !== 'function') return
+    const off = api.onPlainReadVerified((msg: PlainReadCorrection | null | undefined) => {
+      const corrected = msg?.doc
+      if (!corrected) return
+      // The run that asked for this must still be the run on screen.
+      if (msg?.requestId && msg.requestId !== plainRequestRef.current) return
+      setPlainDoc(prev => {
+        // Nothing on screen to correct. Never introduce a document this way.
+        if (!prev) return prev
+        if (!msg?.requestId) {
+          // No token to match on — fall back to what the contract guarantees.
+          const ref = msg?.reference ?? msg?.requestedReference ?? null
+          if (!ref) return prev
+          if (ref !== prev.reference && ref !== prev.expandedReference) return prev
+          if (msg?.readingLevel && prev.readingLevel && msg.readingLevel !== prev.readingLevel) return prev
+        }
+        return corrected
+      })
+    })
+    return () => { if (typeof off === 'function') off() }
+  }, [])
+
+  // The reader view occupies the desk slot, so entering PLAIN leaves any other
+  // tab. One control, one obvious result.
+  const togglePlain = useCallback(() => {
+    setPlainMode(p => {
+      const next = !p
+      localStorage.setItem('sermon-tool-view-mode', next ? 'plain' : 'pulpit')
+      return next
+    })
+    setTab('desk')
+  }, [])
+
+  // Belt on top of the braces. The scholar tab renders on `tab === 'scholar'`
+  // alone, and its handler reads the pastor's saved profile. If anything ever
+  // routes there while PLAIN is on, come straight back to the reader view
+  // rather than rendering it — and rather than rendering nothing.
+  useEffect(() => {
+    if (plainMode && tab === 'scholar') setTab('desk')
+  }, [plainMode, tab])
+
+  // Migrate legacy plaintext keys once, then keep only an availability flag in
+  // the renderer. Electron's main process owns the protected credentials.
+  useEffect(() => {
+    const electronAPI = (window as any).electronAPI
+    const legacy = {
+      ANTHROPIC_KEY: localStorage.getItem('sermon-tool-key') ?? '',
+      ESV_KEY: localStorage.getItem('sermon-tool-esv-key') ?? '',
+      OPENAI_KEY: localStorage.getItem('sermon-tool-openai-key') ?? '',
+    }
+
+    if (!electronAPI?.migrateLegacyApiKeys) {
+      setApiKey(legacy.ANTHROPIC_KEY)
+      setEsvKey(legacy.ESV_KEY)
+      setShowKeyModal(!legacy.ANTHROPIC_KEY)
+      return
+    }
+
+    electronAPI.migrateLegacyApiKeys(legacy).then((status: Record<string, boolean>) => {
+      setApiKey(status.ANTHROPIC_KEY ? STORED_KEY : '')
+      setEsvKey(status.ESV_KEY ? STORED_KEY : '')
+      setShowKeyModal(!status.ANTHROPIC_KEY)
+      localStorage.removeItem('sermon-tool-key')
+      localStorage.removeItem('sermon-tool-esv-key')
+      localStorage.removeItem('sermon-tool-openai-key')
+    }).catch(() => {
+      setShowKeyModal(true)
+    })
   }, [])
 
   // Show onboarding on launch if key already exists and user hasn't seen it
   useEffect(() => {
-    if (localStorage.getItem('sermon-tool-key') && shouldShowOnboarding()) {
+    if (!plainMode && apiKey && shouldShowOnboarding()) {
       setShowOnboarding(true)
     }
-  }, [])
+  }, [apiKey, plainMode])
 
   // Restore last session on launch
   useEffect(() => {
@@ -124,32 +275,78 @@ export default function App() {
     [analysis]
   )
 
-  const handleSaveKey = useCallback((key: string, esv = '') => {
+  const handleSaveKey = useCallback(async (key: string, esv = '') => {
     const cleanKey = key.trim()
     const cleanEsv = esv.trim()
-    setApiKey(cleanKey); localStorage.setItem('sermon-tool-key', cleanKey)
-    if (cleanEsv) { setEsvKey(cleanEsv); localStorage.setItem('sermon-tool-esv-key', cleanEsv) }
+    const status = await (window as any).electronAPI.saveApiKeys({
+      ANTHROPIC_KEY: cleanKey,
+      ESV_KEY: cleanEsv,
+    })
+    setApiKey(status.ANTHROPIC_KEY ? STORED_KEY : '')
+    setEsvKey(status.ESV_KEY ? STORED_KEY : '')
     setShowKeyModal(false)
     // Show onboarding tour now that the key is saved — first-time users only
-    if (shouldShowOnboarding()) setShowOnboarding(true)
-  }, [])
+    if (!plainMode && shouldShowOnboarding()) setShowOnboarding(true)
+  }, [plainMode])
 
   const handleAnalyze = useCallback(async (text: string, reference: string) => {
     if (!apiKey) { setShowKeyModal(true); return }
+    setDemoMode(false)
     setLoading(true); setError(null); setSelectedPhraseId(null); setWordStudy(null); setAnnotations({})
     setSavedDraft(undefined); setSavedChat(undefined)
+    setShowGroupGuide(false)
+    setRequestedRef(reference)
     setTab('desk')
+
+    /* ── THE PASSAGE GOES UP NOW ────────────────────────────────────────────
+       `text` is the Scripture itself, already fetched — it is what we are
+       about to send. It used to live and die inside this function while the
+       reader watched a spinner for the two model calls that follow. Handing
+       it to state here is what puts the text on screen about a second after
+       SEND IT instead of about three minutes after.
+
+       The previous reading goes with it. Leaving it up would park a finished
+       document from the last passage over the new passage's text. */
+    setPendingPassage({ text, reference })
+    setPlainDoc(null); setPlainError(null)
+
+    /* The token the progress messages come back stamped with, so a message
+       from a run the reader abandoned cannot drive this run's status line. */
+    const streamId = `an-${Date.now()}`
+    setAnalysisStreamId(streamId)
+
     try {
-      const result = await (window as any).electronAPI.analyzePassage({ text, reference, apiKey, streamId: `an-${Date.now()}` })
+      const result = await (window as any).electronAPI.analyzePassage({ text, reference, apiKey, streamId })
       setAnalysis(result)
       setCurrentHistoryId(null)
     } catch (e: any) {
-      setError(e.message ?? 'Analysis failed.')
+      const friendly = friendlyApiError(e)
+      setError(`${friendly.headline}. ${friendly.detail}`)
+      /* The reader view is hidden while that error is up — but the error is
+         dismissible, and the reading it was waiting for is never coming. Give
+         the reader view its own copy of the failure so that, dismissed or not,
+         it shows what happened and a way to retry instead of a status line for
+         a run that is already dead. The stand-in goes with it: there is no
+         longer a run behind that passage. */
+      setPlainError(friendly)
+      setPendingPassage(null)
+      setAnalysisStreamId(null)
     } finally { setLoading(false) }
   }, [apiKey])
 
   const handleLoadHistory = useCallback((entry: HistoryEntry) => {
     setAnalysis(entry.analysis)
+    setDemoMode(false)
+    /* A saved study carries its own passage text. The stand-in from the last
+       live run has nothing to do with it and must not outlive it. */
+    setPendingPassage(null)
+    setAnalysisStreamId(null)
+    // The widening notice is computed from what the reader TYPED. A saved study
+    // carries no typed reference, so leaving the last one in place made PLAIN
+    // announce "You gave me one verse — I loaded <this passage> and read
+    // <a verse from a different book> off of it." Clear it; the fallback is the
+    // saved reference, which produces no notice.
+    setRequestedRef(null)
     setAnnotations(entry.annotations ?? {})
     setCurrentHistoryId(entry.id)
     setSavedDraft(entry.draft)
@@ -168,16 +365,36 @@ export default function App() {
       await (window as any).electronAPI.historySaveAnnotations(currentHistoryId, next)
   }, [annotations, currentHistoryId])
 
-  const handleWordClick = useCallback(async (word: string, phrase: Phrase) => {
-    if (!analysis) return
-    setWordStudy(null); setWordStudyLoading(true)
+  const requestWordStudy = useCallback(async (word: string, clauseText: string) => {
+    /* The passage is on screen minutes before the analysis is, and the reader
+       is invited on that same screen to click any word. The word study needs a
+       reference, not an analysis — so it takes the one the reader is looking
+       at, whichever half of the run supplied it. Gating this on `analysis`
+       made the invitation false for the length of the run. */
+    const studyReference = analysis?.reference ?? pendingPassage?.reference ?? null
+    if (!studyReference) return
+    const requestId = ++wordStudyRequest.current
+    setLastWordRequest({ word, clauseText })
+    setWordStudy(null); setWordStudyError(null); setWordStudyLoading(true)
     try {
       const result = await (window as any).electronAPI.wordStudy({
-        word, clauseText: phrase.text, reference: analysis.reference, apiKey,
+        word, clauseText, reference: studyReference, apiKey,
       })
-      setWordStudy(result)
-    } catch { /* silent */ } finally { setWordStudyLoading(false) }
-  }, [analysis, apiKey])
+      if (requestId === wordStudyRequest.current) setWordStudy(result)
+    } catch (error) {
+      if (requestId === wordStudyRequest.current) setWordStudyError(friendlyApiError(error))
+    } finally {
+      if (requestId === wordStudyRequest.current) setWordStudyLoading(false)
+    }
+  }, [analysis, pendingPassage, apiKey])
+
+  const handleWordClick = useCallback((word: string, phrase: Phrase) => {
+    void requestWordStudy(word, phrase.text)
+  }, [requestWordStudy])
+
+  const handlePassageWordClick = useCallback((word: string, verseText: string) => {
+    void requestWordStudy(word, verseText)
+  }, [requestWordStudy])
 
   const handleLoadRef = useCallback((reference: string) => setPrefillRef(reference), [])
 
@@ -192,6 +409,30 @@ export default function App() {
     const html = buildStudyNotesHtml(analysis)
     await (window as any).electronAPI.exportPdf({ html, reference: `${analysis.reference} Study Notes` })
   }, [analysis])
+
+  /* ── WHAT THE READER VIEW HAS IN HAND ──────────────────────────────────────
+     The analysis owns the passage once it lands, and the stand-in covers the
+     minutes before that. The handoff between them is invisible on purpose:
+     electron/main.js sets `result.passageText = text` — the same string that
+     was sent — so the swap changes not one character and moves nothing on the
+     page. Until either exists there is no reader view to open.
+
+     THE STAND-IN WINS WHILE IT EXISTS, and that order matters: studying a
+     second passage while the first is still loaded leaves the OLD analysis in
+     state for the length of the new run, so reading `analysis` first would
+     have parked the previous passage over the one the reader just asked for.
+     It is cleared wherever a study arrives from somewhere other than SEND IT —
+     saved history, the demo — so it can never outlive its own run. */
+  const readerPassage = pendingPassage
+    ?? (analysis ? { text: analysis.passageText ?? '', reference: analysis.reference } : null)
+
+  /* THE READER VIEW IS OPEN FOR THE WHOLE RUN, not just after it. It used to be
+     gated on `!loading && analysis`, which is why the reader got a spinner on
+     an empty canvas for the length of two model calls: the one component that
+     could have shown them the passage was not mounted yet. It mounts the
+     moment the Scripture is fetched and stays mounted — the same element, the
+     same key — so the text never unmounts and re-enters underneath them. */
+  const readerOpen = plainMode && tab === 'desk' && !error && !!readerPassage
 
   return (
     <div style={{
@@ -256,11 +497,11 @@ export default function App() {
             <div style={{
               fontFamily: 'Saira', fontSize: 17, color: BASE.gold,
               letterSpacing: '0.18em', lineHeight: 1,
-            }}>BASE 1520</div>
+            }}>THE OPERATOR</div>
             <div style={{
               fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.steel,
               letterSpacing: '0.16em', marginTop: 2,
-            }}>SCRIPTURE STUDY · v2</div>
+            }}>BASE 1520 · SCRIPTURE STUDY</div>
           </div>
           <div style={{ width: 1, height: 24, background: BASE.borderGold, marginLeft: 4 }} />
           {/* System status */}
@@ -291,7 +532,13 @@ export default function App() {
             { type: 'exegetical'  as const, icon: 'α',  label: 'EXEGETICAL',  color: BASE.khaki },
             { type: 'theological' as const, icon: '✝',  label: 'THEOLOGICAL', color: BASE.gold },
             { type: 'homiletical' as const, icon: '◈',  label: 'HOMILETICAL', color: BASE.moss },
-          ] as const).map(agent => (
+            // None of the three agent desks appear in PLAIN. The homiletical one
+            // is preaching apparatus outright, and ALL THREE run through the
+            // 'agent-chat' handler, which reads the 'scholar-profile' store key
+            // (electron/main.js) — the pastor's hermeneutics and his own sermon
+            // manuscripts. That key must never be read on the layman path, so
+            // the entry points are off-screen here rather than filtered.
+          ] as const).filter(() => !plainMode).map(agent => (
             <button
               key={agent.type}
               onClick={() => setAgentPanel(agent.type)}
@@ -316,7 +563,9 @@ export default function App() {
 
         {/* RIGHT — controls */}
         <div className="no-drag" style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          {analysis && (
+          {/* Scholar chat runs on the saved hermeneutics profile, so it is a
+              pastor-view control. PLAIN never touches that key. */}
+          {analysis && !plainMode && (
             <button
               onClick={() => setTab(tab === 'scholar' ? 'desk' : 'scholar')}
               title="Scholar Chat"
@@ -334,6 +583,20 @@ export default function App() {
               <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6, letterSpacing: '0.1em', color: BASE.khaki, opacity: 0.8 }}>SCHOLAR</span>
             </button>
           )}
+          {/* PULPIT / PLAIN — who this reading is for. PLAIN drops the delivery
+              scaffolding entirely and aims at understanding and obedience. */}
+          <button onClick={togglePlain}
+            data-tip={plainMode ? 'BACK TO PULPIT VIEW' : 'PLAIN READ — FOR UNDERSTANDING'}
+            className="hud-tip"
+            style={{ ...iconBtn, width: 'auto', borderRadius: 15, padding: '0 11px', gap: 6,
+              fontFamily: 'JetBrains Mono', fontSize: 7, letterSpacing: '0.14em',
+              ...(plainMode ? { color: BASE.gold, borderColor: `${BASE.gold}55` } : {}) }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
+            onMouseLeave={e => { if (!plainMode) { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim } }}>
+            <span style={{ opacity: plainMode ? 0.35 : 1 }}>PULPIT</span>
+            <span style={{ opacity: 0.3 }}>/</span>
+            <span style={{ opacity: plainMode ? 1 : 0.35 }}>PLAIN</span>
+          </button>
           <button onClick={() => setShowBookCompass(true)} data-tip="BOOK COMPASS" className="hud-tip" style={iconBtn}
             onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
             onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim }}>
@@ -347,21 +610,37 @@ export default function App() {
               <polygon points="8,12.5 6.5,8 8,9 9.5,8" fill="#c05050" opacity="0.85"/>
             </svg>
           </button>
-          <button onClick={() => setShowSeries(true)} data-tip="SERMON SERIES" className="hud-tip" style={iconBtn}
-            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
-            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim }}>≡</button>
-          {analysis && (<>
+          {!plainMode && (
+            <button onClick={() => setShowSeries(true)} data-tip="SERMON SERIES" className="hud-tip" style={iconBtn}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim }}>≡</button>
+          )}
+          {analysis && !plainMode && (<>
             <button onClick={() => setShowHymns(true)} data-tip="WORSHIP PLANNING" className="hud-tip" style={iconBtn}
               onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
               onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim }}>♪</button>
             <button onClick={handleExport} data-tip="EXPORT PREACHING NOTES" className="hud-tip" style={{ ...iconBtn, fontSize: 15, fontWeight: 700 }}
               onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
               onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim }}>↓</button>
+          </>)}
+          {/* Study-notes export survives into PLAIN — it is study output, not
+              delivery output. */}
+          {analysis && (
             <button onClick={handleExportStudyNotes} data-tip="EXPORT STUDY NOTES" className="hud-tip" style={iconBtn}
               onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
               onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim }}>⇩</button>
-          </>)}
+          )}
+          {/* Search every study ever run. Reopening one is free. */}
+          <button onClick={() => setShowStudySearch(true)} data-tip="SEARCH YOUR STUDIES" className="hud-tip"
+            style={{ ...iconBtn, ...(showStudySearch ? { color: BASE.gold, borderColor: `${BASE.gold}55` } : {}) }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
+            onMouseLeave={e => { if (!showStudySearch) { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim } }}>
+            ⌕
+          </button>
           <HistoryPanel onLoad={handleLoadHistory} currentRef={analysis?.reference} />
+          {/* Delivery review, final clearance, sermon calendar — the preaching
+              apparatus. Fully live in PULPIT, off-screen in PLAIN. */}
+          {!plainMode && (<>
           <button onClick={() => setShowRehearsal(t => !t)} data-tip="DELIVERY REVIEW" className="hud-tip"
             style={{ ...iconBtn, ...(showRehearsal ? { color: BASE.gold, borderColor: `${BASE.gold}55` } : {}) }}
             onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
@@ -380,12 +659,7 @@ export default function App() {
             onMouseLeave={e => { if (!showCalendar) { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim } }}>
             ▦
           </button>
-          <button onClick={() => setShowFeedback(t => !t)} data-tip="BETA FEEDBACK" className="hud-tip"
-            style={{ ...iconBtn, ...(showFeedback ? { color: BASE.gold, borderColor: `${BASE.gold}55` } : {}) }}
-            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
-            onMouseLeave={e => { if (!showFeedback) { (e.currentTarget as HTMLElement).style.color = BASE.steel; (e.currentTarget as HTMLElement).style.borderColor = BASE.borderDim } }}>
-            ✉
-          </button>
+          </>)}
           <button onClick={() => setShowAcademy(t => !t)} data-tip="EXEGESIS ACADEMY" className="hud-tip"
             style={{ ...iconBtn, ...(showAcademy ? { color: BASE.gold, borderColor: `${BASE.gold}55` } : {}) }}
             onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = BASE.gold; (e.currentTarget as HTMLElement).style.borderColor = `${BASE.gold}44` }}
@@ -423,19 +697,27 @@ export default function App() {
           <PassageInput
             onAnalyze={handleAnalyze} loading={loading}
             prefillRef={prefillRef} onPrefillUsed={() => setPrefillRef(null)} esvKey={esvKey}
+            mode={plainMode ? 'plain' : 'pulpit'}
             onExpandPassage={(text, reference) => setPassagePanel({ text, reference })}
           />
           {analysis && (
             <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', minHeight: 0, paddingBottom: 14 }}>
               {/* Commentary front and center — no scrolling to find it */}
               <CommentaryPanel
+                key={analysis.reference}
                 reference={analysis.reference}
+                passageText={analysis.passageText}
                 mainTheme={analysis.mainTheme}
                 apiKey={apiKey}
               />
-              {/* Study anchors — intent + questions (cultural notes live on the desk tile) */}
-              <IntentCard intent={(analysis as any).authorIntent} />
-              <QuestionsCard questions={(analysis as any).questionsToConsider} />
+              {/* Preacher-facing intent and questions stay on the PULPIT side.
+                  PLAIN builds its guide from the verified reader document. */}
+              {!plainMode && (
+                <>
+                  <IntentCard intent={(analysis as any).authorIntent} />
+                  <QuestionsCard questions={analysis.questionsToConsider} />
+                </>
+              )}
             </div>
           )}
         </div>
@@ -446,6 +728,8 @@ export default function App() {
             <PassagePanel
               text={passagePanel.text}
               reference={passagePanel.reference}
+              divisions={analysis?.outline}
+              onWordClick={analysis ? handlePassageWordClick : undefined}
               onClose={() => setPassagePanel(null)}
             />
           )}
@@ -455,8 +739,12 @@ export default function App() {
         <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
           <Starfield />
 
-          {/* Loading — thinking display */}
-          {loading && <ThinkingDisplay />}
+          {/* Loading — thinking display.
+              PULPIT ONLY NOW. In the reader view the passage itself occupies
+              this canvas while the run goes, with a status line above it that
+              says what is actually happening; a full-canvas thinking animation
+              on top of that would cover the one thing the reader came for. */}
+          {loading && !readerOpen && <ThinkingDisplay />}
 
           {/* Error */}
           {error && (
@@ -489,19 +777,93 @@ export default function App() {
                   padding: '6px 24px', color: BASE.red,
                   fontFamily: 'JetBrains Mono', fontSize: 8, cursor: 'pointer', letterSpacing: '0.14em',
                 }}>[ DISMISS ]</button>
+                <button onClick={() => setShowKeyModal(true)} style={{
+                  marginTop: 8, marginLeft: 8,
+                  background: `${BASE.gold}11`, border: `1px solid ${BASE.borderGold}`,
+                  padding: '6px 18px', color: BASE.gold,
+                  fontFamily: 'JetBrains Mono', fontSize: 8, cursor: 'pointer', letterSpacing: '0.12em',
+                }}>[ API SETTINGS ]</button>
               </div>
             </div>
           )}
 
-          {/* Empty state */}
+          {/* Empty state.
+              In PLAIN the two pastor-only exits off this screen are closed at
+              the CALLBACK, not just at the header buttons. The SCHOLAR node
+              here calls onSwitchTab('scholar'), and the scholar tab renders on
+              `tab === 'scholar'` alone — so from PLAIN with nothing analyzed
+              yet, one click reached ScholarChat, whose 'scholar-chat' handler
+              reads the 'scholar-profile' store key. */}
           {!loading && !error && !analysis && tab !== 'scholar' && (
-            <CorePulse onSwitchTab={t => setTab(t as Tab)} onOpenAgent={setAgentPanel} currentTab={tab} />
+            plainMode ? (
+              <div style={{
+                position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+                padding: 40, textAlign: 'center',
+              }}>
+                <div style={{ maxWidth: 520 }}>
+                  <div style={{
+                    fontFamily: 'Saira, sans-serif', fontSize: 12, color: BASE.gold,
+                    letterSpacing: '0.18em', fontWeight: 800,
+                  }}>PLAIN SCRIPTURE STUDY</div>
+                  <h1 style={{
+                    margin: '12px 0 10px', fontFamily: 'Crimson Pro, serif',
+                    fontSize: 34, fontWeight: 400, color: BASE.bone,
+                  }}>Start with the text.</h1>
+                  <p style={{
+                    fontFamily: 'Inter, system-ui, sans-serif', fontSize: 16,
+                    lineHeight: 1.7, color: BASE.boneMid, margin: 0,
+                  }}>
+                    Enter a passage in the left panel. The app will load the Scripture,
+                    trace its natural divisions, and walk through what the author is doing.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <CorePulse
+                onSwitchTab={t => setTab(t as Tab)}
+                onOpenAgent={setAgentPanel}
+                currentTab={tab}
+              />
+            )
           )}
 
           {/* Tab content */}
           <AnimatePresence mode="wait">
+            {/* PLAIN READ — replaces the Desk while the reader mode is on */}
+            {readerOpen && (
+              <motion.div key="plain" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }} style={{ position: 'absolute', inset: 0 }}>
+                <Suspense fallback={null}>
+                  <PlainRead
+                    doc={plainDoc}
+                    loading={plainLoading}
+                    error={plainError}
+                    passageText={readerPassage?.text}
+                    reference={readerPassage?.reference ?? ''}
+                    /* Which half of the run is going, and the token its
+                       progress messages carry. The status line above the
+                       passage is built from these — real stages from the
+                       process doing the work, nothing simulated. */
+                    analyzing={loading}
+                    progressStreamId={analysisStreamId}
+                    onRetry={() => setPlainNonce(n => n + 1)}
+                    onOpenSettings={() => setShowKeyModal(true)}
+                    /* Every study surface stays available to the reader: map,
+                       lineage, kings, monarchy timeline, parallel versions,
+                       cross-reference field, cultural notes. */
+                    analysis={analysis}
+                    apiKey={apiKey}
+                    esvKey={esvKey}
+                    onLoadRef={handleLoadRef}
+                    onWordClick={handlePassageWordClick}
+                    onOpenGroupGuide={plainDoc && apiKey ? () => setShowGroupGuide(true) : undefined}
+                  />
+                </Suspense>
+              </motion.div>
+            )}
+
             {/* Desk — phrase tree + outline + cultural notes + draft on one infinite canvas */}
-            {!loading && !error && analysis && tab === 'desk' && (
+            {!loading && !error && analysis && tab === 'desk' && !plainMode && (
               <motion.div key="desk" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 transition={{ duration: 0.2 }} style={{ position: 'absolute', inset: 0, display: 'flex' }}>
                 {/* COVENANT Mission Rail — the framework as the app's spine */}
@@ -534,11 +896,6 @@ export default function App() {
                   phraseMode={phraseMode}
                   onPhraseModeChange={setPhraseMode}
                   onLoadRef={handleLoadRef}
-                />
-                <WordStudyDrawer
-                  study={wordStudy}
-                  loading={wordStudyLoading}
-                  onClose={() => { setWordStudy(null); setWordStudyLoading(false) }}
                 />
                 </div>
               </motion.div>
@@ -577,11 +934,31 @@ export default function App() {
         </div>
       </div>
 
+      <WordStudyDrawer
+        study={wordStudy}
+        loading={wordStudyLoading}
+        error={wordStudyError}
+        onOpenSettings={() => setShowKeyModal(true)}
+        onRetry={lastWordRequest ? () => void requestWordStudy(lastWordRequest.word, lastWordRequest.clauseText) : undefined}
+        onClose={() => {
+          wordStudyRequest.current += 1
+          setWordStudy(null)
+          setWordStudyError(null)
+          setWordStudyLoading(false)
+        }}
+      />
+
       {showKeyModal && (
-        <ApiKeyModal onSave={handleSaveKey} onClose={() => setShowKeyModal(false)} existingKey={apiKey} existingEsvKey={esvKey}
+        <ApiKeyModal onSave={handleSaveKey} onClose={() => setShowKeyModal(false)} hasExistingKey={Boolean(apiKey)} hasExistingEsvKey={Boolean(esvKey)}
           onDemo={() => {
             import('./data/demoAnalysis').then(m => {
               setAnalysis(m.DEMO_ANALYSIS as any)
+              setPlainDoc(m.DEMO_PLAIN_READ)
+              setPendingPassage(null)
+              setAnalysisStreamId(null)
+              setPlainMode(true)
+              localStorage.setItem('sermon-tool-view-mode', 'plain')
+              setDemoMode(true)
               setCurrentHistoryId(null)
               setShowKeyModal(false)
               setTab('desk')
@@ -601,9 +978,11 @@ export default function App() {
         />
       )}
 
-      {/* Agent chat panels */}
+      {/* Agent chat panels. Gated on !plainMode at the mount, not just at the
+          buttons: 'agent-chat' reads the pastor's saved profile, so no entry
+          point — header, core pulse, rail — can reach it from the layman view. */}
       <AnimatePresence>
-        {agentPanel && (
+        {agentPanel && !plainMode && (
           <AgentChat
             key={agentPanel}
             agentType={agentPanel}
@@ -619,13 +998,18 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* The expert / scholar-profile import is a PULPIT-only surface. It holds
+          the pastor's hermeneutics and his own sermon manuscripts; a layman has
+          no sermons to import and none of that may cross into PLAIN. Gating it
+          here keeps the 'scholar-profile' store key unread on that path even if
+          some future control tries to open it. */}
       <ScholarProfile
-        isOpen={profileOpen}
+        isOpen={profileOpen && !plainMode}
         onClose={() => setProfileOpen(false)}
         apiKey={apiKey}
       />
 
-      {showOnboarding && (
+      {showOnboarding && !plainMode && (
         <Onboarding onComplete={() => {
           setShowOnboarding(false)
           // Prompt setup wizard after tour if profile likely empty
@@ -636,7 +1020,7 @@ export default function App() {
       )}
 
       <AnimatePresence>
-        {showSetupWizard && (
+        {showSetupWizard && !plainMode && (
           <SetupWizard onComplete={() => setShowSetupWizard(false)} />
         )}
       </AnimatePresence>
@@ -644,15 +1028,6 @@ export default function App() {
       <AnimatePresence>
         {showFeatureTour && (
           <FeatureTour onClose={() => setShowFeatureTour(false)} />
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {showFeedback && (
-          <BetaFeedback
-            onClose={() => setShowFeedback(false)}
-            isAdmin={import.meta.env.VITE_ADMIN === 'true'}
-          />
         )}
       </AnimatePresence>
 
@@ -715,22 +1090,52 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {showGroupGuide && analysis && plainDoc && apiKey && (
+          <GroupGuide
+            analysis={analysis}
+            plainDoc={plainDoc}
+            apiKey={apiKey}
+            onClose={() => setShowGroupGuide(false)}
+            onOpenSettings={() => setShowKeyModal(true)}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Searchable study history. Reopening a result loads the saved analysis,
+          so the reading comes back off cache — no API call, no cost. */}
+      {showStudySearch && (
+        <StudyHistory
+          onLoad={handleLoadHistory}
+          onClose={() => setShowStudySearch(false)}
+          currentRef={analysis?.reference}
+        />
+      )}
+
       {showPalette && (
         <CommandPalette
           onClose={() => setShowPalette(false)}
           onGoToReference={(ref) => setPrefillRef(ref)}
           onLoadHistory={handleLoadHistory}
           actions={[
-            { id: 'checks',   icon: '☑', label: 'Open Pre-Preach Checks',       run: () => setShowChecklist(true) },
-            { id: 'review',   icon: '⏺', label: 'Open Delivery Review',         run: () => setShowRehearsal(true) },
-            { id: 'calendar', icon: '▦', label: 'Open Sermon Calendar',        run: () => setShowCalendar(true) },
+            { id: 'plain',    icon: '◐', label: plainMode ? 'Back to Pulpit View' : 'Open Plain Read', run: togglePlain },
+            { id: 'studies',  icon: '⌕', label: 'Search Your Studies',          run: () => setShowStudySearch(true) },
+            ...(analysis ? [
+              { id: 'group', icon: '◫', label: 'Build COVENANT Group Guide', run: () => setShowGroupGuide(true) },
+            ] : []),
+            // Preaching apparatus and the scholar-profile import are listed in
+            // PULPIT only. PLAIN keeps every study tool and drops the rest.
+            ...(plainMode ? [] : [
+              { id: 'checks',   icon: '☑', label: 'Open Pre-Preach Checks',     run: () => setShowChecklist(true) },
+              { id: 'review',   icon: '⏺', label: 'Open Delivery Review',       run: () => setShowRehearsal(true) },
+              { id: 'calendar', icon: '▦', label: 'Open Sermon Calendar',       run: () => setShowCalendar(true) },
+              { id: 'series',   icon: '≡', label: 'Open Sermon Series',         run: () => setShowSeries(true) },
+              { id: 'hymns',    icon: '♪', label: 'Open Worship Planning',      run: () => setShowHymns(true) },
+              { id: 'profile',  icon: '⚈', label: 'Open Scholar Profile',       run: () => setProfileOpen(true) },
+            ]),
             { id: 'compass',  icon: '◉', label: 'Open Book Compass',          run: () => setShowBookCompass(true) },
-            { id: 'series',   icon: '≡', label: 'Open Sermon Series',          run: () => setShowSeries(true) },
             { id: 'academy',  icon: '◎', label: 'Open Exegesis Academy',       run: () => setShowAcademy(true) },
-            { id: 'feedback', icon: '✉', label: 'Open Beta Feedback',          run: () => setShowFeedback(true) },
-            { id: 'hymns',    icon: '♪', label: 'Open Worship Planning',       run: () => setShowHymns(true) },
             { id: 'tour',     icon: '?', label: 'Open Features & Tips',        run: () => setShowFeatureTour(true) },
-            { id: 'profile',  icon: '⚈', label: 'Open Scholar Profile',        run: () => setProfileOpen(true) },
             { id: 'settings', icon: '⚙', label: 'Open Settings (API Keys)',    run: () => setShowKeyModal(true) },
           ]}
         />
@@ -740,19 +1145,28 @@ export default function App() {
   )
 }
 
+function escapeHtml(value: unknown) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
 // ── Study Notes export — congregation handout ────────────────────────────────
 function buildStudyNotesHtml(analysis: PhrasingAnalysis) {
   const outlineHtml = analysis.outline.map(p =>
     `<div class="point">
       <div class="point-row">
-        <span class="point-num">${p.point}</span>
-        <span class="point-label">${p.label}</span>
+        <span class="point-num">${escapeHtml(p.point)}</span>
+        <span class="point-label">${escapeHtml(p.label)}</span>
       </div>
       <div class="fill-line"></div>
       ${(p.sub ?? []).map(s => `
         <div class="sub-row">
-          <span class="sub-num">${s.point}</span>
-          <span class="sub-label">${s.label}</span>
+          <span class="sub-num">${escapeHtml(s.point)}</span>
+          <span class="sub-label">${escapeHtml(s.label)}</span>
         </div>
         <div class="fill-line fill-line--sub"></div>
       `).join('')}
@@ -761,18 +1175,18 @@ function buildStudyNotesHtml(analysis: PhrasingAnalysis) {
 
   const culturalHtml = (analysis.culturalNotes ?? []).slice(0, 4).map(n =>
     `<div class="cultural-note">
-      <span class="cn-term">${n.term}</span>
-      <span class="cn-cat">${n.category.replace(/-/g,' ')}</span>
-      <p class="cn-body">${n.significance}</p>
+      <span class="cn-term">${escapeHtml(n.term)}</span>
+      <span class="cn-cat">${escapeHtml(n.category.replace(/-/g,' '))}</span>
+      <p class="cn-body">${escapeHtml(n.significance)}</p>
     </div>`
   ).join('')
 
   const date = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
 
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<title>${analysis.reference} — Study Notes</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>${escapeHtml(analysis.reference)} — Study Notes</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:'EB Garamond',Georgia,serif;background:#fff;color:#1A2010;font-size:15px;line-height:1.6}
   .page{max-width:680px;margin:0 auto;padding:40px 36px}
@@ -805,14 +1219,14 @@ function buildStudyNotesHtml(analysis: PhrasingAnalysis) {
 
 <div class="header">
   <div>
-    <div class="ref">${analysis.reference}</div>
+    <div class="ref">${escapeHtml(analysis.reference)}</div>
     <div class="date">${date}</div>
   </div>
 </div>
 
 <div class="big-idea">
   <div class="bi-label">Big Idea</div>
-  <div class="bi-text">${analysis.mainTheme}</div>
+  <div class="bi-text">${escapeHtml(analysis.mainTheme)}</div>
 </div>
 
 <div class="section">
@@ -837,11 +1251,12 @@ ${culturalHtml ? `<div class="section">
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 const iconBtn: React.CSSProperties = {
-  width: 30, height: 30, borderRadius: '50%',
+  // Up ~15% from 30/13, to carry the same weight as the study rail beside it.
+  width: 34, height: 34, borderRadius: '50%',
   border: `1px solid ${BASE.borderDim}`,
   background: 'transparent',
   color: BASE.steel,
-  cursor: 'pointer', fontSize: 13,
+  cursor: 'pointer', fontSize: 15,
   display: 'flex', alignItems: 'center', justifyContent: 'center',
   transition: 'all 0.15s',
 }
@@ -850,46 +1265,46 @@ const iconBtn: React.CSSProperties = {
 function buildExportHtml(analysis: PhrasingAnalysis, annotations: Record<string, string>) {
   const outlineHtml = analysis.outline.map(p =>
     `<div class="point">
-      <div class="point-head"><span class="point-num">${p.point}</span> <span class="point-label">${p.label}</span></div>
-      ${(p.sub ?? []).map(s => `<div class="sub-point"><span class="point-num">${s.point}</span> ${s.label}</div>`).join('')}
+      <div class="point-head"><span class="point-num">${escapeHtml(p.point)}</span> <span class="point-label">${escapeHtml(p.label)}</span></div>
+      ${(p.sub ?? []).map(s => `<div class="sub-point"><span class="point-num">${escapeHtml(s.point)}</span> ${escapeHtml(s.label)}</div>`).join('')}
     </div>`
   ).join('')
 
   const annotated = analysis.phrases.filter(p => annotations[p.id])
   const annotationsHtml = annotated.map(p =>
     `<div class="annotation-item">
-      <div class="ann-phrase">"${p.text}"</div>
-      <div class="ann-note">${annotations[p.id]}</div>
+      <div class="ann-phrase">"${escapeHtml(p.text)}"</div>
+      <div class="ann-note">${escapeHtml(annotations[p.id])}</div>
     </div>`
   ).join('')
 
   const culturalHtml = (analysis.culturalNotes ?? []).map(n =>
     `<div class="cultural-note">
       <div class="cn-header">
-        <span class="cn-term">${n.term}</span>
-        <span class="cn-cat">${n.category.replace(/-/g,' ')}</span>
+        <span class="cn-term">${escapeHtml(n.term)}</span>
+        <span class="cn-cat">${escapeHtml(n.category.replace(/-/g,' '))}</span>
       </div>
-      <p class="cn-body">${n.explanation}</p>
-      <p class="cn-sig">↳ ${n.significance}</p>
+      <p class="cn-body">${escapeHtml(n.explanation)}</p>
+      <p class="cn-sig">↳ ${escapeHtml(n.significance)}</p>
     </div>`
   ).join('')
 
   const phrasesHtml = analysis.phrases.map(p =>
     `<div class="phrase" style="margin-left:${Math.min(p.level,3) * 20}px">
-      <span class="ptype">${p.type}${p.connective ? ` · <em>${p.connective}</em>` : ''}</span>
-      <span class="ptext">${p.text}</span>
-      ${p.theologicalNote ? `<span class="pnote">— ${p.theologicalNote}</span>` : ''}
-      ${annotations[p.id] ? `<div class="pann">✎ ${annotations[p.id]}</div>` : ''}
+      <span class="ptype">${escapeHtml(p.type)}${p.connective ? ` · <em>${escapeHtml(p.connective)}</em>` : ''}</span>
+      <span class="ptext">${escapeHtml(p.text)}</span>
+      ${p.theologicalNote ? `<span class="pnote">— ${escapeHtml(p.theologicalNote)}</span>` : ''}
+      ${annotations[p.id] ? `<div class="pann">✎ ${escapeHtml(annotations[p.id])}</div>` : ''}
     </div>`
   ).join('')
 
-  const themes = (analysis.canonicalContext?.biblicalThemes ?? []).map(t => `<span class="theme-pill">${t}</span>`).join('')
-  const keywords = (analysis.canonicalContext?.keyWords ?? []).map(w => `<span class="kw-pill">${w}</span>`).join('')
+  const themes = (analysis.canonicalContext?.biblicalThemes ?? []).map(t => `<span class="theme-pill">${escapeHtml(t)}</span>`).join('')
+  const keywords = (analysis.canonicalContext?.keyWords ?? []).map(w => `<span class="kw-pill">${escapeHtml(w)}</span>`).join('')
 
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<title>${analysis.reference} — Preaching Notes</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>${escapeHtml(analysis.reference)} — Preaching Notes</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:'EB Garamond',Georgia,serif;background:#FAFAF7;color:#1A2010;line-height:1.7;font-size:16px}
   .page{max-width:720px;margin:0 auto;padding:48px 40px}
@@ -945,11 +1360,11 @@ function buildExportHtml(analysis: PhrasingAnalysis, annotations: Record<string,
 <body><div class="page">
 
 <div class="header">
-  <div class="ref">${analysis.reference}</div>
+  <div class="ref">${escapeHtml(analysis.reference)}</div>
   <div class="byline">Preaching Notes · BASE 1520 · ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</div>
 </div>
 
-<div class="big-idea">${analysis.mainTheme}</div>
+<div class="big-idea">${escapeHtml(analysis.mainTheme)}</div>
 
 ${themes || keywords ? `<div class="chips">${themes}${keywords}</div>` : ''}
 
@@ -976,9 +1391,9 @@ ${annotationsHtml ? `<div class="section">
 <div class="section">
   <div class="section-head">Canonical Context</div>
   <div class="canon-grid">
-    <div class="canon-item"><div class="canon-label">Book Theme</div><div class="canon-value">${analysis.canonicalContext?.bookTheme ?? ''}</div></div>
-    <div class="canon-item"><div class="canon-label">Passage Role</div><div class="canon-value">${analysis.canonicalContext?.passageRole ?? ''}</div></div>
-    <div class="canon-item" style="grid-column:1/-1"><div class="canon-label">Canonical Connections</div><div class="canon-value">${analysis.canonicalContext?.canonicalConnections ?? ''}</div></div>
+    <div class="canon-item"><div class="canon-label">Book Theme</div><div class="canon-value">${escapeHtml(analysis.canonicalContext?.bookTheme)}</div></div>
+    <div class="canon-item"><div class="canon-label">Passage Role</div><div class="canon-value">${escapeHtml(analysis.canonicalContext?.passageRole)}</div></div>
+    <div class="canon-item" style="grid-column:1/-1"><div class="canon-label">Canonical Connections</div><div class="canon-value">${escapeHtml(analysis.canonicalContext?.canonicalConnections)}</div></div>
   </div>
 </div>
 

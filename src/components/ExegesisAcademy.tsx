@@ -1,11 +1,45 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { BASE, FONT, MOTION } from '../theme'
 import {
   SKILLS, LEVEL_THRESHOLDS, PASS_THRESHOLD, LESSON_XP, QUIZ_PASS_XP,
   getAcademyProgress, saveAcademyProgress, getSkillProgress, getLevel,
-  type Skill, type AcademyProgress,
+  type Skill, type AcademyProgress, type QuizQuestion,
 } from '../data/academyData'
+
+// ── Deterministic option ordering ─────────────────────────────────────────────
+// The authored data clusters correct answers in one slot. Rather than trusting
+// the author's shuffling, derive a stable per-question permutation from the
+// question text so the correct answer lands in a different position per
+// question — and in the SAME position every time that question is shown, so
+// results, review, and retakes all agree.
+
+function hashString(s: string): number {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+/** Returns display order as an array of ORIGINAL option indices. */
+function optionOrder(q: QuizQuestion): number[] {
+  const idx = q.options.map((_, i) => i)
+  let seed = hashString(q.q) || 1
+  const rand = () => {
+    // xorshift32 — deterministic, no dependencies
+    seed ^= seed << 13; seed >>>= 0
+    seed ^= seed >>> 17
+    seed ^= seed << 5;  seed >>>= 0
+    return seed / 4294967296
+  }
+  for (let i = idx.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    ;[idx[i], idx[j]] = [idx[j], idx[i]]
+  }
+  return idx
+}
 
 const CARD   = BASE.bgCard
 const KHAKI  = BASE.khaki
@@ -32,7 +66,13 @@ export function ExegesisAcademy({ onClose }: Props) {
   const [quizDone, setQuizDone]       = useState(false)
   const [score, setScore]             = useState(0)
 
-  const panelRef = useRef<HTMLDivElement>(null)  // for future scroll-to-top behavior
+  const panelRef = useRef<HTMLDivElement>(null)
+  const bodyRef  = useRef<HTMLDivElement>(null)
+
+  // Lessons are long now — always start a new lesson / question at the top.
+  useEffect(() => {
+    bodyRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+  }, [view, activeSkill, activeLesson, qIndex, quizDone])
 
   function save(p: AcademyProgress) {
     saveAcademyProgress(p)
@@ -205,7 +245,7 @@ export function ExegesisAcademy({ onClose }: Props) {
       </div>
 
       {/* ── Body ───────────────────────────────────────────── */}
-      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+      <div ref={bodyRef} style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         <AnimatePresence mode="wait">
           {view === 'home' && (
             <HomeView key="home" skills={SKILLS} progress={progress} onOpen={openSkill} isUnlocked={isSkillUnlocked} passed={passed} lvl={lvl} />
@@ -290,7 +330,7 @@ function HomeView({ skills, progress, onOpen, isUnlocked, passed, lvl }: {
           <div style={{ fontSize: 7, color: KHAKI, opacity: 0.4, marginTop: 1 }}>
             {skills.length - passed > 0
               ? `Next unlock: complete ${skills[passed]?.title ?? 'remaining skills'}`
-              : 'All skills mastered — Master Exegete'}
+              : 'All skills mastered — Master Exegete · still under the text, still correctable'}
           </div>
         </div>
       </div>
@@ -443,16 +483,16 @@ function LessonsView({ skill, progress, onLesson, onStartQuiz }: {
           SKILL ASSESSMENT
         </div>
         <div style={{ fontSize: 9.5, color: TEXT, marginBottom: 8 }}>
-          10-question quiz · 80% to pass · sequential unlock
+          {skill.quiz.length}-question quiz · {Math.round(PASS_THRESHOLD * 100)}% to pass · sequential unlock
         </div>
         {sp.quizBestScore > 0 && (
           <div style={{ fontSize: 8, color: sp.quizPassed ? GOLD : '#c07050', marginBottom: 8 }}>
-            Best: {sp.quizBestScore}/10 · Attempts: {sp.quizAttempts}
+            Best: {sp.quizBestScore}/{skill.quiz.length} · Attempts: {sp.quizAttempts}
             {sp.quizPassed ? ' · ✓ PASSED' : ''}
           </div>
         )}
         <button onClick={onStartQuiz}
-          disabled={!allDone && sp.lessonsCompleted.length === 0}
+          disabled={!allDone}
           style={{
             background: allDone ? GOLD : `${GOLD}40`,
             border: 'none',
@@ -493,13 +533,19 @@ function LessonView({ skill, lessonIdx, progress, onPrev, onNext }: {
         {lesson.title}
       </h2>
 
-      {/* Content */}
+      {/* Content — authored with blank lines between paragraphs */}
       <div style={{
         fontSize: 13, color: TEXT, lineHeight: 1.85,
         fontFamily: FONT.serif,
         marginBottom: 22,
       }}>
-        {lesson.content}
+        {lesson.content.split(/\n{2,}/).map((para, i) => (
+          // pre-line keeps the single-newline list blocks (e.g. the connector
+          // table) on their own lines without needing markup in the data.
+          <p key={i} style={{ margin: '0 0 14px', whiteSpace: 'pre-line' }}>
+            {para.trim()}
+          </p>
+        ))}
       </div>
 
       {/* Exercise */}
@@ -575,6 +621,10 @@ function QuizView({ skill, qIndex, answers, revealed, done, score, onAnswer, onN
   const total   = skill.quiz.length
   const pct     = done ? score / total : qIndex / total
   const passed  = done && score / total >= PASS_THRESHOLD
+  // Display order is a stable permutation of the ORIGINAL indices, so the
+  // correct answer is not always in the same slot. We always hand the parent
+  // the original index, which keeps scoring and review logic unchanged.
+  const order   = useMemo(() => optionOrder(q), [q])
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
@@ -602,9 +652,10 @@ function QuizView({ skill, qIndex, answers, revealed, done, score, onAnswer, onN
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-            {q.options.map((opt, i) => {
-              const isCorrect = i === q.answer
-              const isChosen  = i === chosen
+            {order.map((origIdx, i) => {
+              const opt       = q.options[origIdx]
+              const isCorrect = origIdx === q.answer
+              const isChosen  = origIdx === chosen
               let bg: string = CARD, border: string = BORDER, color: string = TEXT
               if (revealed) {
                 if (isCorrect) { bg = `${GOLD}20`; border = GOLD; color = GOLD }
@@ -613,7 +664,7 @@ function QuizView({ skill, qIndex, answers, revealed, done, score, onAnswer, onN
                 bg = `${GOLD}15`; border = `${GOLD}70`
               }
               return (
-                <button key={i} onClick={() => onAnswer(i)}
+                <button key={origIdx} onClick={() => onAnswer(origIdx)}
                   style={{
                     background: bg, border: `1px solid ${border}`, borderRadius: 8,
                     padding: '10px 14px', cursor: revealed ? 'default' : 'pointer',
@@ -662,13 +713,13 @@ function QuizView({ skill, qIndex, answers, revealed, done, score, onAnswer, onN
               {passed ? '🏆' : '📖'}
             </div>
             <div style={{ fontFamily: FONT.display, fontSize: 26, color: passed ? GOLD : TEXT, letterSpacing: '0.08em', lineHeight: 1, marginBottom: 6 }}>
-              {passed ? 'SKILL UNLOCKED' : 'NOT QUITE YET'}
+              {passed ? 'SKILL UNLOCKED' : 'NOT PASSED'}
             </div>
             <div style={{ fontSize: 13, color: KHAKI, marginBottom: 4 }}>
               {score}/{total} correct · {Math.round((score / total) * 100)}%
             </div>
             <div style={{ fontSize: 10, color: KHAKI, opacity: 0.5 }}>
-              {passed ? `+${QUIZ_PASS_XP} XP earned` : `Need ${Math.ceil(PASS_THRESHOLD * total)}/10 to pass`}
+              {passed ? `+${QUIZ_PASS_XP} XP earned` : `Need ${Math.ceil(PASS_THRESHOLD * total)}/${total} to pass`}
             </div>
           </div>
 

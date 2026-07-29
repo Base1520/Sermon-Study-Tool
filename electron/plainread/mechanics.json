@@ -1,0 +1,37 @@
+{
+  "_README": "Hand-distilled behavior-change mechanics for PLAIN READ. These strings render VERBATIM. The model cannot write, soften, or paraphrase them — that is the point. clinical_review gates the whole file: while `by` is null, pipeline.js returns an empty mechanics list and the psych caveat block does not render at all. The psych layer is ABSENT rather than UNREVIEWED. Do not fill in `by` to unblock a build.",
+
+  "clinical_review": {
+    "by": null,
+    "date": null,
+    "note": "RIKKI GATE. Rikki is BASE1520's Clinical Field Director; a BASE-branded feature emitting psychological application sits inside her formal remit. Same standard Cole already set for /cognitive-recon/ ('Rikki must review before publish'). Print one PLAIN READ, hand it to her, fill in `by` and `date` on a yes, rebuild."
+  },
+
+  "mechanics": [
+    {
+      "id": "implementation-intention",
+      "applies_to": ["plan", "practice"],
+      "form": "When [specific, predictable cue], then I [specific, small action].",
+
+      "caveat": "Plans written as \"when X, then I do Y\" have been tested in 642 separate experiments; the effects are real but moderate. They work by tying a specific response to a cue you have already predicted, so it fires when you are worn down and not deciding well. Replacing a behavior beats forbidding one.",
+
+      "backfire": "One known backfire: in one study, plans like this made things measurably worse for people who are driven by other people's expectations of them. If this turns into one more way to fail an audience, drop it and go talk to somebody instead of tightening it.",
+
+      "delivery_caveat": "This kind of thing works measurably better taught by a person in a room than read off a screen. Take it to somebody.",
+
+      "sources": [
+        "Sheeran, Listrom & Gollwitzer (2024/25), ERSP 36(1):162-194 — 642 independent tests, .27 <= d <= .66",
+        "Powers, Koestner & Topciu (2005), PSPB 31:902-912 — if-then plans worsened outcomes for socially-prescribed perfectionists",
+        "Oettingen et al. — delivery-mode moderator: face-to-face g=0.465 vs document-based g=0.277"
+      ],
+
+      "distilled_from": [
+        "Knowledge/Mental/Implementation Intentions and Planning.md",
+        "Knowledge/Mental/Mental Contrasting and the Perils of Positive Fantasy.md"
+      ],
+      "distilled_on": "2026-07-25",
+
+      "_why_only_this_one": "It is the only mechanism in the 198K-word Mental trunk tested as a within-person manipulation in randomized trials, so it does not commit the ecological fallacy the trunk's own methods node warns about. Grit, mindset, motivation typologies, SDT, emotion regulation, self-efficacy, achievement-goal orientation, mental contrasting and goal disengagement are all EXCLUDED — the trunk flags four of them as 'exposed' pending audit. That flag is a standing audit item, not a verdict; this exclusion errs safe and should not be cited as vault doctrine."
+    }
+  ]
+}

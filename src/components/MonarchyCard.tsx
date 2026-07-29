@@ -20,22 +20,6 @@ const FULL_SPAN = YEAR_MAX - YEAR_MIN   // 1220 yrs
 // ── Row layout ─────────────────────────────────────────────────────────────────
 const LABEL_W = 88
 const ROW_H   = 24
-const ROW_GAP = 4
-
-const ROWS = [
-  { key:'egypt',    label:'EGYPT',       color:'#c09060', y:0   },
-  { key:'assyria',  label:'ASSYRIA',     color:'#9060b0', y:32  },
-  { key:'babylon',  label:'BABYLON',     color:'#c07030', y:64  },
-  { key:'persia',   label:'PERSIA/MEDES',color:'#50a080', y:96  },
-  { key:'greece',   label:'GREECE',      color:'#5080b0', y:128 },
-  { key:'rome',     label:'ROME',        color:'#a05050', y:160 },
-  { key:'sep1',     label:'',            color:'',        y:196 }, // separator
-  { key:'prophets', label:'PROPHETS',    color: KHAKI,    y:204 },
-  { key:'judah',    label:'JUDAH',       color:'#7090c0', y:236 },
-  { key:'israel',   label:'ISRAEL',      color:'#c07070', y:316 },
-]
-
-const CONTENT_H = 400  // total canvas height
 
 // ── Data types ─────────────────────────────────────────────────────────────────
 interface Ruler { id:string; name:string; start:number; end:number; desc:string; refs?:string[] }

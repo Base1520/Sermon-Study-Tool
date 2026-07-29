@@ -207,7 +207,7 @@ function getSuggestedQuestions(analysis: { reference: string; mainTheme?: string
   return bookQuestions[book] ?? BASE_QUESTIONS
 }
 
-export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey, onOpenProfile, historyId, initialMessages }: Props) {
+export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey, historyId, initialMessages }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -268,8 +268,6 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
       const updatedMessages = [...newMessages, { role: 'assistant' as const, content: reply }]
       setMessages(updatedMessages)
       persistChat(updatedMessages)
-      if (updatedMessages.filter(m => m.role === 'user').length >= 2)
-        (window as any).electronAPI.profileExtractInsights({ messages: updatedMessages.slice(-6), apiKey }).catch(() => {})
     } catch (err: any) {
       setMessages([...newMessages, { role: 'assistant', content: `Error: ${err?.message ?? 'Something went wrong'}` }])
     } finally {

@@ -212,11 +212,94 @@ interface TopoMapProps {
 }
 
 // ── Component ──────────────────────────────────────────────────────────────────
+interface CityLabel {
+  el: HTMLElement
+  tier: number
+  important: boolean
+}
+
+/**
+ * Zoom at which each tier's name becomes legible. Below its threshold a city is
+ * a dot and nothing else, so a wide view reads as terrain rather than as a wall
+ * of type. Cities the passage actually names ignore this entirely.
+ *
+ * Tier 2 sits just under the map's opening zoom of 8 on purpose: the first view
+ * should already carry most of its names, not fade them in once you touch the
+ * controls. Tier 3 is the "zoom in and more appears" layer.
+ */
+const TIER_REVEAL_ZOOM: Record<number, number> = { 1: 6.6, 2: 7.6, 3: 9.6 }
+
+/**
+ * Type size at the moment a tier appears. It grows from here.
+ *
+ * These were ~10px and that was simply too small to read on a dark map. A place
+ * name has to be legible at a glance or it is decoration. Sized for reading,
+ * not for fitting the most labels on screen.
+ */
+const TIER_BASE_PX: Record<number, number> = { 1: 12.5, 2: 11.5, 3: 10.5 }
+
+const IMPORTANT_BASE_PX = 13
+
+/**
+ * Growth is measured from ONE shared zoom for every label, and deliberately not
+ * from each label's own reveal threshold.
+ *
+ * Measuring from the reveal threshold is what broke this: a highlighted city was
+ * given reveal 0 to mean "never hidden", which made its growth term `zoom - 0`.
+ * That pinned it to the maximum size at every zoom — so at a wide view one name
+ * sat there in 24px type covering half the Aegean. "Never hidden" and "always
+ * huge" are different properties and must not share a number.
+ */
+const GROWTH_REF_ZOOM = 7
+const GROWTH_PER_ZOOM = 0.11
+const MAX_GROWTH = 1.9
+/**
+ * Hard ceiling in px. The previous 15.5 was an overcorrection from the bug that
+ * pinned one label at 23px on a wide view — it fixed the sprawl and left the
+ * type unreadable. The real constraint is the WIDE view, which the growth
+ * reference already handles: zoomed out everything sits at its base size, so
+ * the ceiling only governs how large a name gets when you are close in, where
+ * there is room for it.
+ */
+const MAX_LABEL_PX = 26
+
+/**
+ * Names scale with zoom rather than sitting at a fixed pixel size, so the map
+ * reads like a map: come in closer, the place names commit. Below the reference
+ * zoom the type stays at its base size — zoomed out is small, always.
+ */
+function labelPxFor(zoom: number, base: number): number {
+  const growth = Math.min(1 + Math.max(0, zoom - GROWTH_REF_ZOOM) * GROWTH_PER_ZOOM, MAX_GROWTH)
+  return Math.min(base * growth, MAX_LABEL_PX)
+}
+
+/** Fade in over ~1.2 zoom levels instead of popping on. */
+function labelOpacityFor(zoom: number, reveal: number): number {
+  if (zoom >= reveal) return 1
+  const fade = (zoom - (reveal - 1.2)) / 1.2
+  return Math.max(0, Math.min(1, fade))
+}
+
+function styleCityLabels(labels: CityLabel[], zoom: number): void {
+  for (const { el, tier, important } of labels) {
+    const reveal = TIER_REVEAL_ZOOM[tier] ?? 9.6
+    const base   = important ? IMPORTANT_BASE_PX : (TIER_BASE_PX[tier] ?? 8.5)
+    // Important = never hidden. It does NOT mean bigger at every zoom.
+    const op     = important ? 1 : labelOpacityFor(zoom, reveal)
+
+    el.style.opacity = String(op)
+    // Hidden labels must not eat clicks aimed at the marker underneath them.
+    el.style.pointerEvents = op < 0.05 ? 'none' : ''
+    el.style.fontSize = `${labelPxFor(zoom, base).toFixed(2)}px`
+  }
+}
+
 export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
   const divRef      = useRef<HTMLDivElement>(null)
   const mapRef      = useRef<L.Map | null>(null)
   const tileRef     = useRef<L.TileLayer | null>(null)
   const markersRef  = useRef<L.Marker[]>([])
+  const labelsRef   = useRef<CityLabel[]>([])
   const activeKey   = useRef<TileKey>('terrain')
   const styleElRef  = useRef<HTMLStyleElement | null>(null)
   const btnGroupRef = useRef<HTMLDivElement>(null)
@@ -261,6 +344,7 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
   function buildMarkers(map: L.Map, refs: Map<string, GeoRef>, selectedName?: string, cityImages: Record<string, string> = {}) {
     markersRef.current.forEach(m => m.remove())
     markersRef.current = []
+    labelsRef.current = []
 
     for (const city of TOPO_CITIES) {
       const ref    = refs.get(city.name)
@@ -272,29 +356,38 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
 
       marker.addTo(map)
 
-      // City name label — always visible, size/opacity by tier
-      const labelColor  = isSel ? GOLD : isHL ? KHAKI : city.tier === 1 ? `${KHAKI}ee` : city.tier === 2 ? `${KHAKI}bb` : `${KHAKI}88`
-      const labelSize   = isSel || isHL ? 10 : city.tier === 1 ? 9.5 : city.tier === 2 ? 8.5 : 7.5
-      const bgOpacity   = isSel || isHL ? 0.82 : city.tier === 1 ? 0.72 : 0.58
-      marker.bindTooltip(`
-        <span style="
-          font-family:'JetBrains Mono',monospace;
-          font-size:${labelSize}px;
-          letter-spacing:0.07em;
-          color:${labelColor};
-          background:rgba(10,16,8,${bgOpacity});
-          padding:1px 4px;
-          border-radius:2px;
-          white-space:nowrap;
-          display:inline-block;
-        ">${city.name.toUpperCase()}</span>
-      `, {
-        permanent:  true,
-        direction:  city.lon < 35 ? 'left' : 'right',
-        offset:     city.lon < 35 ? [-14, 0] : [14, 0],
-        className:  'topo-tt',
-        opacity:    1,
-      })
+      // City name label. No background box — the name is drawn as haloed text so
+      // it stays readable over any tile layer (satellite included) without a
+      // black slab covering the terrain underneath it.
+      //
+      // Labels are also zoom-gated: at low zoom the map is dots only, and names
+      // fade in tier by tier as you come down, then grow with the zoom. A
+      // highlighted city (one the passage actually names) is never gated — that
+      // is the whole reason the map is open.
+      // Full strength for every label that is on screen at all. Tier controls
+      // WHEN a name appears, not how washed out it is once it does — a
+      // permanently dimmed name is just a name that is hard to read.
+      const labelColor = isSel ? GOLD : KHAKI
+      marker.bindTooltip(
+        `<span class="topo-city-name">${city.name.toUpperCase()}</span>`,
+        {
+          permanent:  true,
+          direction:  city.lon < 35 ? 'left' : 'right',
+          offset:     city.lon < 35 ? [-13, 0] : [13, 0],
+          className:  'topo-tt',
+          opacity:    1,
+        }
+      )
+
+      const tipEl = marker.getTooltip()?.getElement() as HTMLElement | undefined
+      if (tipEl) {
+        tipEl.style.color = labelColor
+        labelsRef.current.push({
+          el: tipEl,
+          tier: city.tier,
+          important: isSel || isHL,
+        })
+      }
 
       // Click popup with passage details + exhaustive city data
       const esc = (s: string) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
@@ -355,6 +448,10 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
 
       markersRef.current.push(marker)
     }
+
+    // Apply the zoom-dependent sizing immediately, so labels are correct on the
+    // first paint rather than only after the user touches the zoom control.
+    styleCityLabels(labelsRef.current, map.getZoom())
   }
 
   // ── Init Leaflet map (once) ─────────────────────────────────────────────────
@@ -373,6 +470,39 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
         border: none !important;
         box-shadow: none !important;
         padding: 0 !important;
+        /* Font size and opacity are driven per-label from styleCityLabels(). */
+        transition: opacity 160ms linear, font-size 120ms linear;
+        will-change: opacity, font-size;
+      }
+      /* Leaflet draws a little pointer triangle on tooltips. With no background
+         box to attach to, it reads as a stray dash next to the name. */
+      .topo-tt::before { display: none !important; }
+
+      .topo-city-name {
+        /* Inter, not JetBrains Mono. The mono face is only loaded at weights
+           400 and 500, so at map sizes its strokes are thin enough that the
+           halo bleeds into them and the type reads hollow — outlined rather
+           than solid. Inter is loaded through 600 and is the brand sans. */
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        font-size: inherit;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        white-space: nowrap;
+        -webkit-font-smoothing: antialiased;
+        /* The halo replaces the background box. Tight and hard — 1px offsets
+           with almost no blur — so it sits OUTSIDE the glyph instead of
+           softening into it. One wider, softer pass underneath lifts the whole
+           word off busy satellite tiles without touching the letterforms. */
+        text-shadow:
+           1px  0    1px  rgba(4,9,6,0.98),
+          -1px  0    1px  rgba(4,9,6,0.98),
+           0    1px  1px  rgba(4,9,6,0.98),
+           0   -1px  1px  rgba(4,9,6,0.98),
+           1px  1px  1px  rgba(4,9,6,0.98),
+          -1px -1px  1px  rgba(4,9,6,0.98),
+           1px -1px  1px  rgba(4,9,6,0.98),
+          -1px  1px  1px  rgba(4,9,6,0.98),
+           0    0    7px  rgba(4,9,6,0.75);
       }
       .topo-popup .leaflet-popup-content-wrapper {
         background: transparent !important;
@@ -406,10 +536,20 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
     L.control.zoom({ position: 'bottomright' }).addTo(map)
     mapRef.current = map
 
+    // Resize the names on every zoom change. 'zoom' fires continuously during a
+    // pinch or wheel zoom so the type tracks the gesture instead of snapping at
+    // the end of it; 'zoomend' catches the final resting value.
+    const onZoom = () => styleCityLabels(labelsRef.current, map.getZoom())
+    map.on('zoom', onZoom)
+    map.on('zoomend', onZoom)
+
     switchTiles('terrain')
     buildMarkers(map, new Map(), undefined, assetImages.cities)
 
     return () => {
+      map.off('zoom', onZoom)
+      map.off('zoomend', onZoom)
+      labelsRef.current = []
       map.remove()
       mapRef.current = null
       if (styleElRef.current) document.head.removeChild(styleElRef.current)

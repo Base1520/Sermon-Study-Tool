@@ -226,7 +226,7 @@ export const PRIESTLY_TREE: GenealogyTree = {
       significance: 'First High Priest of Israel; type of Christ\'s intercession, though imperfect (golden calf, Miriam affair)',
       refs: ['Exod 4:14', 'Exod 28-29', 'Lev 8-9', 'Lev 16', 'Heb 5:1-4', 'Heb 7:11'],
       desc: 'Appointed by God as Moses\'s spokesman and first High Priest. Consecrated with oil, blood, and elaborate garments to "bear the names of the sons of Israel" before God (Exod 28:12). His entry into the Holy of Holies on Yom Kippur (Lev 16) prefigures Christ\'s once-for-all entry into the true holy of holies (Heb 9:11-12). Yet he led the golden calf worship (Exod 32) — showing his priesthood needed to be superseded by a greater High Priest.' },
-    { id: 'nadab',    name: 'Nadab',       generation: 4, parentIds: ['aaron'],   significant: true,
+    { id: 'nadab',    name: 'Nadab',       generation: 4, parentIds: ['aaron'],   notable: true,
       significance: 'Offered unauthorized fire; consumed by fire from the LORD (Lev 10:1-3)',
       refs: ['Lev 10:1-3', 'Num 3:4'],
       desc: '"Aaron\'s sons Nadab and Abihu took their censers, put fire in them and added incense; and they offered unauthorized fire before the LORD, contrary to his command. So fire came out from the presence of the LORD and consumed them." Lev 10:3: "Among those who approach me I will be proved holy." No New Testament commentary on this event — the silence heightens the gravity.' },

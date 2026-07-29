@@ -11,11 +11,6 @@ const KHAKI    = '#B8B49D'
 const STEEL    = '#7A8C6E'
 const BONE     = '#F5F2E8'
 
-const RATING_COLOR: Record<string, string> = {
-  notable: GOLD,
-  normal: KHAKI,
-}
-
 // ── Utility: build generation groups ─────────────────────────────────────────
 function groupByGeneration(nodes: GenealogyNode[]): Map<number, GenealogyNode[]> {
   const map = new Map<number, GenealogyNode[]>()

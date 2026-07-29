@@ -1,0 +1,24 @@
+{
+  "bundleType": "public_domain_only",
+  "generatedFrom": "Tools/theology-retrieval",
+  "sources": [
+    {
+      "sourceId": "gutenberg-50857-lightfoot-colossians-philemon",
+      "bookRanges": {
+        "colossians": [{ "start": 0, "end": 886 }],
+        "philemon": [{ "start": 947, "end": 1056 }]
+      },
+      "rightsTier": "public_domain",
+      "canonicalUrl": "https://www.gutenberg.org/ebooks/50857"
+    },
+    {
+      "sourceId": "gutenberg-37345-maclaren-colossians-philemon",
+      "bookRanges": {
+        "colossians": [{ "start": 0, "end": 641 }],
+        "philemon": [{ "start": 643, "end": 766 }]
+      },
+      "rightsTier": "public_domain",
+      "canonicalUrl": "https://www.gutenberg.org/ebooks/37345"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ interface Props {
   onPrefillUsed?: () => void
   onExpandPassage?: (text: string, reference: string) => void
   esvKey?: string
+  mode?: 'plain' | 'pulpit'
 }
 
 const TRANSLATIONS = [
@@ -30,31 +31,59 @@ const EXAMPLE_TEXTS: Record<string, string> = {
   'John 1:1-5': 'In the beginning was the Word, and the Word was with God, and the Word was God. He was in the beginning with God. All things were made through him, and without him was not any thing made that was made. In him was life, and the life was the light of men. The light shines in the darkness, and the darkness has not overcome it.',
 }
 
+function normalizeReference(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+/* `mode` stays on Props — App.tsx passes it and it costs nothing to keep the
+   channel open — but it is deliberately NOT read here. The button says SEND IT
+   in both modes, so there is nothing left in this component that branches on
+   who is reading. Destructuring it just to ignore it is a compile error. */
 export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, onExpandPassage, esvKey }: Props) {
   const [reference, setReference]     = useState('')
   const [text, setText]               = useState('')
-  const [translation, setTranslation] = useState('esv')
+  const [translation, setTranslation] = useState(esvKey ? 'esv' : 'kjv')
   const [fetching, setFetching]       = useState(false)
   const [fetchError, setFetchError]   = useState<string | null>(null)
   const [refFocused, setRefFocused]   = useState(false)
   const [textFocused, setTextFocused] = useState(false)
+  const [fetchedFor, setFetchedFor]   = useState<string | null>(null)
 
-  const canAnalyze = !loading && text.trim() && reference.trim()
+  const canAnalyze = !loading && !fetching && !!reference.trim()
   const canFetch   = reference.trim().length > 0 && !fetching && !loading
 
   useEffect(() => {
-    if (prefillRef) { setReference(prefillRef); onPrefillUsed?.() }
+    if (prefillRef) {
+      setReference(prefillRef)
+      setText('')
+      setFetchedFor(null)
+      setFetchError(null)
+      onPrefillUsed?.()
+    }
   }, [prefillRef])
 
-  async function handleFetch() {
-    if (!canFetch) return
+  useEffect(() => {
+    if (!esvKey && translation === 'esv') setTranslation('kjv')
+  }, [esvKey, translation])
+
+  async function handleFetch(): Promise<string | null> {
+    if (!canFetch) return null
     setFetching(true); setFetchError(null)
     try {
       const result = await (window as any).electronAPI.fetchBible({ reference: reference.trim(), translation, esvKey: esvKey ?? '' })
       setText(result)
+      setFetchedFor(normalizeReference(reference))
+      return result
     } catch (e: any) {
       setFetchError(e?.message ?? 'Could not fetch passage')
+      return null
     } finally { setFetching(false) }
+  }
+
+  async function handleStudy() {
+    if (!canAnalyze) return
+    const passage = text.trim() || (await handleFetch())?.trim() || ''
+    if (passage) onAnalyze(passage, reference.trim())
   }
 
   const label = (text: string, active?: boolean) => (
@@ -73,7 +102,10 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
   const inputStyle = (focused: boolean): React.CSSProperties => ({
     flex: 1, width: '100%',
     background: focused ? `${BASE.olive}44` : `${BASE.olive}22`,
-    border: `1px solid ${focused ? BASE.moss : BASE.borderDim}`,
+    borderTop: `1px solid ${focused ? BASE.moss : BASE.borderDim}`,
+    borderRight: `1px solid ${focused ? BASE.moss : BASE.borderDim}`,
+    borderBottom: `1px solid ${focused ? BASE.moss : BASE.borderDim}`,
+    borderLeft: `1px solid ${focused ? BASE.moss : BASE.borderDim}`,
     borderRadius: 0, padding: '9px 12px',
     fontSize: 13, color: BASE.bone,
     fontFamily: 'Crimson Pro, serif',
@@ -126,8 +158,16 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
         <input
           className="selectable hud-input"
           value={reference}
-          onChange={e => { setReference(e.target.value); setFetchError(null) }}
-          onKeyDown={e => e.key === 'Enter' && handleFetch()}
+          onChange={e => {
+            const next = e.target.value
+            if (fetchedFor && normalizeReference(next) !== fetchedFor) {
+              setText('')
+              setFetchedFor(null)
+            }
+            setReference(next)
+            setFetchError(null)
+          }}
+          onKeyDown={e => e.key === 'Enter' && void handleFetch()}
           onFocus={() => setRefFocused(true)}
           onBlur={() => setRefFocused(false)}
           placeholder="e.g. Romans 8:1"
@@ -172,7 +212,8 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
             <button
               key={t.id}
               className="trans-btn"
-              onClick={() => setTranslation(t.id)}
+              onClick={() => { if (!locked) setTranslation(t.id) }}
+              disabled={locked}
               title={locked ? 'Add your ESV key in Settings (⚙) to unlock' : t.label}
               style={{
                 fontFamily: 'JetBrains Mono', fontSize: 7, letterSpacing: '0.1em',
@@ -180,7 +221,7 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
                 background: active ? `${BASE.gold}18` : 'transparent',
                 border: `1px solid ${active ? BASE.gold : BASE.borderDim}`,
                 color: locked ? `${BASE.steel}55` : active ? BASE.gold : BASE.steel,
-                cursor: 'pointer', borderRadius: 0,
+                cursor: locked ? 'not-allowed' : 'pointer', borderRadius: 0,
                 opacity: locked ? 0.6 : 1,
               }}
             >
@@ -223,7 +264,7 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
       <textarea
         className="selectable hud-input"
         value={text}
-        onChange={e => setText(e.target.value)}
+        onChange={e => { setText(e.target.value); setFetchedFor(null) }}
         onFocus={() => setTextFocused(true)}
         onBlur={() => setTextFocused(false)}
         placeholder="Enter reference above and ↓ to fetch, or paste text here…"
@@ -239,7 +280,7 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
       {/* Initiate Analysis */}
       <button
         className="hud-btn-analyze"
-        onClick={() => canAnalyze && onAnalyze(text.trim(), reference.trim())}
+        onClick={() => void handleStudy()}
         disabled={!canAnalyze}
         style={{
           marginTop: 12, width: '100%', padding: '10px 0',
@@ -266,7 +307,16 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
         ) : (
           <>
             <span style={{ color: canAnalyze ? BASE.bg : BASE.steel, fontSize: 11 }}>◈</span>
-            SEND IT
+            {/* SEND IT in both modes. This is Cole's phrase and it is the
+                register of the whole product — short, spoken, operator. A
+                mode-conditional swap to "STUDY THIS PASSAGE" replaced his voice
+                with a form label on the theory that a new reader needs the
+                button explained to him. He does not, and that instinct is the
+                condescension failure showing up one word at a time. The button
+                does the same thing in both modes, so it says the same thing. */}
+            {text.trim()
+              ? 'SEND IT'
+              : `LOAD ${translation.toUpperCase()} & SEND IT`}
           </>
         )}
       </button>
@@ -282,7 +332,12 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
         <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
           {EXAMPLES.map(ex => (
             <button key={ex.ref}
-              onClick={() => { setReference(ex.ref); setText(EXAMPLE_TEXTS[ex.ref] ?? ''); setFetchError(null) }}
+              onClick={() => {
+                setReference(ex.ref)
+                setText(EXAMPLE_TEXTS[ex.ref] ?? '')
+                setFetchedFor(null)
+                setFetchError(null)
+              }}
               style={{
                 textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
                 fontFamily: 'Crimson Pro, serif', fontSize: 13,

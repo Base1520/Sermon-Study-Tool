@@ -1,4 +1,4 @@
-import type { PhrasingAnalysis } from '../types/phrasing'
+import type { PhrasingAnalysis, PlainReadDoc } from '../types/phrasing'
 
 // Canned demo analysis — lets a first-time user experience the full desk
 // (phrasing tree, map, cultural notes, outline) before entering an API key.
@@ -80,4 +80,129 @@ export const DEMO_ANALYSIS: PhrasingAnalysis & { passageText?: string; passageRe
   geoReferences: [
     { place: 'Rome', verses: ['Romans 1:7'], significance: 'The letter\'s recipients — house churches in the imperial capital, mixed Jewish and Gentile, learning to live one gospel.' },
   ],
+}
+
+export const DEMO_PLAIN_READ: PlainReadDoc = {
+  reference: 'Romans 8:1-4',
+  expandedReference: null,
+  expandReason: null,
+  sensitive: false,
+  situation: {
+    when: 'the first century',
+    where: 'written to believers in Rome',
+    pressure:
+      'The paragraph addresses people who need to understand what God has done about condemnation, sin, and the weakness of the flesh. The passage itself puts the answer in God’s action through the Son and the Spirit.',
+    soWhat:
+      'That keeps the paragraph from becoming either a slogan about positive thinking or a new demand to earn the verdict it announces.',
+    confidence: 'reconstructed',
+    vaultSourced: false,
+  },
+  meaning: {
+    plain:
+      'Those who are in Christ Jesus are not under condemnation, because God has acted through his Son and now gives life through the Spirit.',
+    misread: {
+      exists: true,
+      claim: '“No condemnation” means nothing a Christian does matters.',
+      whyNot:
+        'Verse 4 immediately describes a life shaped by the Spirit. The paragraph removes condemnation; it does not erase transformed living.',
+      biggerNotSmaller:
+        'The verdict and the Spirit-shaped life belong together because both come from what God has done.',
+    },
+    assumes:
+      'This reading takes “therefore” seriously and reads the four verses as one connected argument rather than four detached sayings.',
+    level: null,
+  },
+  work: {
+    genre: {
+      body: 'This is a tightly connected paragraph inside a letter. Its repeated “for” and “in order that” clauses explain how each claim supports the one before it.',
+      youCanCheck: 'Circle “therefore,” both uses of “for,” and “in order that.”',
+      theMove: 'In a letter, follow the connecting words before isolating a sentence.',
+    },
+    setting: {
+      body: 'The named audience is made up of people “in Christ Jesus.” The paragraph addresses their standing before God and the kind of life the Spirit produces.',
+      youCanCheck: 'Find who verse 1 names and how verse 4 describes them.',
+      theMove: 'Name the people addressed before deciding what a promise means for everyone.',
+    },
+    surroundings: {
+      body: 'The opening “therefore” points backward, while verse 4 carries the sentence forward into walking according to the Spirit. Verse 1 is the verdict; verses 2-4 explain its ground and purpose.',
+      youCanCheck: 'Read verse 1, then ask what every clause in verses 2-4 contributes to it.',
+      theMove: 'Read the sentence on both sides of a favorite line.',
+    },
+    words: {
+      body: 'The paragraph uses “condemnation” as a verdict and then says God condemned sin in the flesh. The repeated word ties the believer’s freedom to God’s action against sin.',
+      youCanCheck: 'Compare “no condemnation” in verse 1 with “condemned sin” in verse 3.',
+      theMove: 'Track repeated words before reaching for a dictionary.',
+    },
+    story: {
+      body: 'The movement is from inability to divine action: the law could not do what God did by sending his Son, and the Spirit now marks the resulting life.',
+      youCanCheck: 'List the subject of each main verb in verses 2-4.',
+      theMove: 'Ask who acts, what they do, and what changes as a result.',
+    },
+    doing: {
+      body: 'The writer is assuring the reader and explaining the basis of that assurance. He does not leave the promise unsupported; he grounds it in God’s action.',
+      youCanCheck: 'Notice how many explanatory clauses follow the declaration in verse 1.',
+      theMove: 'Ask what the author is doing to the reader, not only what facts he states.',
+    },
+    christPathway: null,
+  },
+  distance:
+    'Modern readers often hear “condemnation” as an inner feeling. This paragraph treats it as a verdict tied to God’s action and then connects it to life in the Spirit.',
+  application: {
+    faces: ['character', 'discernment'],
+    dominantFace: 'discernment',
+    toThemFirst:
+      'The first readers were being taught to locate their standing in what God had done rather than in the weakness the paragraph openly names.',
+    thenToYou:
+      'The paragraph trains a reader to distinguish conviction that leads toward Spirit-shaped life from condemnation that Christ has answered.',
+    step: {
+      kind: 'question',
+      cue: null,
+      action: null,
+      question:
+        'When guilt speaks this week, does it move you toward honest repentance and the Spirit’s way of life, or tell you that God’s verdict depends on your ability to repair yourself?',
+    },
+  },
+  restraint: [
+    'This paragraph does not say choices no longer matter; verse 4 describes a changed walk.',
+    'It does not reduce salvation to a feeling of relief; its center is what God has done through the Son and Spirit.',
+  ],
+  differ: null,
+  unknowns: ['This is a built-in demonstration, not a newly generated or source-checked study.'],
+  handoff:
+    'If guilt has become heavier than a hard season, bring it to a pastor, a believer you trust, or a counselor instead of carrying it alone.',
+  outline: {
+    shape: 'A verdict, followed by its ground, means, and purpose.',
+    units: [
+      {
+        ref: 'vv. 1-2',
+        heading: 'vv. 1-2 — the verdict and the Spirit’s liberating ground',
+        logic: null,
+      },
+      {
+        ref: 'vv. 3-4',
+        heading: 'vv. 3-4 — God acts through the Son for Spirit-shaped life',
+        logic: 'Deeper ground and purpose: these verses explain how the verdict became possible and what it produces.',
+      },
+    ],
+  },
+  mechanic: null,
+  verification: {
+    status: 'skipped',
+    model: null,
+    promptVersion: 0,
+    checked: 0,
+    confirmed: 0,
+    unverifiable: 0,
+    refuted: 0,
+    notes: [],
+  },
+  vault: {
+    sourced: false,
+    noteCount: 0,
+    packVersion: 0,
+    builtOn: null,
+  },
+  promptVersion: 0,
+  readingLevel: 'standard',
+  fromCache: true,
 }

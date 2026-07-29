@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react'
 import { BASE } from '../theme'
+import { friendlyApiError, type FriendlyError } from '../lib/apiErrors'
 
 interface Props {
-  onSave: (anthropicKey: string, esvKey?: string) => void
+  onSave: (anthropicKey: string, esvKey?: string) => Promise<void>
   onClose: () => void
   onDemo?: () => void
-  existingKey: string
-  existingEsvKey?: string
+  hasExistingKey: boolean
+  hasExistingEsvKey?: boolean
 }
 
 const ZOOMS = [
@@ -16,7 +17,7 @@ const ZOOMS = [
   { f: 1.5,  label: 'HUGE' },
 ]
 
-export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvKey = '' }: Props) {
+export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExistingEsvKey = false }: Props) {
   const [zoom, setZoom] = useState(1)
   useEffect(() => {
     ;(window as any).electronAPI.getUiZoom?.().then((z: number) => setZoom(z ?? 1)).catch(() => {})
@@ -25,11 +26,30 @@ export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvK
     setZoom(f)
     ;(window as any).electronAPI.setUiZoom?.(f).catch(() => {})
   }
-  const [key, setKey]       = useState(existingKey)
-  const [esvKey, setEsvKey] = useState(existingEsvKey)
-  const [showAnthropicHelp, setShowAnthropicHelp] = useState(!existingKey)
+  const [key, setKey]       = useState('')
+  const [esvKey, setEsvKey] = useState('')
+  const [showAnthropicHelp, setShowAnthropicHelp] = useState(!hasExistingKey)
+  const [testing, setTesting] = useState(false)
+  const [testError, setTestError] = useState<FriendlyError | null>(null)
 
-  const canSave = !!key
+  const canSave = Boolean(key.trim() || hasExistingKey) && !testing
+
+  async function connect() {
+    if (!canSave) return
+    setTesting(true)
+    setTestError(null)
+    try {
+      if (key.trim()) {
+        const test = (window as any).electronAPI?.testAnthropicKey
+        if (test) await test(key.trim())
+      }
+      await onSave(key.trim(), esvKey.trim())
+    } catch (error) {
+      setTestError(friendlyApiError(error))
+    } finally {
+      setTesting(false)
+    }
+  }
 
   const fieldStyle = {
     width: '100%',
@@ -76,14 +96,14 @@ export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvK
           Connect Your APIs
         </h2>
         <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.steel, lineHeight: 1.6, marginBottom: 24 }}>
-          Keys are stored locally on your device and never shared.
+          Keys stay on this Mac and are sent only to the services you connect.
         </p>
 
         {/* Anthropic key */}
         <div style={{ marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.gold, letterSpacing: '0.12em', opacity: 0.9 }}>
-              ANTHROPIC — all analysis &amp; agent chat
+              ANTHROPIC — required for new studies
             </div>
             <button
               onClick={() => setShowAnthropicHelp(h => !h)}
@@ -102,12 +122,12 @@ export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvK
               borderRadius: 8, padding: '12px 14px', marginBottom: 10,
             }}>
               <div style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.gold, letterSpacing: '0.1em', marginBottom: 8 }}>
-                GET YOUR FREE API KEY
+                SET UP ANTHROPIC
               </div>
               <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 5 }}>
-                <li style={stepStyle}>Go to <strong style={{ color: BASE.bone }}>console.anthropic.com</strong> and create a free account</li>
-                <li style={stepStyle}>Click <strong style={{ color: BASE.bone }}>API Keys</strong> in the left sidebar</li>
-                <li style={stepStyle}>Click <strong style={{ color: BASE.bone }}>Create Key</strong>, give it any name</li>
+                <li style={stepStyle}>Go to <strong style={{ color: BASE.bone }}>console.anthropic.com</strong> and sign in</li>
+                <li style={stepStyle}>Add billing credits; creating a key alone does not fund API use</li>
+                <li style={stepStyle}>Open <strong style={{ color: BASE.bone }}>API Keys</strong>, create a key, and give it a name</li>
                 <li style={stepStyle}>Copy the key (starts with <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: BASE.gold }}>sk-ant-</span>) and paste it below</li>
               </ol>
               <div style={{
@@ -115,7 +135,7 @@ export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvK
                 background: `${BASE.gold}0a`, borderRadius: 6,
                 fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel, lineHeight: 1.5,
               }}>
-                Note: Anthropic charges based on usage. For sermon prep, typical cost is $1–3/month.
+                Connect runs a tiny live check against the same Claude model the study uses, so a rejected key or empty balance is caught here instead of halfway through a passage.
               </div>
             </div>
           )}
@@ -123,13 +143,29 @@ export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvK
           <input
             type="password" value={key}
             onChange={e => setKey(e.target.value.trim())}
-            placeholder="sk-ant-..."
+            placeholder={hasExistingKey ? 'Protected key saved — paste a new key to replace it' : 'sk-ant-...'}
             autoComplete="off" spellCheck={false}
             style={{ ...fieldStyle, fontFamily: key ? 'JetBrains Mono' : 'Crimson Pro, serif' }}
             onFocus={e => (e.target.style.borderColor = BASE.borderGold)}
             onBlur={e => (e.target.style.borderColor = BASE.borderDim)}
-            onKeyDown={e => e.key === 'Enter' && canSave && onSave(key)}
+            onKeyDown={e => e.key === 'Enter' && canSave && void connect()}
           />
+          {testError && (
+            <div role="alert" style={{
+              marginTop: 10,
+              padding: '9px 11px',
+              border: `1px solid ${BASE.red}55`,
+              background: `${BASE.red}10`,
+            }}>
+              <div style={{ fontFamily: 'Saira, sans-serif', fontSize: 11, color: BASE.red, fontWeight: 700 }}>
+                {testError.headline}
+              </div>
+              <div style={{ ...stepStyle, marginTop: 3 }}>{testError.detail}</div>
+              {testError.link && (
+                <div style={{ ...stepStyle, color: BASE.gold, marginTop: 4 }}>{testError.link}</div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ESV key */}
@@ -143,17 +179,17 @@ export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvK
           <input
             type="password" value={esvKey}
             onChange={e => setEsvKey(e.target.value.trim())}
-            placeholder="Leave blank to use KJV / ASV / YLT instead"
+            placeholder={hasExistingEsvKey ? 'Protected ESV key saved — paste to replace it' : 'Leave blank to use KJV / ASV / YLT instead'}
             autoComplete="off" spellCheck={false}
             style={{ ...fieldStyle, fontFamily: esvKey ? 'JetBrains Mono' : 'Crimson Pro, serif' }}
             onFocus={e => (e.target.style.borderColor = `${BASE.khaki}66`)}
             onBlur={e => (e.target.style.borderColor = BASE.borderDim)}
-            onKeyDown={e => e.key === 'Enter' && canSave && onSave(key, esvKey)}
+            onKeyDown={e => e.key === 'Enter' && canSave && void connect()}
           />
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => canSave && onSave(key, esvKey)} disabled={!canSave}
+          <button onClick={() => void connect()} disabled={!canSave}
             style={{
               flex: 1, padding: '11px 0', borderRadius: 10, cursor: canSave ? 'pointer' : 'not-allowed',
               background: canSave ? BASE.goldMid : `${BASE.olive}22`,
@@ -162,9 +198,9 @@ export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvK
               fontFamily: 'Crimson Pro, serif', fontSize: 14,
               letterSpacing: '0.04em', transition: 'all 0.2s',
             }}>
-            Connect →
+            {testing ? 'Checking connection…' : 'Check & Connect →'}
           </button>
-          {existingKey && (
+          {hasExistingKey && (
             <button onClick={onClose}
               style={{
                 padding: '11px 20px', borderRadius: 10, cursor: 'pointer',
@@ -205,7 +241,7 @@ export function ApiKeyModal({ onSave, onClose, onDemo, existingKey, existingEsvK
         </div>
 
         {/* Demo mode — experience the desk without a key */}
-        {!existingKey && onDemo && (
+        {!hasExistingKey && onDemo && (
           <button onClick={onDemo}
             style={{
               marginTop: 10, width: '100%', padding: '9px 0', borderRadius: 10,

@@ -389,7 +389,8 @@ function CulturalNotesCardNode({ data }: NodeProps) {
       <div style={{ width: w, height: h, overflow: 'hidden', borderRadius: 16, background: 'linear-gradient(168deg, #344126 0%, #2c3820 46%, #232d1a 100%)', border: `2px solid ${BASE.khaki}55`, boxShadow: `0 0 0 1px ${BASE.khaki}18, 0 12px 32px rgba(0,0,0,0.38), inset 0 1px 0 ${BASE.khaki}1c`, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
       <div style={{ padding: '12px 18px 10px', borderBottom: `1px solid ${BASE.khaki}20`, cursor: 'grab', background: `${BASE.khaki}08`, flexShrink: 0, display: 'flex', alignItems: 'center' }}>
         <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>CULTURAL CONTEXT</span>
-        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: `${BASE.khaki}60`, marginLeft: 'auto' }}>{(notes ?? []).length} notes</span>
+        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.gold, marginLeft: 'auto', letterSpacing: '0.08em' }}>PROVISIONAL · VERIFY</span>
+        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: `${BASE.khaki}60`, marginLeft: 8 }}>{(notes ?? []).length} notes</span>
       </div>
       <div className="nowheel" style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
         {(notes ?? []).map((note: any, i: number) => {
@@ -399,6 +400,21 @@ function CulturalNotesCardNode({ data }: NodeProps) {
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
                 <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 14, color, fontWeight: 600 }}>{note.term}</span>
                 <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: `${color}70`, letterSpacing: '0.07em' }}>{note.category.replace(/-/g,' ')}</span>
+                {note.claimStatus && (
+                  <span style={{
+                    marginLeft: 'auto',
+                    fontFamily: 'JetBrains Mono',
+                    fontSize: 6,
+                    color: note.claimStatus === 'disputed' ? BASE.gold : note.claimStatus === 'inferred' ? BASE.khaki : BASE.moss,
+                    border: `1px solid ${note.claimStatus === 'disputed' ? BASE.gold : note.claimStatus === 'inferred' ? BASE.khaki : BASE.moss}55`,
+                    borderRadius: 8,
+                    padding: '1px 5px',
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                  }}>
+                    {note.claimStatus}
+                  </span>
+                )}
               </div>
               <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.boneMid, lineHeight: 1.65, margin: '0 0 6px' }}>{note.explanation}</p>
               <p style={{ fontFamily: 'JetBrains Mono', fontSize: 7.5, color: `${color}80`, lineHeight: 1.5, margin: 0, letterSpacing: '0.03em' }}>↳ {note.significance}</p>
@@ -603,8 +619,14 @@ function buildDesk(
 
     phraseNodes = lines.map((line, i) => {
       const id = `av-${i}`
-      // Strip leading verse numbers like "1 " or "119:1 "
-      const clean = line.replace(/^\d+:\d+\s+/, '').replace(/^\d+\s+/, '')
+      // Strip leading verse numbers like "1 " or "119:1 ", and the bracketed
+      // "[1] " markers the ESV fetch now returns (they run mid-line too, so
+      // that one is global — the phrase tree wants the words, not the address).
+      const clean = line
+        .replace(/\[\d+(?::\d+)?\]\s*/g, '')
+        .replace(/^\d+:\d+\s+/, '')
+        .replace(/^\d+\s+/, '')
+        .trim()
       const syntheticPhrase: Phrase = {
         id, text: clean, type: 'main', level: 0, parentId: null,
         connective: null, connectiveFunction: null, role: 'predicate', theologicalNote: '',
@@ -746,7 +768,7 @@ function DeskInner({
   analysis, annotations, onAnnotate, onWordClick,
   culturalPhraseIds, selectedPhraseId, onSelectPhrase,
   apiKey, esvKey, historyId, initialDraft, onDraftChange, onLoadRef,
-  phraseMode: phraseModeprop, onPhraseModeChange,
+  phraseMode: phraseModeprop,
 }: Props) {
   const { fitView, getViewport, setCenter, setViewport } = useReactFlow()
 
@@ -767,9 +789,7 @@ function DeskInner({
   }
   const [annotatingId, setAnnotatingId] = useState<string | null>(null)
   const [annotationInit, setAnnotationInit] = useState('')
-  const [phraseModeLocal, setPhraseModeLocal] = useState<'key' | 'all'>('key')
-  const phraseMode = phraseModeprop ?? phraseModeLocal
-  const setPhraseMode = (onPhraseModeChange ?? setPhraseModeLocal) as (m: 'key' | 'all') => void
+  const phraseMode = phraseModeprop ?? 'key'
   const [addOpen, setAddOpen] = useState(false)
 
   function handleAnnotate(phraseId: string, current: string) {
@@ -930,7 +950,7 @@ function DeskInner({
                   { type: 'parallelCard'    as const, label: '❖  PARALLEL TEXT'  },
                   { type: 'crossRefArcs'    as const, label: '⌒  CONNECTIONS MAP' },
                   { type: 'slideDeckCard'   as const, label: '⊟  SLIDE DECK'     },
-                  { type: 'worshipStructure'as const, label: '⛩  WORSHIP PLAN'   },
+                  { type: 'worshipStructure'as const, label: '⌂  WORSHIP PLAN'   },
                   { type: 'monarchyCard'    as const, label: '♚  MONARCHY'       },
                   { type: 'kingsList'       as const, label: '♛  KINGS LIST'     },
                   { type: 'lineageViewer'   as const, label: '⊳  LINEAGE VIEWER' },

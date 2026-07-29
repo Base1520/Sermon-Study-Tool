@@ -1,22 +1,28 @@
 {
-  "name": "sermon-tool",
-  "version": "1.3.1",
-  "description": "Text-driven sermon preparation with phrasing diagrams",
+  "name": "the-operator",
+  "version": "1.3.2",
+  "description": "Study any passage of Scripture in its own context — what the author meant, how you know, and what to do with it.",
   "main": "electron/main.js",
+  "featureFlags": {
+    "theologyRetrieval": false
+  },
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && NODE_ENV=development electron .\"",
-    "build": "vite build && electron-builder",
+    "dev:retrieval": "concurrently \"vite\" \"wait-on http://localhost:5173 && NODE_ENV=development THEOLOGY_RETRIEVAL_ENABLED=true electron .\"",
+    "build": "VITE_ADMIN=false vite build && electron-builder",
     "build:admin": "VITE_ADMIN=true vite build && electron-builder --mac",
     "build:beta": "VITE_ADMIN=false vite build && electron-builder --mac",
     "build:beta-win": "VITE_ADMIN=false vite build && electron-builder --win --x64",
-    "build:mac": "vite build && electron-builder --mac --dir",
-    "publish": "vite build && electron-builder --publish always",
+    "build:mac": "VITE_ADMIN=false vite build && electron-builder --mac --dir",
+    "test:release": "node electron/plainread/test-situation.js && node electron/plainread/test-outline.js && node electron/plainread/test-levels.js && node electron/plainread/test-voice.js && node electron/plainread/test-doctrine.js && node electron/plainread/test-plainread.js && node electron/plainread/test-ask.js && node electron/groupguide/test-groupguide.js && tsc --noEmit",
+    "eval:commentary": "node scripts/evaluate-commentary-retrieval.js",
+    "publish": "VITE_ADMIN=false vite build && electron-builder --publish always",
     "vite": "vite --port ${PORT:-5173}",
     "electron": "electron ."
   },
   "build": {
-    "appId": "com.base1520.sermontool",
-    "productName": "BASE 1520",
+    "appId": "com.base1520.theoperator",
+    "productName": "The Operator",
     "directories": {
       "output": "dist-electron"
     },
@@ -25,6 +31,18 @@
       "electron/**/*",
       "node_modules/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/theology-retrieval",
+        "to": "theology-retrieval",
+        "filter": [
+          "theology_retrieval.py",
+          "library.sqlite3",
+          "bundle-manifest.json",
+          "RIGHTS-NOTICE.txt"
+        ]
+      }
     ],
     "mac": {
       "icon": "build/icon.icns",
@@ -41,6 +59,13 @@
             "arm64",
             "x64"
           ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ]
     },
@@ -50,7 +75,7 @@
       "repo": "Sermon-Study-Tool"
     },
     "dmg": {
-      "title": "BASE 1520",
+      "title": "The Operator",
       "background": null,
       "window": {
         "width": 540,
@@ -59,7 +84,12 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.ico"
     },

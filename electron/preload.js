@@ -2,6 +2,12 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('electronAPI', {
   analyzePassage: (payload) => ipcRenderer.invoke('analyze-passage', payload),
+  plainRead: (args) => ipcRenderer.invoke('plain-read', args),
+  plainAsk: (args) => ipcRenderer.invoke('plain-ask', args),
+  groupGuideLoad: (args) => ipcRenderer.invoke('group-guide-load', args),
+  groupGuideGenerate: (args) => ipcRenderer.invoke('group-guide-generate', args),
+  groupGuideSave: (args) => ipcRenderer.invoke('group-guide-save', args),
+  groupGuideExportPdf: (args) => ipcRenderer.invoke('group-guide-export-pdf', args),
   historyList: () => ipcRenderer.invoke('history-list'),
   historyDelete: (id) => ipcRenderer.invoke('history-delete', id),
   historySaveAnnotations: (id, annotations) => ipcRenderer.invoke('history-save-annotations', { id, annotations }),
@@ -13,7 +19,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   profileGet: () => ipcRenderer.invoke('profile-get'),
   profileSave: (profile) => ipcRenderer.invoke('profile-save', profile),
   profileAddSermon: (payload) => ipcRenderer.invoke('profile-add-sermon', payload),
-  profileExtractInsights: (payload) => ipcRenderer.invoke('profile-extract-insights', payload),
   profileSearchSermons: (query) => ipcRenderer.invoke('profile-search-sermons', query),
   profileGetSermon: (id) => ipcRenderer.invoke('profile-get-sermon', id),
   draftSermon: (payload) => ipcRenderer.invoke('draft-sermon', payload),
@@ -32,12 +37,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scanAssetImages: () => ipcRenderer.invoke('scan-asset-images'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  testAnthropicKey: (apiKey) => ipcRenderer.invoke('test-anthropic-key', apiKey),
+  secretStatus: () => ipcRenderer.invoke('secret-status'),
+  saveApiKeys: (keys) => ipcRenderer.invoke('save-api-keys', keys),
+  migrateLegacyApiKeys: (keys) => ipcRenderer.invoke('migrate-legacy-api-keys', keys),
   setUiZoom: (f) => ipcRenderer.invoke('set-ui-zoom', f),
   getUiZoom: () => ipcRenderer.invoke('get-ui-zoom'),
   missionBrief: (payload) => ipcRenderer.invoke('mission-brief', payload),
   pickMediaFile: () => ipcRenderer.invoke('pick-media-file'),
-  getLocalKeys: () => ipcRenderer.invoke('get-local-keys'),
-  openKeysFolder: () => ipcRenderer.invoke('open-keys-folder'),
   reviewDelivery: (payload) => ipcRenderer.invoke('review-delivery', payload),
   calendarGet: () => ipcRenderer.invoke('calendar-get'),
   calendarSet: (date, entry) => ipcRenderer.invoke('calendar-set', { date, entry }),
@@ -51,5 +58,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_, data) => cb(data)
     ipcRenderer.on('chat-chunk', handler)
     return () => ipcRenderer.removeListener('chat-chunk', handler)
+  },
+  /**
+   * The claim check landing AFTER plainRead() already resolved.
+   *
+   * cb receives { requestId, requestedReference, reference, readingLevel, doc }.
+   * Fires at most once per plain-read call, and only for a document that came
+   * back with verification.status === 'pending'. `doc` is the whole corrected
+   * document — swap it in, do not merge it.
+   *
+   * MATCH BEFORE YOU SWAP: two passages in quick succession produce two checks,
+   * and the first can land second. Compare requestId (if you sent one) or
+   * reference + readingLevel against what is on screen, and drop anything that
+   * does not match. Returns an unsubscribe function; call it on unmount or the
+   * handler outlives the component and swaps a document into a dead view.
+   */
+  onPlainReadVerified: (cb) => {
+    const handler = (_, data) => cb(data)
+    ipcRenderer.on('plain-read-verified', handler)
+    return () => ipcRenderer.removeListener('plain-read-verified', handler)
   },
 })

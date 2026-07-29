@@ -28,8 +28,10 @@ interface Props {
   onClose: () => void
 }
 
-export function RehearsalReview({ apiKey, reference, savedDraft, onClose }: Props) {
-  const [openaiKey, setOpenaiKey] = useState(() => localStorage.getItem('sermon-tool-openai-key') ?? '')
+export function RehearsalReview({ reference, savedDraft, onClose }: Props) {
+  const [hasOpenaiKey, setHasOpenaiKey] = useState(false)
+  const [openaiKeyInput, setOpenaiKeyInput] = useState('')
+  const [consented, setConsented] = useState(false)
   const [recording, setRecording] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [busy, setBusy] = useState<string | null>(null)
@@ -44,9 +46,18 @@ export function RehearsalReview({ apiKey, reference, savedDraft, onClose }: Prop
     recorder.current?.stream.getTracks().forEach(t => t.stop())
   }, [])
 
-  function saveKey(k: string) {
-    setOpenaiKey(k)
-    localStorage.setItem('sermon-tool-openai-key', k.trim())
+  useEffect(() => {
+    ;(window as any).electronAPI.secretStatus?.()
+      .then((status: Record<string, boolean>) => setHasOpenaiKey(Boolean(status.OPENAI_KEY)))
+      .catch(() => {})
+  }, [])
+
+  async function saveKey() {
+    const value = openaiKeyInput.trim()
+    if (!value) return
+    const status = await (window as any).electronAPI.saveApiKeys({ OPENAI_KEY: value })
+    setHasOpenaiKey(Boolean(status.OPENAI_KEY))
+    setOpenaiKeyInput('')
   }
 
   async function startRecording() {
@@ -84,18 +95,16 @@ export function RehearsalReview({ apiKey, reference, savedDraft, onClose }: Prop
     const picked = await (window as any).electronAPI.pickMediaFile()
     if (!picked) return
     if (picked.sizeMB > 25) { setError(`File is ${picked.sizeMB}MB — the transcription limit is 25MB. Export a lower-bitrate audio version.`); return }
-    await runReview({ filePath: picked.path })
+    await runReview({ fileToken: picked.token })
   }
 
-  async function runReview(input: { filePath?: string; audioBase64?: string; mimeType?: string }) {
+  async function runReview(input: { fileToken?: string; audioBase64?: string; mimeType?: string }) {
     setBusy('Transcribing…')
     setResult(null)
     try {
       // Transcription takes ~real-time/10; critique a few seconds more
       const r = await (window as any).electronAPI.reviewDelivery({
         ...input,
-        openaiKey: openaiKey.trim(),
-        apiKey,
         manuscript: savedDraft ?? '',
         reference: reference ?? '',
       })
@@ -120,7 +129,7 @@ export function RehearsalReview({ apiKey, reference, savedDraft, onClose }: Prop
       <div style={{ padding: '16px 18px 28px', fontFamily: FONT.mono }}>
 
         {/* OpenAI key (transcription) */}
-        {!openaiKey.trim() && (
+        {!hasOpenaiKey && (
           <div style={{
             background: `${GOLD}0c`, border: `1px solid ${GOLD}40`, borderRadius: 10,
             padding: '11px 14px', marginBottom: 16,
@@ -129,19 +138,52 @@ export function RehearsalReview({ apiKey, reference, savedDraft, onClose }: Prop
               TRANSCRIPTION KEY NEEDED (ONE TIME)
             </div>
             <div style={{ fontSize: 9, color: `${TEXT}bb`, lineHeight: 1.6, marginBottom: 8 }}>
-              Speech-to-text uses OpenAI Whisper (~$0.006 per minute). Paste an OpenAI API key — stored locally, never sent anywhere but OpenAI.
+              Speech-to-text uses OpenAI. Paste a paid OpenAI API key; it is protected on this computer and used only for transcription.
             </div>
-            <input
-              value={openaiKey}
-              onChange={e => saveKey(e.target.value)}
-              placeholder="sk-..."
-              style={{
-                width: '100%', boxSizing: 'border-box', background: DARK,
-                border: `1px solid ${KHAKI}30`, borderRadius: 6, padding: '8px 12px',
-                color: TEXT, fontSize: 10, fontFamily: FONT.mono, outline: 'none',
-              }}
-            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                type="password"
+                value={openaiKeyInput}
+                onChange={e => setOpenaiKeyInput(e.target.value)}
+                placeholder="sk-..."
+                autoComplete="off"
+                style={{
+                  flex: 1, boxSizing: 'border-box', background: DARK,
+                  border: `1px solid ${KHAKI}30`, borderRadius: 6, padding: '8px 12px',
+                  color: TEXT, fontSize: 10, fontFamily: FONT.mono, outline: 'none',
+                }}
+              />
+              <button
+                onClick={() => void saveKey()}
+                disabled={!openaiKeyInput.trim()}
+                style={{
+                  border: `1px solid ${GOLD}55`, borderRadius: 6, padding: '0 12px',
+                  background: `${GOLD}18`, color: GOLD, fontFamily: FONT.display,
+                  cursor: openaiKeyInput.trim() ? 'pointer' : 'not-allowed',
+                }}
+              >
+                SAVE
+              </button>
+            </div>
           </div>
+        )}
+
+        {hasOpenaiKey && (
+          <label style={{
+            display: 'flex', gap: 9, alignItems: 'flex-start', marginBottom: 16,
+            padding: '10px 12px', border: `1px solid ${KHAKI}25`, borderRadius: 8,
+            fontSize: 8.5, color: `${TEXT}cc`, lineHeight: 1.55, cursor: 'pointer',
+          }}>
+            <input
+              type="checkbox"
+              checked={consented}
+              onChange={event => setConsented(event.target.checked)}
+              style={{ marginTop: 2 }}
+            />
+            <span>
+              I understand the audio is sent to OpenAI for transcription, then the transcript and any manuscript excerpt are sent to Anthropic for delivery review.
+            </span>
+          </label>
         )}
 
         {/* Record / upload */}
@@ -149,14 +191,14 @@ export function RehearsalReview({ apiKey, reference, savedDraft, onClose }: Prop
           <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
             <button
               onClick={recording ? stopRecording : startRecording}
-              disabled={!openaiKey.trim()}
+              disabled={!hasOpenaiKey || !consented}
               style={{
-                flex: 1, padding: '16px 0', borderRadius: 10, cursor: openaiKey.trim() ? 'pointer' : 'not-allowed',
+                flex: 1, padding: '16px 0', borderRadius: 10, cursor: hasOpenaiKey && consented ? 'pointer' : 'not-allowed',
                 background: recording ? '#c0505022' : `${GOLD}14`,
                 border: `1px solid ${recording ? '#c05050' : GOLD + '50'}`,
                 color: recording ? RED : GOLD,
                 fontSize: 15, letterSpacing: '0.12em', fontFamily: FONT.display,
-                opacity: openaiKey.trim() ? 1 : 0.4,
+                opacity: hasOpenaiKey && consented ? 1 : 0.4,
               }}>
               {recording ? `⏹ STOP — ${mmss(elapsed)}` : '⏺ REHEARSE NOW'}
               <div style={{ fontSize: 6.5, opacity: 0.6, marginTop: 4, letterSpacing: '0.08em', fontFamily: FONT.mono }}>
@@ -165,13 +207,13 @@ export function RehearsalReview({ apiKey, reference, savedDraft, onClose }: Prop
             </button>
             <button
               onClick={uploadFile}
-              disabled={!openaiKey.trim() || recording}
+              disabled={!hasOpenaiKey || !consented || recording}
               style={{
                 flex: 1, padding: '16px 0', borderRadius: 10,
-                cursor: openaiKey.trim() && !recording ? 'pointer' : 'not-allowed',
+                cursor: hasOpenaiKey && consented && !recording ? 'pointer' : 'not-allowed',
                 background: CARD, border: `1px solid ${KHAKI}35`, color: TEXT,
                 fontSize: 15, letterSpacing: '0.12em', fontFamily: FONT.display,
-                opacity: openaiKey.trim() && !recording ? 1 : 0.4,
+                opacity: hasOpenaiKey && consented && !recording ? 1 : 0.4,
               }}>
               ⇪ UPLOAD SERMON
               <div style={{ fontSize: 6.5, opacity: 0.6, marginTop: 4, letterSpacing: '0.08em', fontFamily: FONT.mono }}>

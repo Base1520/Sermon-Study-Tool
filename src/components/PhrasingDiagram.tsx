@@ -29,7 +29,7 @@ const GAP_Y = 20
 const PAD_X = 40
 const PAD_Y = 40
 
-type PhraseData = Phrase & {
+type PhraseData = Phrase & Record<string, unknown> & {
   selectedId: string | null
   annotation: string | null
   hasCulturalNote: boolean
@@ -126,8 +126,7 @@ function AnnotationModal({ phraseId, initial, onSave, onClose }: {
 }
 
 // ── Glass card node ────────────────────────────────────────────────────────────
-function PhraseNode({ data }: NodeProps) {
-  const phrase = data as PhraseData
+function PhraseNode({ data: phrase }: NodeProps<Node<PhraseData, 'phraseNode'>>) {
   const color = CLAUSE_COLORS[phrase.type as ClauseType] ?? BASE.steel
   const isMain = phrase.type === 'main'
   const isSelected = phrase.selectedId === phrase.id
@@ -328,7 +327,7 @@ export function PhrasingDiagram({ analysis, selectedId, onSelect, annotations, o
           onNodeClick={(_, node) => onSelect(selectedId === node.id ? null : node.id)}
           onPaneClick={() => onSelect(null)}
           fitView fitViewOptions={{ padding: 0.12, maxZoom: 1 }}
-          onInit={(rf: ReactFlowInstance) => { setTimeout(() => rf.fitView({ padding: 0.12, maxZoom: 1 }), 80) }}
+          onInit={(rf: ReactFlowInstance<Node<PhraseData>, Edge>) => { setTimeout(() => rf.fitView({ padding: 0.12, maxZoom: 1 }), 80) }}
           minZoom={0.1} maxZoom={3}
           nodesDraggable={false} nodesConnectable={false}
           style={{ background: 'transparent' }}

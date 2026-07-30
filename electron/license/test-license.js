@@ -160,5 +160,45 @@ console.log('\nSUPPORT MESSAGES')
   ok('a licensed org is named back to the user', /Grace Seminary/.test(describeLicense(good)))
 }
 
+console.log('\nPERSISTENCE — a fake electron-store, no Electron needed')
+{
+  const makeStore = () => {
+    const m = new Map()
+    return { get: (k, d) => (m.has(k) ? m.get(k) : d), set: (k, v) => m.set(k, v), delete: (k) => m.delete(k) }
+  }
+  const { getInstallId, entitlements, setLicense, can } = require('./store')
+  const opts = { publicKeyPem: TEST_PUB, now: new Date('2026-08-01') }
+
+  const s = makeStore()
+  const id1 = getInstallId(s)
+  ok('an install id is created on first call', typeof id1 === 'string' && id1.length > 8)
+  ok('the install id is stable across calls', getInstallId(s) === id1)
+  ok('two installs get different ids', getInstallId(makeStore()) !== id1)
+
+  const free = entitlements(s, opts)
+  ok('a fresh install is unlicensed but usable', !free.licensed && free.features.length === FREE_FEATURES.length)
+  ok('the free message does not read like an error', /free/i.test(free.message))
+
+  const bad = setLicense(s, 'garbage', opts)
+  ok('a bad paste is rejected before saving', !bad.ok)
+  ok('rejecting a bad paste leaves the install free', !entitlements(s, opts).licensed)
+
+  const good = setLicense(s, mint(basePayload({ seats: 25, org: 'Grace Seminary' })), opts)
+  ok('a good license is accepted', good.ok && good.licensed, good.error || '')
+  ok('paid features unlock', can(s, 'pulpit.outline', opts))
+  ok('seats survive the round trip', entitlements(s, opts).seats === 25)
+  ok('the org survives the round trip', entitlements(s, opts).org === 'Grace Seminary')
+
+  const expiredLic = mint(basePayload({ expires: '2026-01-01' }))
+  const exp = setLicense(makeStore(), expiredLic, opts)
+  ok('an expired but authentic license is kept, not discarded', exp.ok)
+  ok('an expired license identifies the customer so the app can say renew',
+    exp.issuedTo === 'pastor@church.org')
+
+  const cleared = setLicense(s, '', opts)
+  ok('clearing returns to free', cleared.ok && cleared.cleared && !cleared.licensed)
+  ok('paid features re-lock after clearing', !can(s, 'pulpit.outline', opts))
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

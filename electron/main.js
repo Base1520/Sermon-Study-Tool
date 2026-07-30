@@ -319,7 +319,17 @@ function explicitGeoReferences(raw, passageText) {
 }
 
 ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) => {
-  const stage = (name) => { try { if (streamId) event.sender.send('analysis-progress', { streamId, stage: name }) } catch {} }
+  // Timing. plain-read already logs its own; without this one we know the total
+  // wall clock a reader waits but not how it splits between the analysis fan-out
+  // and the document generation — and you cannot make something faster until you
+  // know which half is slow.
+  const __a0 = Date.now()
+  const stage = (name) => {
+    try {
+      console.log(`[analyze-passage] stage=${name} +${((Date.now() - __a0) / 1000).toFixed(1)}s`)
+      if (streamId) event.sender.send('analysis-progress', { streamId, stage: name })
+    } catch {}
+  }
   stage('start')
   // Core exegesis is source-bound. Personal theology and profile data belong in
   // later pastoral/delivery surfaces, not in the passage analysis request.
@@ -663,8 +673,50 @@ const { plainRead } = require('./plainread/pipeline')
 //     for exactly that reason.
 //   * NO SPINNER. See the note in PlainRead.tsx: the check stays invisible. The
 //     reader is reading; corrections land silently or not at all.
+//
+// THE GENERATION IS STREAMED, SECTION BY SECTION — event 'plain-read-section',
+// payload: { requestId, requestedReference, key, value }
+//
+//   * Fires once per TOP-LEVEL key of the document, the moment the model
+//     finishes writing that key. The document is not shorter and the model is
+//     not weaker; the reader simply starts reading the first section while the
+//     last one is still being composed.
+//   * `key` is a document field name — 'situation', 'outline', 'meaning' and so
+//     on. `value` is that field's parsed value, exactly what the finished
+//     document will carry for it.
+//   * DO NOT ASSUME AN ORDER, and do not wait for a key you expect. Render what
+//     arrives, as it arrives. The order is prompt.js's business.
+//   * PROVISIONAL UNTIL THE INVOKE RESOLVES. These sections have not been
+//     validated — validatePlainRead runs over the complete document after the
+//     stream closes, and the resolved document is the truth. When plainRead()
+//     resolves, swap the whole document in and stop trusting the pieces.
+//   * key === '__reset__' means THROW AWAY EVERY SECTION ALREADY RENDERED and
+//     go back to the loading state. It fires when an attempt is abandoned — a
+//     dead stream, or a document that failed validation and is being
+//     re-generated. The retry writes a DIFFERENT document; leaving the old
+//     fragments on screen would show a reader two readings spliced together.
+//   * MATCH BEFORE YOU RENDER, same as 'plain-read-verified' above: compare
+//     requestId against the request in flight and drop anything stale. Two
+//     passages in quick succession produce two streams.
 ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force, level, requestId }) => {
-  return plainRead({
+  // Timing, logged to the terminal. Added because "it feels slow" and "it IS
+  // slow" are different problems with different fixes, and nobody could tell
+  // them apart. The generate call writes ~2400 words at the plain level; if
+  // that is where the wall-clock goes then the answer is streaming it, not
+  // trimming it — Cole ruled explicitly that the document does not get shorter.
+  const __t0 = Date.now()
+  const __done = (label) => console.log(
+    `[plain-read] ${label} ${((Date.now() - __t0) / 1000).toFixed(1)}s` +
+    ` ref=${analysis?.reference ?? '?'} level=${level ?? 'default'}`
+  )
+  // TIME TO FIRST SECTION is now the number that matters. Total time did not
+  // change and was never supposed to — the document did not get shorter. What
+  // changed is how long the reader waits before there is something to read, and
+  // that is the only figure worth watching for a regression. If this creeps
+  // back toward the total, streaming has quietly broken.
+  let __firstSection = 0
+  try {
+  return await plainRead({
     analysis,
     apiKey: requireSecret('ANTHROPIC_KEY', 'Anthropic'),
     requestedReference,
@@ -678,6 +730,29 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
     retry: withRetry,
     parse: parseModelJSON,
     deferVerify: true,
+    // Guarded exactly like onVerified below, and for the same reason: this
+    // fires from inside a live stream handler, which can outlive the window
+    // that started it. A destroyed webContents must be a no-op, not a crash in
+    // the main process — and a throw here has no caller left to reject to.
+    onSection: (key, value) => {
+      try {
+        if (!event.sender || event.sender.isDestroyed()) return
+        if (!__firstSection && key !== '__reset__') {
+          __firstSection = Date.now()
+          console.log(
+            `[plain-read] FIRST SECTION '${key}' in ` +
+            `${((__firstSection - __t0) / 1000).toFixed(1)}s` +
+            ` ref=${analysis?.reference ?? '?'} level=${level ?? 'default'}`
+          )
+        }
+        event.sender.send('plain-read-section', {
+          requestId: requestId ?? null,
+          requestedReference: requestedReference ?? null,
+          key,
+          value,
+        })
+      } catch {}
+    },
     // Same shape as the 'analysis-progress' send above, and guarded the same
     // way plus one: a check that outlives the window it was started for must
     // not touch a destroyed webContents. The catch is the backstop — this runs
@@ -695,6 +770,19 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
       } catch {}
     },
   })
+  } finally {
+    // Fires on the success path AND on a throw, so a failed run still reports
+    // how long it burned before failing. The gap between the two lines is the
+    // waiting that streaming removed; a cache hit prints no FIRST SECTION line
+    // at all, because it never called the model.
+    __done('returned to renderer in')
+    if (__firstSection) {
+      console.log(
+        `[plain-read] reader was reading for ` +
+        `${((Date.now() - __firstSection) / 1000).toFixed(1)}s of that`
+      )
+    }
+  }
 })
 
 // ── COVENANT GROUP GUIDE ────────────────────────────────────────────────────

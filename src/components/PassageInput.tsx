@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { BASE, FONT } from '../theme'
+import { formatReference } from '../lib/reference'
 
 interface Props {
   onAnalyze: (text: string, reference: string) => void
@@ -83,7 +84,11 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
   async function handleStudy() {
     if (!canAnalyze) return
     const passage = text.trim() || (await handleFetch())?.trim() || ''
-    if (passage) onAnalyze(passage, reference.trim())
+    // Canonicalised HERE rather than at each display site, so the header, the
+    // document title, history and search all get the same tidy form and the
+    // stored reference is clean. A man typing "romans 1:16" was seeing his own
+    // lowercase typing echoed back at him everywhere.
+    if (passage) onAnalyze(passage, formatReference(reference))
   }
 
   const label = (text: string, active?: boolean) => (

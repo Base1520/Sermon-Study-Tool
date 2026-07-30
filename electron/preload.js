@@ -78,4 +78,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('plain-read-verified', handler)
     return () => ipcRenderer.removeListener('plain-read-verified', handler)
   },
+  /**
+   * A SECTION of the document, the moment the model finishes writing it.
+   *
+   * cb receives { requestId, requestedReference, key, value }, once per
+   * top-level field of the reading. The document is not shorter and the model
+   * is not weaker — this removes the WAITING. The reader starts on the first
+   * section while the last one is still being composed.
+   *
+   * DO NOT ASSUME AN ORDER and do not wait for a key you expect. Render what
+   * arrives, as it arrives.
+   *
+   * PROVISIONAL. These sections have not been validated. validatePlainRead runs
+   * over the complete document after the stream closes; when plainRead()
+   * resolves, swap the whole returned document in and stop trusting the pieces.
+   *
+   * key === '__reset__' means DISCARD EVERYTHING RENDERED SO FAR and return to
+   * the loading state — an attempt was abandoned and the retry is writing a
+   * different document.
+   *
+   * MATCH BEFORE YOU RENDER: compare requestId against the request in flight
+   * and drop anything stale. Returns an unsubscribe function; call it on
+   * unmount or the handler outlives the component and paints into a dead view.
+   */
+  onPlainReadSection: (cb) => {
+    const handler = (_, data) => cb(data)
+    ipcRenderer.on('plain-read-section', handler)
+    return () => ipcRenderer.removeListener('plain-read-section', handler)
+  },
 })

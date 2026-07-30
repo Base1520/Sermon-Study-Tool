@@ -141,9 +141,64 @@ const PULPIT_LEAK = new RegExp(
 
     // preach — THIS READER doing the delivering. Jonah, Timothy and the
     // Preacher of Ecclesiastes all keep their verb.
-    '\\b(you|we|i) (are |am |will |would |should |might |can )?(going to )?(preach|preaching|preached)\\b',
+    /*
+     * SECOND PERSON ONLY. `we` and `i` were removed 2026-07-29 after a live run
+     * on 1 CORINTHIANS 2 threw on "I preach".
+     *
+     * The intent was "THIS READER doing the delivering." But "we preach Christ
+     * crucified" (1 Cor 1:23) is Paul, and "I preach" is Paul, and "we preach"
+     * is how the apostles describe their own work across most of the New
+     * Testament. Banning first person made the letters least readable exactly
+     * where they talk about proclamation — the same failure as the "preach it"
+     * pattern below it, one pronoun over.
+     *
+     * The reader-directed sense is almost always second person and usually
+     * carries a delivery marker, which the "when you preach" line still catches.
+     * A net that catches the reader is worse than a hole.
+     */
+    '\\byou (are |will |would |should |might |can )?(going to )?(preach|preaching|preached)\\b',
+
+    /*
+     * First person WITH DELIVERY INTENT — "I would preach this on a Sunday."
+     *
+     * Dropping `i` and `we` wholesale (see the note above) let Paul keep "we
+     * preach Christ crucified", which was the point — but it also let through a
+     * reader planning a sermon in the first person, and test-outline caught it.
+     *
+     * The tell is not the pronoun. It is a MODAL plus a DEMONSTRATIVE: "I would
+     * preach THIS" is a man with a passage and a Sunday. "We preach Christ
+     * crucified" has neither and stays readable. Requiring both keeps Paul in
+     * and keeps the sermon-planning out.
+     */
+    '\\b(i|we) (would|will|could|should|might|plan to|intend to|am going to|are going to) (preach|teach) (this|it|that)\\b',
     '\\bwhen (you|we) preach\\b',
-    '\\b(preach|preaching) (this|it|that)\\b(?! (gospel|word|message|kingdom|name|christ|jesus|crucified))',
+    /*
+     * REMOVED 2026-07-29, after it killed a real reading.
+     *
+     * The pattern was:
+     *   \b(preach|preaching) (this|it|that)\b(?! (gospel|word|message|...))
+     *
+     * A live run on ROMANS 1:16 — "I am not ashamed of the gospel" — spent
+     * 133.7 SECONDS composing a complete document and then threw the whole
+     * thing away because the model wrote "preach it." The reader waited over
+     * two minutes and got an error, and the retry costs another two.
+     *
+     * The lookahead was meant to protect exactly this, but it only exempted
+     * NOUNS. "Preach the gospel" passed; "preach it", where `it` IS the
+     * gospel, did not. A pronoun defeats the whole exemption, and pronouns are
+     * how anyone actually writes a second sentence about a subject.
+     *
+     * It was also redundant. The banned sense — THIS READER doing the
+     * delivering — is already caught by the two patterns above: a second-person
+     * subject ("you/we/I ... preach") and "when you preach". Paul preaching,
+     * Jonah preaching, Timothy told to preach the word, and the Preacher of
+     * Ecclesiastes are all ordinary description of what a text SAYS, and a net
+     * that catches the reader is worse than a hole.
+     *
+     * Romans 1:16, Romans 10:14-15, 1 Corinthians 1:23 and 2 Timothy 4:2 are
+     * the regression cases. All four are passages ABOUT proclamation; all four
+     * were unreadable while this line existed.
+     */
     '\\bpreaching (point|calendar|schedule|notes?|the passage|the text)\\b',
 
     // illustration — the sermon device being placed, not the ordinary noun.

@@ -52,7 +52,44 @@ const MonarchyCard  = lazy(() => import('./MonarchyCard').then(m => ({ default: 
 const WorshipStructure = lazy(() => import('./WorshipStructure'))
 
 interface Props {
+  /**
+   * THE FINISHED READING. Validated, and — when the claim check has landed —
+   * corrected. It is authoritative: the moment it exists it replaces whatever
+   * was streamed in below, wholesale and silently.
+   */
   doc: PlainReadDoc | null
+  /**
+   * THE READING AS IT IS BEING WRITTEN.
+   *
+   * The engine emits each block the moment that block is finished, and App.tsx
+   * merges them into this object as they land. It is the same document, arriving
+   * in the order it is composed rather than all at once at the end — the setting,
+   * then the shape of the text, then the meaning, then the six steps, then the
+   * rest. Nothing here is a preview and nothing here is shortened: it is the
+   * real document, minus the parts not yet written.
+   *
+   * `work` FILLS OVER SEVERAL MESSAGES. It is the one key that is not a block
+   * but a container of six — the six reasoning steps — and it used to be the
+   * whole problem: eighteen fields that could not be shown until the last of
+   * them was written, which is the bulk of the document and about ninety
+   * seconds in which nothing on the page changed. App.tsx now MERGES into it
+   * rather than replacing it, so it appears here holding one finished step,
+   * then two, then six. Every individual step in it is finished when it lands.
+   *
+   * NOTHING IS RENDERED HALF-WRITTEN. A key appears here only once its whole
+   * value has arrived, and each of the six steps is guarded again on its own
+   * three fields at the point of render (see stepReady) — so a step is either
+   * wholly on the page or not on the page, never a heading over half a
+   * sentence. There is no per-step spinner, no skeleton and no "3 of 6":
+   * absent means nothing is drawn at all and the page simply grows downward as
+   * blocks land. A reserved box that later fills is a jump; a page that grows is
+   * a page.
+   *
+   * `doc` wins over this whenever it exists. If a streamed block disagrees with
+   * the validated document, the validated document is right and the swap is
+   * silent — the reader is never told a correction happened.
+   */
+  partial?: Partial<PlainReadDoc> | null
   loading: boolean
   error: FriendlyError | null
   /** The passage itself, from the analysis that produced this reading. */
@@ -573,9 +610,45 @@ function OutlineUnit({
 
 /* ── one of the six ────────────────────────────────────────────────────────── */
 
+/**
+ * WHETHER THIS STEP IS ON THE PAGE OR IS NOT ON THE PAGE. There is no third
+ * state and there must not be one.
+ *
+ * The six steps land one at a time now, so this guard is what stands between a
+ * reader and half a step. A step is three fields — the body, the thing he can
+ * check for himself, and the move he keeps — and two of the three is not a
+ * step, it is an interruption with a heading on it. So: all three present, all
+ * three non-empty, or the step is simply not drawn and the page has not grown
+ * yet. It grows a moment later, whole.
+ *
+ * This is deliberately stricter than the old `work[key] ? …` test. That test
+ * was written when all six arrived together inside one validated object, where
+ * an object existing and an object being complete were the same fact. They are
+ * not the same fact while the document is being written.
+ */
+function stepReady(step: PlainReadStep | null | undefined): step is PlainReadStep {
+  if (!step || typeof step !== 'object') return false
+  const s = step as Partial<Record<keyof PlainReadStep, unknown>>
+  return (['body', 'youCanCheck', 'theMove'] as const)
+    .every(f => typeof s[f] === 'string' && (s[f] as string).trim().length > 0)
+}
+
 function WorkStep({ n, label, step }: { n: number; label: string; step: PlainReadStep }) {
   return (
-    <div style={{ marginBottom: 34 }}>
+    /* It fades in rather than popping in — 0.22s of opacity and NOTHING ELSE.
+       No slide, no height animation, no reserved box collapsing: any of those
+       moves the lines under it, and a step that arrives while the reader is two
+       paragraphs above must not shove his line. Opacity changes no geometry, so
+       the layout is identical on the first frame and the last. It reads as a
+       paragraph being written, which is what it is. A step already on the page
+       when the validated document swaps in does not re-animate: same component,
+       same key, so React reconciles rather than remounts. */
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.22, ease: 'easeOut' }}
+      style={{ marginBottom: 34 }}
+    >
       {/* number + label */}
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 10 }}>
         <span style={{
@@ -633,7 +706,7 @@ function WorkStep({ n, label, step }: { n: number; label: string; step: PlainRea
           </div>
         </div>
       </div>
-    </div>
+    </motion.div>
   )
 }
 
@@ -936,6 +1009,56 @@ function Shell({
 }
 
 /**
+ * The run failed, said once.
+ *
+ * Lifted out of the document body so the SAME notice can stand alone on an
+ * empty screen or sit at the top of a document that had already partly landed
+ * when the stream died. Nothing about it changes between the two — same
+ * headline, same detail, same buttons — because it is the same failure. Only
+ * where it sits changes, and that is decided by whether there is any reading on
+ * screen worth keeping.
+ */
+function ErrorNotice({
+  error, onRetry, onOpenSettings,
+}: {
+  error: FriendlyError
+  onRetry?: () => void
+  onOpenSettings?: () => void
+}) {
+  return (
+    <div style={{
+      border: `1px solid ${BASE.red}55`, padding: '22px 26px',
+      background: `${BASE.bgCard}aa`,
+    }}>
+      <MonoLabel color={BASE.red}>{error.headline}</MonoLabel>
+      <Prose dim>{error.detail}</Prose>
+      {error.link && (
+        <div style={{
+          marginTop: 10, marginBottom: 4, fontFamily: 'JetBrains Mono',
+          fontSize: 10, letterSpacing: '0.06em', color: BASE.gold,
+        }}>{error.link}</div>
+      )}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {onRetry && (
+          <button onClick={onRetry} style={{
+            background: 'transparent', border: `1px solid ${BASE.red}55`,
+            color: BASE.red, padding: '6px 20px', cursor: 'pointer',
+            fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.14em',
+          }}>[ TRY AGAIN ]</button>
+        )}
+        {onOpenSettings && (
+          <button onClick={onOpenSettings} style={{
+            background: `${BASE.gold}10`, border: `1px solid ${BASE.borderGold}`,
+            color: BASE.gold, padding: '6px 20px', cursor: 'pointer',
+            fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.12em',
+          }}>[ CHECK API SETTINGS ]</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
  * The reader view: the document, plus the study rail beside it.
  *
  * The rail renders as soon as an analysis exists — it does not wait on the
@@ -963,7 +1086,8 @@ export function PlainRead(props: Props) {
 }
 
 function PlainReadDocument({
-  doc,
+  doc: finalDoc,
+  partial = null,
   loading,
   error,
   passageText,
@@ -979,6 +1103,22 @@ function PlainReadDocument({
   const [activeUnit, setActiveUnit] = useState<string | null>(null)
   const selectUnit = (ref: string) => setActiveUnit(cur => (cur === ref ? null : ref))
 
+  /* ── WHAT IS ON SCREEN RIGHT NOW ─────────────────────────────────────────
+     One object for every section below to read, so not a single one of them
+     has to know whether the reading is still being written.
+
+     THE FINAL DOCUMENT WINS, WHOLESALE AND SILENTLY. It is the validated one —
+     validate.js ran on the complete document before it existed, and the claim
+     check may already have corrected it. Where a streamed block and the final
+     document disagree, the final document is simply right, and the reader is
+     told nothing: no badge, no flash, no "updated" tick.
+
+     Typed as a Partial because that is what it honestly is for most of the run.
+     Every section below already reads through `doc?.` and guards on its own
+     field, which is what makes a document that arrives in pieces paint in
+     pieces with no further change down there. */
+  const doc: Partial<PlainReadDoc> | null = finalDoc ?? partial
+
   /* ── THE DOCUMENT ARRIVES IN PIECES ──────────────────────────────────────
      It always did; the reader was simply not shown any of it until the last
      piece landed. The passage text is in hand about a second after SEND IT —
@@ -989,8 +1129,15 @@ function PlainReadDocument({
      No section below reads this flag to decide whether to render. Every one of
      them is guarded on ITS OWN field, so a document that fills in field by
      field paints section by section — which is what happens the moment the
-     engine hands back anything less than the whole thing at once. */
-  const pending = !doc && !error
+     engine hands back anything less than the whole thing at once.
+
+     ASKED OF THE FINAL DOCUMENT, NOT OF WHAT IS ON SCREEN. Sections now land as
+     they are written, so `doc` goes truthy seconds in, while most of the reading
+     is still being composed. If the wait were measured from that, the status
+     line would go quiet and the rule would stop sweeping while the page was
+     still visibly filling — the app claiming to be finished over a document that
+     is not. The wait ends when the validated document lands. Nothing else. */
+  const pending = !finalDoc && !error
 
   /* When THIS wait started. Restarted when a wait BEGINS, so a retry counts
      its own wait rather than continuing the last one's, and again whenever a
@@ -1052,18 +1199,24 @@ function PlainReadDocument({
 
      It pins only when the reader has actually scrolled. Parked at the top with
      the whole document arriving at once, the reveal IS the event and the page
-     should lay itself out from the top like a page. */
+     should lay itself out from the top like a page.
+
+     IT RUNS ON EVERY BLOCK NOW, NOT JUST THE FIRST. It used to fire once, on the
+     null → document transition, because that was the only moment the page ever
+     changed height above the passage. With the reading streaming in there are
+     several such moments — the widening notice, the briefing, and the outline,
+     which swaps the passage from one whole block to the split-by-unit view. Each
+     one is measured and corrected the same way, so a reader mid-sentence stays
+     on the same pixel row however many times the page grows under him. When
+     nothing above the passage moved the delta is zero and this does nothing. */
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const passageRef = useRef<HTMLDivElement | null>(null)
   const passageTop = useRef<number | null>(null)
-  const hadDoc = useRef(!!doc)
 
   /* Declared FIRST so it wins the landing frame: effects fire in declaration
      order within one commit, and the recorder below would otherwise overwrite
      the pre-landing offset before this ever read it. */
   useLayoutEffect(() => {
-    if (!doc || hadDoc.current) { hadDoc.current = !!doc; return }
-    hadDoc.current = true
     const el = passageRef.current
     const sc = scrollRef.current
     const before = passageTop.current
@@ -1072,8 +1225,12 @@ function PlainReadDocument({
     if (delta) sc.scrollTop += delta
   }, [doc])
 
+  /* The offset as it stands at the end of THIS commit, which is what the
+     correction above compares against on the next one. Unconditional: while the
+     document arrived in one piece there was only ever one comparison to set up,
+     and now there is one per block. */
   useLayoutEffect(() => {
-    if (!doc && passageRef.current) passageTop.current = passageRef.current.offsetTop
+    if (passageRef.current) passageTop.current = passageRef.current.offsetTop
   })
 
   /* The reference is the anchor. Passage text arrives as continuous prose, so
@@ -1112,37 +1269,22 @@ function PlainReadDocument({
      is left of the old state is the fallback below, for the one moment when
      there is genuinely nothing to show. */
 
-  if (error) {
+  /* ── A RUN THAT DIED ──────────────────────────────────────────────────────
+     Nothing of the reading in hand: the failure IS the screen, exactly as it
+     always was.
+
+     But a stream that dies halfway leaves real, finished blocks on the page,
+     and a man who is part-way through reading them does not want them taken off
+     him to be shown a box. So when there is a document — whole or partway — the
+     same notice, in the same colours, with the same two buttons, is rendered at
+     the top of it instead, and everything that landed stays landed. Same error
+     path, same object, same copy; one placement decision, taken on whether
+     there is anything to lose. */
+  if (error && !doc) {
     return (
       <Shell>
-        <div style={{
-          marginTop: 60, border: `1px solid ${BASE.red}55`, padding: '22px 26px',
-          background: `${BASE.bgCard}aa`,
-        }}>
-          <MonoLabel color={BASE.red}>{error.headline}</MonoLabel>
-          <Prose dim>{error.detail}</Prose>
-          {error.link && (
-            <div style={{
-              marginTop: 10, marginBottom: 4, fontFamily: 'JetBrains Mono',
-              fontSize: 10, letterSpacing: '0.06em', color: BASE.gold,
-            }}>{error.link}</div>
-          )}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {onRetry && (
-              <button onClick={onRetry} style={{
-                background: 'transparent', border: `1px solid ${BASE.red}55`,
-                color: BASE.red, padding: '6px 20px', cursor: 'pointer',
-                fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.14em',
-              }}>[ TRY AGAIN ]</button>
-            )}
-            {onOpenSettings && (
-              <button onClick={onOpenSettings} style={{
-                background: `${BASE.gold}10`, border: `1px solid ${BASE.borderGold}`,
-                color: BASE.gold, padding: '6px 20px', cursor: 'pointer',
-                fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.12em',
-              }}>[ CHECK API SETTINGS ]</button>
-            )}
-          </div>
+        <div style={{ marginTop: 60 }}>
+          <ErrorNotice error={error} onRetry={onRetry} onOpenSettings={onOpenSettings} />
         </div>
       </Shell>
     )
@@ -1186,6 +1328,17 @@ function PlainReadDocument({
   const mechanic = doc?.mechanic
   const step = application?.step
   const outline = doc?.outline ?? null
+
+  /* Whether "How we got there" has anything to say yet.
+     `work` now exists from the moment the FIRST of its six steps lands, so its
+     mere existence stopped being the question. The question is whether there is
+     a finished step — or the pathway note, which is a real block in its own
+     right — to put under the heading. Until there is, the heading is not drawn,
+     because a heading over empty space is a box that fills later and filling is
+     a jump. */
+  const workHasContent = work
+    ? STEP_ORDER.some(s => stepReady(work[s.key])) || !!work.christPathway
+    : false
 
   /* The split passage renders whenever there is an outline to cut along. When
      it renders it owns the passage AND owns saying why, if it had to leave the
@@ -1272,6 +1425,16 @@ function PlainReadDocument({
           )}
         </div>
       </div>
+
+      {/* ── The run stopped, and there is already a reading on the page ─────
+             The blocks below are finished and correct; only the ones after the
+             break are missing. So they stay, and the failure is stated here
+             once, above them. TRY AGAIN is the same button it always was. */}
+      {error && (
+        <div style={{ marginBottom: 30 }}>
+          <ErrorNotice error={error} onRetry={onRetry} onOpenSettings={onOpenSettings} />
+        </div>
+      )}
 
       {/* ── Widening notice — FIRST, before any content. We never silently
              widen a verse and let the reader think they got what they asked
@@ -1554,13 +1717,28 @@ function PlainReadDocument({
       </Section>
       )}
 
-      {/* ── How we got there — the six steps ─────────────────────────────── */}
-      {work && (
+      {/* ── How we got there — the six steps ─────────────────────────────── *
+             THE LONGEST STRETCH OF THE DOCUMENT, AND IT NOW ARRIVES IN SIX.
+             This one heading used to cover eighteen fields that could not be
+             shown until the last of them was written — which is most of the
+             writing, and which is the ninety seconds where the page sat still.
+             Each step is drawn the moment that step is finished, so the page
+             keeps filling the whole way down.
+
+             THE HEADING WAITS FOR THE FIRST STEP. It is not drawn over an empty
+             space: a heading with nothing under it is a reserved box, the box
+             fills later, and the fill is a jump. Nothing appears until there is
+             something real to put under it, and then it appears together. */}
+      {work && workHasContent && (
       <Section label="How we got there">
-        {/* Per STEP, not per section. Six independent guards, so five finished
-            steps are five steps on the page rather than nothing on the page. */}
+        {/* Per STEP, not per section. Six independent guards, so three finished
+            steps are three steps on the page rather than nothing on the page —
+            and, just as importantly, so a step that is only half written is not
+            on the page at all. See stepReady. Order is taken from STEP_ORDER
+            rather than from arrival, so the six always read in the order the
+            engine reasons through them however they land. */}
         {STEP_ORDER.map((s, i) =>
-          work[s.key]
+          stepReady(work[s.key])
             ? <WorkStep key={s.key} n={i + 1} label={s.label} step={work[s.key]} />
             : null
         )}

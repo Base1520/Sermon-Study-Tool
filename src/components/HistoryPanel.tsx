@@ -34,16 +34,25 @@ export function HistoryPanel({ onLoad, currentRef }: Props) {
   return (
     <>
       {/* Trigger button */}
+      {/* Matches the header's `iconBtn` and the `.hud-tip` gold-box tooltip the
+          rest of the toolbar uses. It was the only button in that row wearing a
+          native browser `title` — a grey OS tooltip after a delay, instead of
+          the gold box that appears instantly — and it sat at 32px with a gold
+          fill while its neighbours were 34px and transparent. Being a separate
+          component is why it got missed when the row was restyled.
+          If iconBtn in App.tsx changes again, change this with it. */}
       <button
         onClick={() => setOpen(true)}
-        title="Passage history"
+        data-tip="PASSAGE HISTORY"
+        className="hud-tip"
         style={{
-          width: 32, height: 32, borderRadius: '50%',
+          width: 34, height: 34, borderRadius: '50%',
           border: `1px solid ${BASE.borderDim}`,
-          background: BASE.goldDim,
+          background: 'transparent',
           color: BASE.steel,
-          cursor: 'pointer', fontSize: 14,
+          cursor: 'pointer', fontSize: 15,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.15s',
         }}>
         ⟳
       </button>

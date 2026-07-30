@@ -291,6 +291,59 @@ function styleCityLabels(labels: CityLabel[], zoom: number): void {
     // Hidden labels must not eat clicks aimed at the marker underneath them.
     el.style.pointerEvents = op < 0.05 ? 'none' : ''
     el.style.fontSize = `${labelPxFor(zoom, base).toFixed(2)}px`
+    // Cleared here and re-applied by the declutter pass below, so a label that
+    // no longer collides at this zoom springs back to its true position.
+    el.style.transform = ''
+  }
+  declutterLabels(labels)
+}
+
+/**
+ * Nudges overlapping labels apart. Leaflet places permanent tooltips at a fixed
+ * offset from the marker and does no collision handling at all, so genuinely
+ * close places stack into an unreadable pile.
+ *
+ * The reported case is real geography, not bad data: Jerusalem sits at 35.22/31.78,
+ * Golgotha at 35.23/31.78 — about a kilometre — and Bethany at 35.26/31.77. All
+ * three have lon > 35, so all three get the SAME direction and the SAME offset and
+ * land on the same pixels. At any zoom short of street level they must overlap.
+ *
+ * Nudging beats hiding. Golgotha is not a footnote to Jerusalem, and a reader
+ * looking at a passion passage needs to see all three. Priority only decides who
+ * keeps the true position and who moves.
+ */
+function declutterLabels(labels: CityLabel[]): void {
+  const visible = labels.filter(l => l.el.style.opacity !== '0' && l.el.offsetParent !== null)
+  if (visible.length < 2) return
+
+  // Selected/highlighted labels hold their ground; lower tiers move around them.
+  const ordered = [...visible].sort((a, b) =>
+    (a.important === b.important ? a.tier - b.tier : a.important ? -1 : 1))
+
+  const placed: DOMRect[] = []
+  const overlaps = (r: DOMRect) => placed.some(p =>
+    r.left < p.right && r.right > p.left && r.top < p.bottom && r.bottom > p.top)
+
+  for (const { el } of ordered) {
+    el.style.transform = ''
+    let rect = el.getBoundingClientRect()
+    if (!overlaps(rect)) { placed.push(rect); continue }
+
+    // Try alternating up/down in one-line steps. Vertical only — horizontal
+    // movement would slide a name away from the dot it belongs to.
+    const step = Math.max(rect.height + 2, 12)
+    let settled = false
+    for (let i = 1; i <= 4 && !settled; i += 1) {
+      for (const dir of [-1, 1]) {
+        el.style.transform = `translateY(${dir * i * step}px)`
+        rect = el.getBoundingClientRect()
+        if (!overlaps(rect)) { settled = true; break }
+      }
+    }
+    // Still colliding after four rows each way means a genuinely dense cluster.
+    // Keep the label rather than hide it — overlapping text a reader can zoom
+    // into beats a place that silently is not there.
+    placed.push(rect)
   }
 }
 

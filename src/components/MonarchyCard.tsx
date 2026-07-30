@@ -265,7 +265,34 @@ interface Props { reference:string; width:number; height:number }
 export function MonarchyCard({ reference, width, height }: Props) {
   const era = useMemo(() => inferEra(reference), [reference])
   const [selected, setSelected] = useState<(Ruler | WorldEvent) | null>(null)
-  const [zoom, setZoom] = useState(1)
+  /*
+   * Zoom that FITS THE PASSAGE, not a fixed 1x.
+   *
+   * The chart spans 1,220 years and shows 600 of them at zoom 1. A New Testament
+   * passage sits in a window of about twenty. So the old default rendered the
+   * era across roughly three percent of the canvas: Claudius and Nero became
+   * eight-pixel slivers colliding into each other, most rows were empty, and the
+   * one span the reader opened the panel to see was the least legible thing on
+   * screen. It scrolled to centre the era but never zoomed to it — the range
+   * chip knew "AD 37 – AD 57" while the axis showed 450 BC to AD 100.
+   *
+   * fitZoom picks a window around six times the era, floored at 120 years so a
+   * one-year event still lands in real context rather than an absurd close-up.
+   * For Romans that is ~150 years visible — Herod through Trajan — and every
+   * emperor is wide enough to carry its own name inside the bar.
+   */
+  const fitZoom = useCallback((e: typeof era) => {
+    if (!e) return 1
+    const span = Math.max(e.end - e.start, 1)
+    // Floored at 120 years so a one-year event still lands in context; capped at
+    // FULL_SPAN because zooming out past the data only adds empty margin — a
+    // long OT era like Judges would otherwise ask for 1,800 years on a chart
+    // that holds 1,220.
+    const visibleYears = Math.min(Math.max(span * 6, 120), FULL_SPAN)
+    return Math.min(4, Math.max(0.3, 600 / visibleYears))
+  }, [])
+
+  const [zoom, setZoom] = useState(() => fitZoom(era))
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Pixel-per-year at current zoom
@@ -273,6 +300,10 @@ export function MonarchyCard({ reference, width, height }: Props) {
 
   function xOf(year: number) { return (year - YEAR_MIN) * ppy }
   function totalW() { return FULL_SPAN * ppy }
+
+  // Re-fit when the passage changes. Separate from the scroll effect below so a
+  // manual zoom is not clobbered on every render — only a new era re-fits.
+  useEffect(() => { setZoom(fitZoom(era)) }, [era, fitZoom])
 
   // Scroll to passage era on change
   useEffect(() => {
@@ -298,19 +329,47 @@ export function MonarchyCard({ reference, width, height }: Props) {
     return (
       <g key={r.id} onClick={() => click(r)} style={{ cursor:'pointer' }}>
         <rect x={x} y={y} width={w} height={h} rx={3}
-          fill={sel ? GOLD : hl ? color : `${color}30`}
+          fill={sel ? GOLD : hl ? color : `${color}66`}
           stroke={sel ? GOLD : hl ? color : `${color}45`}
           strokeWidth={sel ? 1.5 : 0.8}
-          opacity={sel ? 1 : hl ? 0.9 : 0.55}
+          opacity={sel ? 1 : hl ? 0.95 : 0.82}
         />
-        {w > 28 && (
-          <text x={x + 4} y={y + h/2 + 3.5} fontSize={hl ? 8.5 : 7.5}
-            fill={sel ? '#111' : hl ? '#fff' : `${color}cc`}
+        {w > 28 ? (
+          <text x={x + 4} y={y + h/2 + 3.5} fontSize={hl ? 10 : 9}
+            fill={sel ? '#111' : hl ? '#fff' : `${color}ee`}
             fontFamily="JetBrains Mono" letterSpacing="0.04em"
             clipPath={`url(#clip-${r.id})`}
           >
             {r.name}
           </text>
+        ) : (hl || sel) && (
+          /*
+           * Narrow bar, but it MATTERS for this passage — so the name goes
+           * outside it instead of vanishing.
+           *
+           * The chart spans ~1,570 years. Claudius reigned 13 of them: under
+           * one percent of the width, about eight pixels. The `w > 28` gate
+           * above meant no Roman emperor's name has ever rendered — which is
+           * precisely the band a New Testament passage highlights. Ask the tool
+           * about Romans and the two men who set the room, Claudius and Nero,
+           * were invisible.
+           *
+           * The bar keeps its TRUE width. Padding a 13-year reign out to 28px
+           * would make it look like a 60-year one, and a timeline that lies
+           * about duration is worse than one that is hard to read. The label
+           * sits to the right with a tick joining it to the bar, so the
+           * geometry stays honest and the name is legible.
+           */
+          <>
+            <line x1={x + w} y1={y + h / 2} x2={x + w + 5} y2={y + h / 2}
+              stroke={color} strokeWidth={0.9} opacity={0.85} />
+            <text x={x + w + 8} y={y + h / 2 + 3.5} fontSize={sel ? 10 : 9.5}
+              fill={sel ? GOLD : '#fff'}
+              fontFamily="JetBrains Mono" letterSpacing="0.04em"
+            >
+              {r.name}
+            </text>
+          </>
         )}
         <clipPath id={`clip-${r.id}`}>
           <rect x={x} y={y} width={w} height={h} />
@@ -393,9 +452,9 @@ export function MonarchyCard({ reference, width, height }: Props) {
       tks.push(
         <g key={y}>
           <line x1={x} y1={0} x2={x} y2={SVG_H}
-            stroke={`${STEEL}12`} strokeWidth={0.5} />
-          <text x={x} y={SVG_H - 2} fontSize={7}
-            fill={`${STEEL}55`} fontFamily="JetBrains Mono" textAnchor="middle">
+            stroke={`${STEEL}2e`} strokeWidth={0.6} />
+          <text x={x} y={SVG_H - 2} fontSize={9.5}
+            fill={`${STEEL}aa`} fontFamily="JetBrains Mono" textAnchor="middle">
             {yearLabel(y)}
           </text>
         </g>
@@ -496,7 +555,10 @@ export function MonarchyCard({ reference, width, height }: Props) {
         <div style={{ display:'flex', gap:4 }}>
           {([['−', () => setZoom(z => Math.max(0.3, z - 0.2))],
              ['+', () => setZoom(z => Math.min(4, z + 0.2))],
-             ['FIT', () => setZoom(1)]] as const).map(([label, fn]) => (
+             // FIT returns to the passage, not to an arbitrary 1x. After a
+             // reader has zoomed out to see where he is in the wider story,
+             // "fit" should mean "put me back on this text".
+             ['FIT', () => setZoom(fitZoom(era))]] as const).map(([label, fn]) => (
             <button key={label} onClick={fn} style={{
               fontFamily:'JetBrains Mono', fontSize:8, padding:'2px 7px',
               background: BASE.goldDim, border:`1px solid ${BASE.borderGold}`,
@@ -513,9 +575,9 @@ export function MonarchyCard({ reference, width, height }: Props) {
         <div style={{ width:LABEL_W, flexShrink:0, borderRight:`1px solid ${KHAKI}20`, paddingTop:4 }}>
           <svg width={LABEL_W} height={Math.max(canvasH, SVG_H)}>
             {rowLabelData.map(d => (
-              <text key={d.label} x={LABEL_W - 6} y={d.y} fontSize={7.5}
+              <text key={d.label} x={LABEL_W - 6} y={d.y} fontSize={9.5}
                 fill={d.color} fontFamily="JetBrains Mono"
-                letterSpacing="0.08em" textAnchor="end" opacity={0.85}>
+                letterSpacing="0.08em" textAnchor="end" opacity={1}>
                 {d.label}
               </text>
             ))}

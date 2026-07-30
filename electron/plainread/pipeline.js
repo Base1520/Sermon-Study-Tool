@@ -63,6 +63,10 @@ const { SITUATION_SCHEMA_HINT } = require('./situation')
 const { validatePlainRead, PlainReadValidationError, PSYCH_ELIGIBLE_KINDS, PULPIT_LEAK } = require('./validate')
 const { verifyPlainRead, skippedVerification } = require('./verify')
 const { lookupPassage, packMeta, GROUNDING_KEY } = require('./vault/index.js')
+// Progressive RENDERING only. See requestDocument() below — nothing this
+// module reports is authoritative, and the whole document is still parsed and
+// validated after the stream closes.
+const { createSectionExtractor } = require('./stream')
 
 const MODEL = 'claude-opus-4-8'
 /**
@@ -696,6 +700,87 @@ async function runDeferredVerification({
 }
 
 /* ------------------------------------------------------------------ *
+ * the generate call — streamed or not
+ * ------------------------------------------------------------------ */
+
+/**
+ * A section callback is the CALLER's code running inside our stream handler.
+ * A throw in it must not kill the reading it is decorating.
+ */
+function safeSection(onSection, key, value) {
+  try { onSection(key, value) } catch { /* the caller's bug, not the reading's */ }
+}
+
+/**
+ * Ask the model for the document.
+ *
+ * WITHOUT `onSection` this is exactly what it always was: one `messages.create`
+ * inside the caller's retry. Every existing caller — scripts/plainread-live.js,
+ * the evaluation runs, the pre-generated program path, every test in this
+ * directory with its `{ messages: { create } }` fake — takes this branch and
+ * cannot tell that streaming exists.
+ *
+ * WITH `onSection` the same call is streamed and the text is fed to an
+ * incremental extractor, so a finished section reaches the reader the moment
+ * the model finishes writing it instead of two minutes later with everything
+ * else. THE PARAMETERS ARE IDENTICAL. The model, the token ceiling, the prompt
+ * and the cache marker do not change — this removes WAITING, not content. And
+ * the return value is identical too: `finalMessage()` hands back the same
+ * Message shape `create()` does, so the caller's parse, validation and
+ * verification run over the whole document exactly as before. Nothing the
+ * extractor said is trusted by anything downstream.
+ *
+ * A RETRY MUST UN-DRAW WHAT IT DREW. If the stream dies mid-document after
+ * sections were already on screen, the retry composes a NEW document — leaving
+ * the old fragments up would splice two readings together in front of a reader
+ * who has no way to know. So a failed attempt that emitted anything fires
+ * '__reset__' before it rethrows, and the extractor is rebuilt per attempt.
+ */
+async function requestDocument({ client, params, runRetry, onSection }) {
+  const canStream = typeof onSection === 'function' &&
+    typeof client?.messages?.stream === 'function'
+
+  if (!canStream) {
+    // If a caller asked for sections against a client that cannot stream, it
+    // gets the document and no sections — never an error. The document is the
+    // product; progressive rendering is a nicety.
+    return runRetry(() => client.messages.create(params))
+  }
+
+  return runRetry(async () => {
+    // `work` is one key holding all six reasoning steps — the bulk of the
+    // document. At depth 1 it cannot be shown until the eighteenth field is
+    // written, which is the ~90-second dead stretch a reader sits through after
+    // the briefing lands. Deepening it emits `work` again on each step, carrying
+    // everything gathered so far, so the page keeps filling the whole way. Same
+    // model, same tokens, same document — this is rendering, not content.
+    const extractor = createSectionExtractor({ deepen: ['work'] })
+    let emitted = false
+    const stream = client.messages.stream(params)
+    stream.on('text', (t) => {
+      let completed
+      try {
+        completed = extractor.push(t)
+      } catch {
+        // stream.js is written not to throw. If it ever does, the reading
+        // continues without progressive rendering rather than dying for it.
+        return
+      }
+      for (const section of completed) {
+        emitted = true
+        safeSection(onSection, section.key, section.value)
+      }
+    })
+    try {
+      return await stream.finalMessage()
+    } catch (err) {
+      if (emitted) safeSection(onSection, '__reset__', null)
+      throw err
+    }
+  })
+}
+
+/* ------------------------------------------------------------------ *
  * main entry
  * ------------------------------------------------------------------ */
 
@@ -737,6 +822,54 @@ async function runDeferredVerification({
  *                                      blocking mode, and never called on a
  *                                      cache hit — a cached document was
  *                                      verified before it was written.
+ * @param {function} [opts.onSection]   (key, value) => void, called as each
+ *                                      TOP-LEVEL key of the document finishes
+ *                                      being written, so the renderer can put
+ *                                      it on screen instead of holding a
+ *                                      spinner until the last word lands. The
+ *                                      document takes the same total time; the
+ *                                      reader spends it reading.
+ *
+ *                                      PROGRESSIVE RENDERING ONLY. Everything
+ *                                      it reports is provisional. When the
+ *                                      stream closes, the complete JSON is
+ *                                      parsed and validatePlainRead runs over
+ *                                      the WHOLE document exactly as it does
+ *                                      without this option, and the returned
+ *                                      document — not the sections — is the
+ *                                      truth. Streaming is a rendering
+ *                                      concern; the guardrails are a
+ *                                      correctness concern and they did not
+ *                                      move.
+ *
+ *                                      DO NOT ASSUME AN ORDER. The keys arrive
+ *                                      in whatever order the model writes them,
+ *                                      which is prompt.js's business and can
+ *                                      change without this file knowing. Render
+ *                                      whatever arrives.
+ *
+ *                                      A KEY CAN ARRIVE MORE THAN ONCE. `work`
+ *                                      holds all six reasoning steps, so it is
+ *                                      reported once per step, each time with
+ *                                      the steps written so far — a strict
+ *                                      superset of the payload before it. Merge
+ *                                      by key (sections[key] = value) and the
+ *                                      section simply fills in. Never append.
+ *
+ *                                      onSection('__reset__', null) means
+ *                                      DISCARD EVERY SECTION ALREADY SHOWN. It
+ *                                      fires when an attempt that had already
+ *                                      painted something is thrown away — a
+ *                                      dead stream, or a document that failed
+ *                                      validation and is being re-generated.
+ *                                      The retry writes a different document;
+ *                                      leaving the old fragments up would show
+ *                                      a reader two readings spliced together.
+ *
+ *                                      Omitting it keeps the old non-streaming
+ *                                      path byte for byte, which is why the
+ *                                      pre-generated program path and
+ *                                      scripts/plainread-live.js are unaffected.
  * @param {function} [opts.verifyFn]    the claim check itself. Defaults to
  *                                      verifyPlainRead and exists so a test can
  *                                      inject a fake without a network call —
@@ -757,6 +890,7 @@ async function plainRead({
   verify = true,
   deferVerify = false,
   onVerified,
+  onSection,
   verifyFn = verifyPlainRead,
   mechanicsPath,
   level = PLAIN_READ_DEFAULT_LEVEL,
@@ -807,10 +941,60 @@ async function plainRead({
   let lastError = null
   let lastRejectedDoc = null
 
+  // ---- progressive rendering bookkeeping ------------------------------
+  // `painted` is the one thing this function has to remember about the
+  // renderer: whether anything from the CURRENT attempt is on screen. If an
+  // attempt is thrown away — dead stream, failed validation — whatever it drew
+  // has to come down before the next attempt starts drawing a different
+  // document over the top of it.
+  const streamSections = typeof onSection === 'function' ? onSection : null
+  let painted = false
+  const trackSection = streamSections
+    ? (key, value) => {
+        painted = key !== '__reset__'
+        safeSection(streamSections, key, value)
+      }
+    : undefined
+  const discardPaintedSections = () => {
+    if (!streamSections || !painted) return
+    painted = false
+    safeSection(streamSections, '__reset__', null)
+  }
+
   // One retry. A validation failure is a bug worth one more sample, not a loop.
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const res = await runRetry(() =>
-      client.messages.create({
+    // Reached only by a `continue` above — the previous attempt is being
+    // abandoned. Take its sections down before this one writes new ones.
+    if (attempt > 0) discardPaintedSections()
+
+    /*
+     * Cache verification. The system prompt is ~10,750 tokens and carries a
+     * cache_control marker — but NOTHING reported whether the marker actually
+     * took, and a marker below the model's minimum prefix silently no-ops with
+     * no error. That exact failure already happened once here: prompt.js told
+     * everyone not to cache because the prefix was ~3,400 tokens, the prompt
+     * tripled past the 4,096 floor, and nobody re-measured for weeks.
+     *
+     * cache_read > 0 means the prefix came back from cache and the marker is
+     * earning its keep. cache_write on the first call of a session is expected.
+     * BOTH ZERO on a repeat call means it is silently no-opping again.
+     */
+    const __logUsage = (r) => {
+      const u = r?.usage
+      if (!u) return
+      console.log(
+        `[plain-read] tokens  in=${u.input_tokens ?? '?'}` +
+        `  cache_write=${u.cache_creation_input_tokens ?? 0}` +
+        `  cache_read=${u.cache_read_input_tokens ?? 0}` +
+        `  out=${u.output_tokens ?? '?'}`
+      )
+    }
+
+    const res = await requestDocument({
+      client,
+      runRetry,
+      onSection: trackSection,
+      params: {
         model: MODEL,
         max_tokens: MAX_TOKENS,
         /*
@@ -863,8 +1047,10 @@ async function plainRead({
               `Here is the analysis of the passage:\n${JSON.stringify(payload, null, 2)}`,
           },
         ],
-      })
-    )
+      },
+    })
+
+    __logUsage(res)
 
     // A truncated or prose-wrapped response is the failure a second sample is
     // MOST likely to fix, and it was the one failure that got ZERO retries: the
@@ -881,6 +1067,10 @@ async function plainRead({
         'return the whole object again, JSON only, no prose and no fence'
       )
       if (attempt === 0) continue
+      // No document is coming. Anything already painted belongs to a reading
+      // that will never finish — take it down rather than leaving half a
+      // reading under an error message.
+      discardPaintedSections()
       throw err
     }
 
@@ -902,6 +1092,7 @@ async function plainRead({
           err
         )
       } else {
+        discardPaintedSections()
         throw err
       }
     }
@@ -1077,6 +1268,7 @@ async function plainRead({
     return doc
   }
 
+  discardPaintedSections()
   throw lastError || new Error('plainRead: exhausted attempts')
 }
 

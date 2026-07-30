@@ -41,6 +41,112 @@ import type { PhrasingAnalysis, Phrase, WordStudy, HistoryEntry, ChatMessage, Pl
 
 type Tab = 'desk' | 'scholar'
 
+/**
+ * One finished block of a reading, as it comes off the engine on
+ * 'plain-read-section'.
+ *
+ * Declared here rather than in types/phrasing.ts because the engine half of
+ * this is being built in parallel and that file is not this agent's to move.
+ * Every field is optional and `value` is `unknown` on purpose: this arrives
+ * inside an event handler, and a renderer that trusts the shape of a message it
+ * did not construct is a renderer that throws where nothing can catch it.
+ *
+ * `key` is a top-level field name of PlainReadDoc — 'situation', 'outline',
+ * 'meaning', 'work', 'distance', 'application' and so on — with one reserved
+ * exception: '__reset__' means a validation retry happened, so discard whatever
+ * has been shown and start filling again. Silently.
+ */
+type PlainReadSectionMsg = {
+  /** The token the renderer sent with this reading's plain-read call. */
+  requestId?: string | null
+  /** Which block this is, or '__reset__'. */
+  key?: string
+  /** The block, whole. Never a fragment, never appended to. */
+  value?: unknown
+}
+
+/**
+ * The six reasoning steps, plus the pathway that sits beside them. These are
+ * the fields of `work` — the ONE top-level key that is not a block but a
+ * container of six of them, and the reason a reader used to sit through a
+ * ninety-second dead stretch: `work` could not be emitted until all eighteen
+ * of its strings were written, which is the bulk of the document.
+ *
+ * Named here because this is where an incoming block gets placed, and placing
+ * a step requires knowing that `work.genre` belongs inside `work` rather than
+ * beside it. Nothing else in PlainReadDoc is called any of these, so a bare
+ * step name can never shadow a real top-level field.
+ */
+const WORK_FIELDS = new Set([
+  'genre', 'setting', 'surroundings', 'words', 'story', 'doing', 'christPathway',
+])
+
+/**
+ * Place one finished block into the reading as it stands.
+ *
+ * WHAT THE ENGINE ACTUALLY SENDS, read out of electron/plainread/stream.js:
+ * `work` is a DEEPENED key, emitted repeatedly under its own name carrying the
+ * partial object accumulated so far —
+ *
+ *     { key: 'work', value: { genre } }
+ *     { key: 'work', value: { genre, setting } }
+ *     … { key: 'work', value: { …all six, parsed from the whole slice } }
+ *
+ * — each payload a strict superset of the one before it. Against that shape
+ * alone a flat `{ ...prev, [key]: value }` would in fact have worked, since
+ * replacing with a superset loses nothing.
+ *
+ * IT IS MERGED ANYWAY, and that is deliberate. The superset guarantee is a
+ * property of one extractor's implementation, not of the wire format, and the
+ * failure it protects against is the worst kind: if a future engine ever emits
+ * only the step it just finished, a replacing renderer deletes the five steps
+ * already on the page and the reader watches the document eat itself. Merging
+ * is correct under BOTH readings and costs one spread. The path branch below
+ * is the same insurance against the other shape this could have taken.
+ *
+ * Returns `prev` UNCHANGED — same reference, so React does not re-render — for
+ * anything this renderer cannot honestly place. Guessing at a path it was not
+ * taught is how a block ends up rendered under the wrong heading.
+ */
+function placeSection(
+  prev: Partial<PlainReadDoc> | null,
+  key: string,
+  value: unknown,
+): Partial<PlainReadDoc> | null {
+  const base = prev ?? {}
+  const work = (base.work ?? {}) as PlainReadDoc['work']
+
+  // 'work.genre'. NOT what today's engine sends — stream.js rejected the
+  // compound-key convention on purpose — but a renderer that silently drops a
+  // step is indistinguishable from a hung page, so the branch stays.
+  const dot = key.indexOf('.')
+  if (dot > 0) {
+    const head = key.slice(0, dot)
+    const tail = key.slice(dot + 1)
+    if (head === 'work' && WORK_FIELDS.has(tail)) {
+      return { ...base, work: { ...work, [tail]: value } as PlainReadDoc['work'] }
+    }
+    // A path into something this build does not know how to place. Drop it and
+    // let the validated document — which is arriving regardless — say it.
+    return prev
+  }
+
+  // A step addressed by its bare name. Cheap to honour and impossible to
+  // confuse, since PlainReadDoc has no top-level field by any of these names.
+  if (WORK_FIELDS.has(key)) {
+    return { ...base, work: { ...work, [key]: value } as PlainReadDoc['work'] }
+  }
+
+  // `work` itself — merged, for the reason above. A non-object value cannot be
+  // merged, so it falls through and is assigned; the step guards in PlainRead
+  // then find nothing renderable in it and draw nothing, which is correct.
+  if (key === 'work' && value && typeof value === 'object' && !Array.isArray(value)) {
+    return { ...base, work: { ...work, ...(value as object) } as PlainReadDoc['work'] }
+  }
+
+  return { ...base, [key]: value }
+}
+
 const STORED_KEY = 'stored'
 
 export default function App() {
@@ -98,6 +204,22 @@ export default function App() {
     () => localStorage.getItem('sermon-tool-view-mode') !== 'pulpit'
   )
   const [plainDoc, setPlainDoc]         = useState<PlainReadDoc | null>(null)
+  /* ── THE READING AS IT IS BEING WRITTEN ────────────────────────────────────
+     The document is not being made shorter to make it fast — it is roughly two
+     and a half thousand words and it is meant to be, because the reader has
+     questions he does not yet know he has. What changes is that he stops
+     waiting for the last word before he is allowed to see the first: the engine
+     emits each block the moment that block is finished, and they are merged in
+     here and rendered as they land.
+
+     Only whole blocks land here — that is the engine's guarantee — so nobody
+     ever reads half a sentence.
+
+     This is a RENDERING concern and nothing else. validate.js still runs on the
+     complete document, the claim check still runs after, and an unverified
+     document is still never cached. None of that moves because the page paints
+     earlier; `plainDoc` below is still the only thing that counts as finished. */
+  const [plainPartial, setPlainPartial] = useState<Partial<PlainReadDoc> | null>(null)
   const [plainLoading, setPlainLoading] = useState(false)
   const [plainError, setPlainError]     = useState<FriendlyError | null>(null)
   // What the reader actually typed, kept so the widening notice can be honest
@@ -139,7 +261,7 @@ export default function App() {
     let cancelled = false
     const requestId = `pr-${Date.now()}-${plainNonce}`
     plainRequestRef.current = requestId
-    setPlainDoc(null); setPlainError(null); setPlainLoading(true)
+    setPlainDoc(null); setPlainPartial(null); setPlainError(null); setPlainLoading(true)
     ;(window as any).electronAPI.plainRead({
       analysis,
       apiKey,
@@ -149,7 +271,16 @@ export default function App() {
          extra field, so sending it is safe either way. */
       requestId,
     })
-      .then((doc: PlainReadDoc) => { if (!cancelled) setPlainDoc(doc) })
+      /* THE VALIDATED DOCUMENT, AND IT WINS. Everything streamed in is dropped
+         the moment this lands: it went through validate.js whole, the streamed
+         blocks did not, and where they disagree this one is simply right. The
+         swap is silent — no badge, no flash, nothing that tells the reader a
+         document changed under him. */
+      .then((doc: PlainReadDoc) => { if (!cancelled) { setPlainDoc(doc); setPlainPartial(null) } })
+      /* The partial is deliberately NOT cleared here. A run that dies halfway
+         leaves finished blocks on the page; they are still true, and taking
+         them off a man who is reading them to show him a box is worse than
+         leaving them with the failure stated above them. */
       .catch((e: any) => { if (!cancelled) setPlainError(friendlyApiError(e)) })
       .finally(() => { if (!cancelled) setPlainLoading(false) })
     return () => {
@@ -161,6 +292,61 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plainMode, analysis, apiKey, plainNonce, demoMode])
+
+  /* ── THE READING, ARRIVING IN PIECES ───────────────────────────────────────
+     The engine writes the document block by block and emits each one on
+     'plain-read-section' the moment it is whole (electron/preload.js →
+     onPlainReadSection). Merged here, rendered immediately, in the order they
+     are composed: the setting, then the shape of the text, then the meaning,
+     then the six steps, then the rest. Same total time as before — the man is
+     simply reading through it instead of watching a spinner through it.
+
+     Four rules, all of them enforced below:
+
+       · MATCH BEFORE YOU MERGE. Two passages in quick succession produce two
+         streams. A block whose token is not the token on screen is dropped, or
+         one passage's meaning lands under another passage's text.
+       · '__reset__' MEANS START OVER, SILENTLY. The engine retries a document
+         that failed validation. The reader is not told and sees no error — the
+         page just clears back and fills again.
+       · WHOLE VALUES ONLY. Every block that lands is finished. Nothing is
+         appended to and nothing renders mid-sentence. `work` is the one key
+         that fills over several messages — six reasoning steps, each finished
+         when it arrives — so it is MERGED rather than overwritten, and each
+         step is either wholly there or not there at all.
+       · THIS NEVER PRODUCES THE FINISHED DOCUMENT. `plainDoc` is the validated
+         one and outranks every block here.
+
+     Subscribed defensively, exactly as the claim check below is. The bridge is
+     live — electron/preload.js exposes onPlainReadSection over
+     'plain-read-section' — but a renderer must never assume its own preload:
+     the two ship as one app and are edited as two files, and a build whose
+     preload predates this simply never subscribes and reads exactly as it does
+     today rather than throwing on launch. */
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (typeof api?.onPlainReadSection !== 'function') return
+    const off = api.onPlainReadSection((msg: PlainReadSectionMsg | null | undefined) => {
+      if (!msg || typeof msg.key !== 'string' || !msg.key) return
+      // Not the run on screen. Nothing from it may touch the page.
+      if (msg.requestId && msg.requestId !== plainRequestRef.current) return
+
+      /* A validation retry. Everything shown so far belonged to a document that
+         is being thrown away, so it goes with it — with no message, no error
+         and no flicker of explanation. As far as the reader is concerned the
+         page is just still filling. */
+      if (msg.key === '__reset__') { setPlainPartial(null); return }
+
+      if (msg.value === undefined) return
+      /* Placed, not assigned. The six reasoning steps arrive one at a time and
+         all six live inside `work`, so where a block goes is a question with a
+         real answer — see placeSection. */
+      setPlainPartial(prev => placeSection(prev, msg.key as string, msg.value))
+    })
+    // Unsubscribe on unmount, or a stream still running when the window closes
+    // merges blocks into a dead view.
+    return () => { if (typeof off === 'function') off() }
+  }, [])
 
   /* ── THE BACKGROUND CLAIM CHECK, LANDING ───────────────────────────────────
      The reading is handed over as soon as it is written; the adversarial check
@@ -308,7 +494,10 @@ export default function App() {
        The previous reading goes with it. Leaving it up would park a finished
        document from the last passage over the new passage's text. */
     setPendingPassage({ text, reference })
-    setPlainDoc(null); setPlainError(null)
+    /* The last reading goes with it — the finished one AND anything the last
+       run had streamed in. Either one left up would park the previous passage's
+       document over this passage's text. */
+    setPlainDoc(null); setPlainPartial(null); setPlainError(null)
 
     /* The token the progress messages come back stamped with, so a message
        from a run the reader abandoned cannot drive this run's status line. */
@@ -836,6 +1025,9 @@ export default function App() {
                 <Suspense fallback={null}>
                   <PlainRead
                     doc={plainDoc}
+                    /* The blocks that have landed so far. The view renders
+                       these until `doc` exists, then `doc` wins wholesale. */
+                    partial={plainPartial}
                     loading={plainLoading}
                     error={plainError}
                     passageText={readerPassage?.text}

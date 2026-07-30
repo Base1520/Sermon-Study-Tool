@@ -244,7 +244,7 @@ async function main() {
     assert.match(sys, /Roman colony populated with retired soldiers/, 'vault notes are in the prompt')
     assert.match(sys, /MUST BE ABLE TO SAY THE READER IS WRONG/, 'the correction mandate is stated in those words')
     assert.strictEqual(calls[0].model, 'claude-opus-4-8')
-    assert.ok(calls[0].max_tokens <= 900, 'output is capped')
+    assert.ok(calls[0].max_tokens <= 1600, 'output is capped')
   })
 
   /* ---------------- 2. off-text is redirected ----------------------- */

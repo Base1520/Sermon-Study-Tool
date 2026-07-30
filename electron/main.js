@@ -11,14 +11,27 @@ const {
 } = require('./commentary-contract')
 const isDev = process.env.NODE_ENV === 'development'
 
-// Manual beta builds do not have a trusted update channel yet. Updates stay
-// off unless a future signed release explicitly enables them at launch.
+// Updates are ON for packaged builds. Both Mac targets are signed and notarized
+// under Developer ID Base 1520 LLC, so the trusted channel the old comment was
+// waiting on now exists. The feed is the GitHub release declared in
+// package.json's build.publish block.
+//
+// Set BASE1520_DISABLE_AUTO_UPDATE=true to suppress it for a launch — the escape
+// hatch if a bad release ever has to be worked around from the field.
+//
+// Everything here fails quiet. A reader mid-passage must never be interrupted,
+// blocked, or slowed by an update check, so errors log and nothing else.
 let autoUpdater
-if (!isDev && process.env.BASE1520_ENABLE_AUTO_UPDATE === 'true') {
+if (!isDev && process.env.BASE1520_DISABLE_AUTO_UPDATE !== 'true') {
   try {
     autoUpdater = require('electron-updater').autoUpdater
     autoUpdater.autoDownload = true
     autoUpdater.autoInstallOnAppQuit = true
+    // Without an error handler electron-updater surfaces failures as unhandled
+    // rejections. An unreachable GitHub must be a log line, not a dialog.
+    autoUpdater.on('error', (e) => console.log('[updater] error:', e?.message || e))
+    autoUpdater.on('update-available', (i) => console.log('[updater] available:', i?.version))
+    autoUpdater.on('update-not-available', () => console.log('[updater] up to date'))
     autoUpdater.on('update-downloaded', () => {
       dialog.showMessageBox({
         type: 'info',
@@ -29,10 +42,26 @@ if (!isDev && process.env.BASE1520_ENABLE_AUTO_UPDATE === 'true') {
         if (response === 0) autoUpdater.quitAndInstall()
       })
     })
-    autoUpdater.checkForUpdatesAndNotify()
   } catch (e) {
     console.log('[updater] skipped:', e.message)
+    autoUpdater = undefined
   }
+}
+
+// Deferred so a slow or dead network never delays the window. Re-checks every
+// four hours because the app stays open across a study day.
+const UPDATE_RECHECK_MS = 4 * 60 * 60 * 1000
+function startUpdateChecks() {
+  if (!autoUpdater) return
+  const check = () => {
+    try {
+      autoUpdater.checkForUpdatesAndNotify()
+    } catch (e) {
+      console.log('[updater] check failed:', e?.message || e)
+    }
+  }
+  setTimeout(check, 8000)
+  setInterval(check, UPDATE_RECHECK_MS)
 }
 
 // electron-store loaded after app path is set
@@ -51,6 +80,17 @@ function readSecret(name) {
   try {
     return safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
   } catch {
+    // The ciphertext can no longer be decrypted. safeStorage ties its key to the
+    // app's identity, so the rename to com.base1520.theoperator orphaned every
+    // secret stored under the old bundle id. Drop the dead entry rather than
+    // leaving it to fail silently forever, and say so in the log — otherwise a
+    // tester reporting "I entered my key and it forgot it" has no diagnosis.
+    console.log(`[secrets] ${name}: stored value could not be decrypted, clearing it`)
+    try {
+      const all = { ...(store?.get(SECRET_STORE_KEY, {}) ?? {}) }
+      delete all[name]
+      store?.set(SECRET_STORE_KEY, all)
+    } catch { /* store unavailable; the read still correctly reports "not set" */ }
     return ''
   }
 }
@@ -138,6 +178,7 @@ app.whenReady().then(async () => {
   store = new Store()
   buildMenu()
   createWindow()
+  startUpdateChecks()
 })
 
 app.on('window-all-closed', () => {

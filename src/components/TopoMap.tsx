@@ -145,6 +145,8 @@ type TileKey = keyof typeof TILE_LAYERS
 const KHAKI = '#c9b97a'
 const GOLD  = '#F5E060'
 const OLIVE = '#2c3820'
+/** Steel Gray from the brand palette — water reads cool against khaki land. */
+const STEEL = '#8b9384'
 
 function makeIcon(fill: string, pulse: boolean, selected: boolean): L.DivIcon {
   const r    = selected ? 6 : 4.5
@@ -198,6 +200,426 @@ function makeIcon(fill: string, pulse: boolean, selected: boolean): L.DivIcon {
   })
 }
 
+/**
+ * Mountains are not cities and must not wear the city marker. A peak reads as a
+ * peak: an open chevron sitting on a ground line, no crosshair ring. Disputed
+ * peaks — and the location of Sinai genuinely is disputed — draw with a broken
+ * outline so the uncertainty is visible on the map itself rather than buried in
+ * a popup a reader may never open.
+ */
+function makePeakIcon(fill: string, important: boolean, disputed: boolean): L.DivIcon {
+  const sz = 26
+  const half = sz / 2
+  const dash = disputed ? ' stroke-dasharray="2.4,2.4"' : ''
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${sz}" height="${sz}"
+      viewBox="${-half} ${-half} ${sz} ${sz}">
+    <path d="M -7.5 5 L 0 -6.5 L 7.5 5 Z" fill="none" stroke="${fill}"
+      stroke-width="${important ? 1.5 : 1.05}" stroke-linejoin="round"
+      opacity="${important ? 0.95 : 0.6}"${dash}/>
+    <path d="M -2.7 -0.4 L 0 -3.6 L 2.7 -0.4" fill="none" stroke="${fill}"
+      stroke-width="0.9" opacity="${important ? 0.8 : 0.42}"/>
+    <line x1="-9.5" y1="5" x2="9.5" y2="5" stroke="${fill}"
+      stroke-width="0.8" opacity="${important ? 0.7 : 0.34}"/>
+  </svg>`
+
+  return L.divIcon({
+    html:       svg,
+    className:  '',
+    iconSize:   [sz, sz],
+    iconAnchor: [half, half],
+    popupAnchor:[0, -half],
+  })
+}
+
+// ── Regions, features and journeys ─────────────────────────────────────────────
+/**
+ * The map's whole geographic vocabulary used to be the 92 city points above, and
+ * that is why Exodus 2 opened the map and it did not move: the basket is on the
+ * NILE (a river) and Moses flees to MIDIAN (a region). Neither can be a point,
+ * so the matcher found nothing and the component returned in silence.
+ *
+ * Regions, water/terrain features and routes are authored in src/data and owned
+ * outside this file. They are pulled in through import.meta.glob rather than a
+ * static import on purpose: a static import of a file that has not landed yet
+ * fails both `tsc` and the build, whereas a glob that matches nothing yields an
+ * empty object. Missing data degrades the map back to cities; it never breaks it.
+ */
+export interface TopoRegion {
+  name: string
+  aliases?: string[]
+  /** SW, NE — in Leaflet's own [lat, lon] order. */
+  bounds: [[number, number], [number, number]]
+  tier?: 1 | 2 | 3
+  era?: 'ot' | 'nt' | 'both'
+  note?: string
+  disputed?: boolean
+}
+
+export interface TopoFeature {
+  name: string
+  aliases?: string[]
+  kind?: string
+  /** Tolerated spelling of `kind`, in case the data file names it `type`. */
+  type?: string
+  /** A river or coastline as an ordered line of [lat, lon] points. */
+  path?: Array<[number, number]>
+  points?: Array<[number, number]>
+  line?: Array<[number, number]>
+  /** A sea or an open area, SW then NE. */
+  bounds?: [[number, number], [number, number]]
+  lat?: number
+  lon?: number
+  tier?: 1 | 2 | 3
+  disputed?: boolean
+  note?: string
+}
+
+export interface TopoRouteLeg {
+  from: string
+  to: string
+  ref: string
+  note: string
+}
+
+export interface TopoRoute {
+  id: string
+  name: string
+  /** e.g. "Exodus 12 – Deuteronomy 34", or several ranges. */
+  scope: string | string[]
+  legs: TopoRouteLeg[]
+  confidence: 'located' | 'approximate' | 'disputed'
+  disputedNote?: string
+}
+
+type TopoDataModule = Record<string, unknown>
+
+const TOPO_DATA_MODULES: Record<string, TopoDataModule> = {
+  ...import.meta.glob<TopoDataModule>('../data/topoRegions.ts',  { eager: true }),
+  ...import.meta.glob<TopoDataModule>('../data/topoFeatures.ts', { eager: true }),
+  ...import.meta.glob<TopoDataModule>('../data/topoRoutes.ts',   { eager: true }),
+}
+
+/**
+ * Reads the first array exported under any of the given names. No default-export
+ * fallback on purpose — grabbing "whatever array is in there" would happily pull
+ * regions into the routes list and draw nonsense.
+ */
+function readDataArray<T>(names: string[]): T[] {
+  for (const mod of Object.values(TOPO_DATA_MODULES)) {
+    if (!mod) continue
+    for (const name of names) {
+      const value = mod[name]
+      if (Array.isArray(value)) return value as T[]
+    }
+  }
+  return []
+}
+
+export const TOPO_REGIONS: TopoRegion[] =
+  readDataArray<TopoRegion>(['TOPO_REGIONS', 'REGIONS', 'topoRegions'])
+    .filter(r => r && typeof r.name === 'string' && Array.isArray(r.bounds))
+
+export const TOPO_FEATURES: TopoFeature[] =
+  readDataArray<TopoFeature>(['TOPO_FEATURES', 'FEATURES', 'topoFeatures'])
+    .filter(f => f && typeof f.name === 'string')
+
+export const TOPO_ROUTES: TopoRoute[] =
+  readDataArray<TopoRoute>(['TOPO_ROUTES', 'ROUTES', 'topoRoutes'])
+    .filter(r => r && typeof r.id === 'string' && Array.isArray(r.legs) && r.legs.length > 0)
+
+// ── Geometry helpers ───────────────────────────────────────────────────────────
+type LatLonPair = [number, number]
+
+function isPair(v: unknown): v is LatLonPair {
+  return Array.isArray(v) && v.length >= 2 &&
+    typeof v[0] === 'number' && typeof v[1] === 'number' &&
+    Number.isFinite(v[0]) && Number.isFinite(v[1])
+}
+
+/**
+ * Bounds arrive as [[latS, lonW], [latN, lonE]]. The only correction made here is
+ * for a pair whose first number cannot be a latitude at all — that is a straight
+ * [lon, lat] transposition, and drawing it would put Midian in the ocean.
+ */
+function normalizeBounds(raw: unknown): L.LatLngBounds | null {
+  if (!Array.isArray(raw) || raw.length < 2) return null
+  const [a, b] = raw
+  if (!isPair(a) || !isPair(b)) return null
+
+  let [s, w] = a
+  let [n, e] = b
+  const canBeLat = (x: number, y: number) => Math.abs(x) <= 90 && Math.abs(y) <= 90
+  if (!canBeLat(s, n) && canBeLat(w, e)) {
+    ;[s, w] = [w, s]
+    ;[n, e] = [e, n]
+  }
+  if (!canBeLat(s, n)) return null
+
+  return L.latLngBounds(
+    [Math.min(s, n), Math.min(w, e)],
+    [Math.max(s, n), Math.max(w, e)],
+  )
+}
+
+/**
+ * A region drawn as a rectangle is a claim the sources do not support. Ancient
+ * regional boundaries were not lines on a map, so the corners are cut back into
+ * a soft octagon: the shape reads as an area of terrain rather than a surveyed
+ * border, which is the honest picture.
+ */
+function softZone(b: L.LatLngBounds): L.LatLngTuple[] {
+  const s = b.getSouth(), n = b.getNorth(), w = b.getWest(), e = b.getEast()
+  const dy = (n - s) * 0.26
+  const dx = (e - w) * 0.26
+  return [
+    [s + dy, w], [n - dy, w], [n, w + dx], [n, e - dx],
+    [n - dy, e], [s + dy, e], [s, e - dx], [s, w + dx],
+  ]
+}
+
+function featurePath(f: TopoFeature): L.LatLngTuple[] | null {
+  const raw = f.path ?? f.points ?? f.line
+  if (!Array.isArray(raw)) return null
+  const pts = raw.filter(isPair).map(p => [p[0], p[1]] as L.LatLngTuple)
+  return pts.length >= 2 ? pts : null
+}
+
+function featureKind(f: TopoFeature): string {
+  return String(f.kind ?? f.type ?? '').toLowerCase()
+}
+
+const WATER_KINDS = ['river', 'sea', 'lake', 'brook', 'wadi', 'gulf', 'spring', 'coast', 'water']
+const PEAK_KINDS  = ['mountain', 'mount', 'peak', 'hill', 'range']
+
+const isWater = (f: TopoFeature) => WATER_KINDS.some(k => featureKind(f).includes(k))
+const isPeak  = (f: TopoFeature) => PEAK_KINDS.some(k => featureKind(f).includes(k))
+
+// ── Place resolution ───────────────────────────────────────────────────────────
+export interface LocatedPlace {
+  kind: 'city' | 'region' | 'feature'
+  name: string
+  lat: number
+  lon: number
+  bounds?: L.LatLngBounds
+}
+
+const normPlace = (s: string) =>
+  s.toLowerCase().replace(/^the\s+/, '').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()
+
+function locateRegion(r: TopoRegion): LocatedPlace | null {
+  const b = normalizeBounds(r.bounds)
+  if (!b) return null
+  const c = b.getCenter()
+  return { kind: 'region', name: r.name, lat: c.lat, lon: c.lng, bounds: b }
+}
+
+function locateFeature(f: TopoFeature): LocatedPlace | null {
+  const path = featurePath(f)
+  if (path) {
+    const b = L.latLngBounds(path)
+    const mid = path[Math.floor(path.length / 2)]
+    return { kind: 'feature', name: f.name, lat: mid[0], lon: mid[1], bounds: b }
+  }
+  const b = normalizeBounds(f.bounds)
+  if (b) {
+    const c = b.getCenter()
+    return { kind: 'feature', name: f.name, lat: c.lat, lon: c.lng, bounds: b }
+  }
+  if (typeof f.lat === 'number' && typeof f.lon === 'number') {
+    return { kind: 'feature', name: f.name, lat: f.lat, lon: f.lon }
+  }
+  return null
+}
+
+/**
+ * One index over all three datasets. Cities are registered first and never
+ * overwritten, so the existing behaviour for every passage that already worked
+ * is untouched — Samaria stays the city it has always been here even if a
+ * Samaria region also exists.
+ */
+const PLACE_INDEX: Map<string, LocatedPlace> = (() => {
+  const index = new Map<string, LocatedPlace>()
+  const put = (key: string, place: LocatedPlace) => {
+    const k = normPlace(key)
+    if (k && !index.has(k)) index.set(k, place)
+  }
+
+  for (const c of TOPO_CITIES) {
+    const place: LocatedPlace = { kind: 'city', name: c.name, lat: c.lat, lon: c.lon }
+    put(c.name, place)
+    for (const a of c.aliases ?? []) put(a, place)
+  }
+  for (const r of TOPO_REGIONS) {
+    const place = locateRegion(r)
+    if (!place) continue
+    put(r.name, place)
+    for (const a of r.aliases ?? []) put(a, place)
+  }
+  for (const f of TOPO_FEATURES) {
+    const place = locateFeature(f)
+    if (!place) continue
+    put(f.name, place)
+    for (const a of f.aliases ?? []) put(a, place)
+  }
+  return index
+})()
+
+function resolvePlace(name: string): LocatedPlace | undefined {
+  if (!name) return undefined
+  return PLACE_INDEX.get(normPlace(name))
+}
+
+// ── Passage / scope matching ───────────────────────────────────────────────────
+const BOOK_NAMES = [
+  'Genesis','Exodus','Leviticus','Numbers','Deuteronomy','Joshua','Judges','Ruth',
+  '1 Samuel','2 Samuel','1 Kings','2 Kings','1 Chronicles','2 Chronicles','Ezra',
+  'Nehemiah','Esther','Job','Psalms','Proverbs','Ecclesiastes','Song of Solomon',
+  'Isaiah','Jeremiah','Lamentations','Ezekiel','Daniel','Hosea','Joel','Amos',
+  'Obadiah','Jonah','Micah','Nahum','Habakkuk','Zephaniah','Haggai','Zechariah',
+  'Malachi','Matthew','Mark','Luke','John','Acts','Romans','1 Corinthians',
+  '2 Corinthians','Galatians','Ephesians','Philippians','Colossians',
+  '1 Thessalonians','2 Thessalonians','1 Timothy','2 Timothy','Titus','Philemon',
+  'Hebrews','James','1 Peter','2 Peter','1 John','2 John','3 John','Jude','Revelation',
+]
+
+const BOOK_KEYS = BOOK_NAMES.map(b => b.toLowerCase())
+
+function normBook(raw: string): string {
+  let s = raw.toLowerCase().replace(/\./g, ' ').replace(/\s+/g, ' ').trim()
+  s = s.replace(/^(first|1st|i)\s+/, '1 ')
+       .replace(/^(second|2nd|ii)\s+/, '2 ')
+       .replace(/^(third|3rd|iii)\s+/, '3 ')
+  if (s === 'song of songs' || s === 'canticles' || s === 'song') s = 'song of solomon'
+  if (s === 'psalm') s = 'psalms'
+  if (s === 'revelations' || s === 'apocalypse') s = 'revelation'
+  return s
+}
+
+/** Index in canon order, or -1 when the name is unknown or ambiguous ("Phil"). */
+function bookIndex(raw: string): number {
+  const q = normBook(raw)
+  if (!q) return -1
+  const exact = BOOK_KEYS.indexOf(q)
+  if (exact >= 0) return exact
+  let hit = -1
+  for (let i = 0; i < BOOK_KEYS.length; i += 1) {
+    if (!BOOK_KEYS[i].startsWith(q)) continue
+    if (hit >= 0) return -1
+    hit = i
+  }
+  return hit
+}
+
+interface PassagePoint { book: number; chapter: number }
+
+/** "Exodus 2:3" · "1 Samuel 17" · "Acts 13:1-3" → { book, chapter }. */
+function parseRef(raw: string): PassagePoint | null {
+  if (!raw) return null
+  const head = String(raw).split(/[–—]|(?<=\d)\s*-\s*(?=\d)/)[0].trim()
+  const m = head.match(/^(.*?)(\d+)(?::\s*\d+)?\s*$/)
+  if (m) {
+    const book = bookIndex(m[1])
+    if (book >= 0) return { book, chapter: Number(m[2]) }
+  }
+  const bookOnly = bookIndex(head)
+  return bookOnly >= 0 ? { book: bookOnly, chapter: 1 } : null
+}
+
+const CHAPTER_CEILING = 999
+const passageKey = (p: PassagePoint) => p.book * 1000 + Math.min(Math.max(p.chapter, 0), CHAPTER_CEILING)
+
+/**
+ * "Exodus 12 – Deuteronomy 34" · "Joshua 6–12" · "Acts 13:1 – 14:28".
+ * A bare number on the right-hand side means a chapter in the same book.
+ */
+function scopeContains(scope: string, passage: PassagePoint): boolean {
+  if (!scope) return false
+  const parts = String(scope).split(/\s*[–—]\s*|\s+-\s+|(?<=\d)\s*-\s*(?=\d)/).map(s => s.trim()).filter(Boolean)
+  if (parts.length === 0) return false
+
+  const start = parseRef(parts[0])
+  if (!start) return false
+  const startsWholeBook = !/\d/.test(parts[0])
+
+  let end: PassagePoint
+  if (parts.length === 1) {
+    end = startsWholeBook
+      ? { book: start.book, chapter: CHAPTER_CEILING }
+      : { book: start.book, chapter: start.chapter }
+  } else {
+    const tail = parts[parts.length - 1]
+    const bare = tail.match(/^(\d+)(?::\s*\d+)?$/)
+    end = bare
+      ? { book: start.book, chapter: Number(bare[1]) }
+      : parseRef(tail) ?? { book: start.book, chapter: CHAPTER_CEILING }
+    if (!/\d/.test(tail)) end = { book: end.book, chapter: CHAPTER_CEILING }
+  }
+
+  const key = passageKey(passage)
+  return key >= passageKey(start) && key <= passageKey(end)
+}
+
+const routeScopes = (r: TopoRoute): string[] =>
+  Array.isArray(r.scope) ? r.scope : [r.scope].filter(Boolean) as string[]
+
+/**
+ * Which passage is open. The component is only handed geo-references, so the
+ * passage is read back out of the verses attached to them: the book named most
+ * often, at the earliest chapter cited in it.
+ */
+function derivePassage(refs: GeoRef[], explicit?: string): PassagePoint | null {
+  if (explicit) {
+    const direct = parseRef(explicit)
+    if (direct) return direct
+  }
+  const seen = new Map<number, { count: number; chapter: number }>()
+  for (const ref of refs) {
+    const verses = Array.isArray(ref.verses) ? ref.verses : [ref.verses as unknown as string]
+    for (const v of verses) {
+      const p = parseRef(String(v ?? ''))
+      if (!p) continue
+      const prev = seen.get(p.book)
+      if (!prev) seen.set(p.book, { count: 1, chapter: p.chapter })
+      else seen.set(p.book, { count: prev.count + 1, chapter: Math.min(prev.chapter, p.chapter) })
+    }
+  }
+  let best: PassagePoint | null = null
+  let bestCount = 0
+  for (const [book, { count, chapter }] of seen) {
+    if (count > bestCount) { bestCount = count; best = { book, chapter } }
+  }
+  return best
+}
+
+// ── Region / feature label styling ─────────────────────────────────────────────
+interface ZoneLabel {
+  el: HTMLElement
+  tier: number
+  important: boolean
+}
+
+/**
+ * Zone names behave the opposite way round to city names. A region is a wide
+ * thing: its name belongs on a wide view and becomes noise once you are down
+ * among the streets of Jerusalem, so it fades in early and back out when the
+ * view no longer contains enough of the region to mean anything. A region the
+ * passage actually names never fades out — that is the whole reason it is lit.
+ */
+const ZONE_REVEAL_ZOOM: Record<number, number> = { 1: 4.4, 2: 5.4, 3: 6.4 }
+const ZONE_HIDE_ZOOM = 11
+
+function styleZoneLabels(labels: ZoneLabel[], zoom: number): void {
+  for (const { el, tier, important } of labels) {
+    const reveal = ZONE_REVEAL_ZOOM[tier] ?? 6.4
+    const fadeIn  = important ? 1 : Math.max(0, Math.min(1, (zoom - (reveal - 1.2)) / 1.2))
+    const fadeOut = important ? 1 : Math.max(0, Math.min(1, 1 - (zoom - ZONE_HIDE_ZOOM) / 1.5))
+    const op = fadeIn * fadeOut * (important ? 0.92 : 0.55)
+
+    el.style.opacity = op.toFixed(3)
+    el.style.fontSize = `${Math.min(9.5 + Math.max(0, zoom - 6) * 0.55, 15).toFixed(2)}px`
+  }
+}
+
 // ── Props ──────────────────────────────────────────────────────────────────────
 export interface GeoRef {
   place: string
@@ -209,6 +631,17 @@ interface TopoMapProps {
   geoReferences: GeoRef[]
   width: number
   height: number
+  /**
+   * Optional. When a caller knows the open passage it can say so directly;
+   * otherwise it is read back out of the geo-references' own verses.
+   */
+  passageRef?: string
+}
+
+function escapeHtml(s: string): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
 // ── Component ──────────────────────────────────────────────────────────────────
@@ -347,30 +780,76 @@ function declutterLabels(labels: CityLabel[]): void {
   }
 }
 
-export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
+export function TopoMap({ geoReferences, width, height, passageRef }: TopoMapProps) {
   const divRef      = useRef<HTMLDivElement>(null)
   const mapRef      = useRef<L.Map | null>(null)
   const tileRef     = useRef<L.TileLayer | null>(null)
   const markersRef  = useRef<L.Marker[]>([])
   const labelsRef   = useRef<CityLabel[]>([])
+  const zoneLabelsRef = useRef<ZoneLabel[]>([])
+  const regionLayersRef  = useRef<L.Layer[]>([])
+  const featureLayersRef = useRef<L.Layer[]>([])
+  const routeLayersRef   = useRef<L.Layer[]>([])
+  const legLayersRef     = useRef<L.Polyline[]>([])
+  const routeTimersRef   = useRef<number[]>([])
   const activeKey   = useRef<TileKey>('terrain')
   const styleElRef  = useRef<HTMLStyleElement | null>(null)
   const btnGroupRef = useRef<HTMLDivElement>(null)
   const [tileFilter, setTileFilter] = useState<string>(TILE_LAYERS.terrain.filter)
+  const [activeRouteId, setActiveRouteId] = useState<string | null>(null)
   const assetImages = useAssetImages()
 
-  // Derive referenced cities
-  const refMap = useMemo(() => {
-    const m = new Map<string, GeoRef>()
-    for (const r of geoReferences) {
-      const city = TOPO_CITIES.find(c =>
-        c.name.toLowerCase() === r.place.toLowerCase() ||
-        (c.aliases ?? []).some(a => a === r.place.toLowerCase())
-      )
-      if (city) m.set(city.name, r)
+  /**
+   * Resolve every place the passage names against ALL THREE datasets, not just
+   * cities. This is the fix for the Exodus 2 report: "Nile" and "Midian" are a
+   * river and a region, so the old city-only lookup produced an empty match and
+   * the map sat still with nothing to say for itself.
+   *
+   * `unmatched` is kept deliberately — a place the app could not find is worth
+   * naming out loud rather than quietly dropping.
+   */
+  const resolved = useMemo(() => {
+    const cityRefs    = new Map<string, GeoRef>()
+    const regionRefs  = new Map<string, GeoRef>()
+    const featureRefs = new Map<string, GeoRef>()
+    const targets: LocatedPlace[] = []
+    const unmatched: string[] = []
+
+    for (const r of geoReferences ?? []) {
+      const place = resolvePlace(r.place)
+      if (!place) {
+        if (r.place) unmatched.push(r.place)
+        continue
+      }
+      const bucket = place.kind === 'city' ? cityRefs : place.kind === 'region' ? regionRefs : featureRefs
+      if (!bucket.has(place.name)) {
+        bucket.set(place.name, r)
+        targets.push(place)
+      }
     }
-    return m
+    return { cityRefs, regionRefs, featureRefs, targets, unmatched }
   }, [geoReferences])
+
+  const refMap = resolved.cityRefs
+  const matchedCount = resolved.targets.length
+
+  const passage = useMemo(
+    () => derivePassage(geoReferences ?? [], passageRef),
+    [geoReferences, passageRef],
+  )
+
+  /**
+   * A route never draws on its own. All this does is decide whether the offer is
+   * even on the table — the reader has to ask for it.
+   */
+  const availableRoute = useMemo(() => {
+    if (!passage) return null
+    return TOPO_ROUTES.find(r => routeScopes(r).some(s => scopeContains(s, passage))) ?? null
+  }, [passage])
+
+  const activeRoute = activeRouteId
+    ? TOPO_ROUTES.find(r => r.id === activeRouteId) ?? null
+    : null
 
   // Switch tile layer
   function switchTiles(key: TileKey) {
@@ -507,6 +986,374 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
     styleCityLabels(labelsRef.current, map.getZoom())
   }
 
+  // ── Zone label helper ───────────────────────────────────────────────────────
+  function addZoneLabel(
+    map: L.Map, at: L.LatLngExpression, text: string, tier: number,
+    important: boolean, color: string,
+  ) {
+    const marker = L.marker(at, {
+      pane:        'topoZoneLabels',
+      interactive: false,
+      keyboard:    false,
+      icon: L.divIcon({
+        className: '',
+        html: `<span class="topo-zone-name" style="color:${color}">${escapeHtml(text.toUpperCase())}</span>`,
+        iconSize: [0, 0],
+      }),
+    })
+    marker.addTo(map)
+    const el = marker.getElement()
+    if (el) zoneLabelsRef.current.push({ el, tier, important })
+    return marker
+  }
+
+  function popupShell(accent: string, inner: string): string {
+    return `
+      <div style="
+        font-family:'JetBrains Mono',monospace;
+        background:rgba(16,18,15,0.98);
+        border:1px solid ${accent};
+        border-radius:10px;
+        padding:13px 16px;
+        min-width:230px;
+        max-width:330px;
+      ">${inner}</div>`
+  }
+
+  // ── Regions — soft zones, never hard borders ────────────────────────────────
+  function buildRegions(map: L.Map, refs: Map<string, GeoRef>) {
+    regionLayersRef.current.forEach(l => l.remove())
+    regionLayersRef.current = []
+
+    for (const region of TOPO_REGIONS) {
+      const bounds = normalizeBounds(region.bounds)
+      if (!bounds) continue
+      const ref   = refs.get(region.name)
+      const isHL  = !!ref
+      const tier  = region.tier ?? 2
+      const color = isHL ? GOLD : KHAKI
+
+      const zone = L.polygon(softZone(bounds), {
+        pane:        'topoRegions',
+        color,
+        weight:      isHL ? 1.1 : 0.7,
+        opacity:     isHL ? 0.5 : 0.22,
+        // Dashed even when it is not disputed. The edge of a region is a fade,
+        // not a fence, and a solid outline would say otherwise.
+        dashArray:   region.disputed ? '3,7' : '2,6',
+        fillColor:   color,
+        fillOpacity: isHL ? 0.1 : 0.045,
+        interactive: isHL,
+      })
+      zone.addTo(map)
+      regionLayersRef.current.push(zone)
+
+      if (isHL && ref) {
+        zone.bindPopup(popupShell(`${GOLD}70`, `
+          <div style="font-family:'Crimson Pro',serif;font-size:16px;color:${GOLD};font-weight:600;margin-bottom:2px">
+            ${escapeHtml(region.name)}
+          </div>
+          <div style="font-size:7px;color:${KHAKI};opacity:0.5;margin-bottom:8px;letter-spacing:0.12em">
+            REGION${region.era ? ' · ' + region.era.toUpperCase() : ''} · EXTENT IS APPROXIMATE
+          </div>
+          <div style="font-size:7.5px;color:${KHAKI};letter-spacing:0.08em;margin-bottom:5px;opacity:0.85">
+            ${escapeHtml(Array.isArray(ref.verses) ? ref.verses.join(' · ') : String(ref.verses))}
+          </div>
+          <div style="font-family:'Crimson Pro',serif;font-size:12px;color:${KHAKI};line-height:1.58;opacity:0.92">
+            ${escapeHtml(ref.significance)}
+          </div>
+          ${region.note ? `<div style="font-family:'Crimson Pro',serif;font-size:11px;color:${KHAKI};opacity:0.7;line-height:1.55;margin-top:8px;border-left:2px solid ${GOLD}30;padding-left:8px">${escapeHtml(region.note)}</div>` : ''}
+        `), { className: 'topo-popup', maxWidth: 340, closeButton: false })
+      }
+
+      regionLayersRef.current.push(
+        addZoneLabel(map, bounds.getCenter(), region.name, tier, isHL, color),
+      )
+    }
+  }
+
+  // ── Features — rivers, seas, peaks ──────────────────────────────────────────
+  function buildFeatures(map: L.Map, refs: Map<string, GeoRef>) {
+    featureLayersRef.current.forEach(l => l.remove())
+    featureLayersRef.current = []
+
+    for (const feature of TOPO_FEATURES) {
+      const ref   = refs.get(feature.name)
+      const isHL  = !!ref
+      const tier  = feature.tier ?? 2
+      const water = isWater(feature)
+      const color = isHL ? GOLD : water ? STEEL : KHAKI
+      // Uncertainty is drawn, not footnoted.
+      const dash  = feature.disputed ? '4,5' : undefined
+
+      const attachPopup = (layer: L.Layer) => {
+        if (!isHL || !ref) return
+        layer.bindPopup(popupShell(`${GOLD}70`, `
+          <div style="font-family:'Crimson Pro',serif;font-size:16px;color:${GOLD};font-weight:600;margin-bottom:2px">
+            ${escapeHtml(feature.name)}
+          </div>
+          <div style="font-size:7px;color:${KHAKI};opacity:0.5;margin-bottom:8px;letter-spacing:0.12em">
+            ${escapeHtml((featureKind(feature) || 'FEATURE').toUpperCase())}${feature.disputed ? ' · LOCATION DISPUTED' : ''}
+          </div>
+          <div style="font-size:7.5px;color:${KHAKI};letter-spacing:0.08em;margin-bottom:5px;opacity:0.85">
+            ${escapeHtml(Array.isArray(ref.verses) ? ref.verses.join(' · ') : String(ref.verses))}
+          </div>
+          <div style="font-family:'Crimson Pro',serif;font-size:12px;color:${KHAKI};line-height:1.58;opacity:0.92">
+            ${escapeHtml(ref.significance)}
+          </div>
+          ${feature.note ? `<div style="font-family:'Crimson Pro',serif;font-size:11px;color:${KHAKI};opacity:0.7;line-height:1.55;margin-top:8px;border-left:2px solid ${GOLD}30;padding-left:8px">${escapeHtml(feature.note)}</div>` : ''}
+        `), { className: 'topo-popup', maxWidth: 340, closeButton: false })
+      }
+
+      const path = featurePath(feature)
+      if (path) {
+        const line = L.polyline(path, {
+          pane:        'topoFeatures',
+          color,
+          weight:      isHL ? 2.6 : 1.8,
+          opacity:     isHL ? 0.9 : 0.55,
+          dashArray:   dash,
+          interactive: isHL,
+        })
+        line.addTo(map)
+        attachPopup(line)
+        featureLayersRef.current.push(line)
+        featureLayersRef.current.push(
+          addZoneLabel(map, path[Math.floor(path.length / 2)], feature.name, tier, isHL, color),
+        )
+        continue
+      }
+
+      const bounds = normalizeBounds(feature.bounds)
+      if (bounds) {
+        const zone = L.polygon(softZone(bounds), {
+          pane:        'topoFeatures',
+          color,
+          weight:      isHL ? 1.1 : 0.7,
+          opacity:     isHL ? 0.5 : 0.25,
+          dashArray:   dash ?? '2,6',
+          fillColor:   color,
+          fillOpacity: isHL ? 0.12 : 0.06,
+          interactive: isHL,
+        })
+        zone.addTo(map)
+        attachPopup(zone)
+        featureLayersRef.current.push(zone)
+        featureLayersRef.current.push(
+          addZoneLabel(map, bounds.getCenter(), feature.name, tier, isHL, color),
+        )
+        continue
+      }
+
+      if (typeof feature.lat === 'number' && typeof feature.lon === 'number') {
+        const at: L.LatLngTuple = [feature.lat, feature.lon]
+        const marker = L.marker(at, {
+          icon: isPeak(feature)
+            ? makePeakIcon(color, isHL, !!feature.disputed)
+            : makeIcon(isHL ? GOLD : `${KHAKI}60`, false, false),
+        })
+        marker.addTo(map)
+        attachPopup(marker)
+        marker.bindTooltip(
+          `<span class="topo-city-name">${escapeHtml(feature.name.toUpperCase())}</span>`,
+          {
+            permanent: true,
+            direction: feature.lon < 35 ? 'left' : 'right',
+            offset:    feature.lon < 35 ? [-13, 0] : [13, 0],
+            className: 'topo-tt',
+            opacity:   1,
+          },
+        )
+        const tipEl = marker.getTooltip()?.getElement() as HTMLElement | undefined
+        if (tipEl) {
+          tipEl.style.color = color
+          // Peaks share the city label machinery on purpose — same scale, same
+          // collision problem, so they belong in the same declutter pass.
+          labelsRef.current.push({ el: tipEl, tier, important: isHL })
+        }
+        featureLayersRef.current.push(marker)
+      }
+    }
+
+    styleCityLabels(labelsRef.current, map.getZoom())
+  }
+
+  // ── Routes ──────────────────────────────────────────────────────────────────
+  function clearRouteLayers() {
+    routeTimersRef.current.forEach(t => window.clearTimeout(t))
+    routeTimersRef.current = []
+    routeLayersRef.current.forEach(l => l.remove())
+    routeLayersRef.current = []
+    legLayersRef.current = []
+  }
+
+  function legPopup(route: TopoRoute, leg: TopoRouteLeg, index: number): string {
+    return popupShell(`${GOLD}70`, `
+      <div style="font-size:7px;color:${KHAKI};opacity:0.5;letter-spacing:0.12em;margin-bottom:4px">
+        LEG ${index + 1} OF ${route.legs.length} · ${escapeHtml(route.name.toUpperCase())}
+      </div>
+      <div style="font-family:'Crimson Pro',serif;font-size:15px;color:${GOLD};font-weight:600;margin-bottom:3px">
+        ${escapeHtml(leg.from)} → ${escapeHtml(leg.to)}
+      </div>
+      <div style="font-size:7.5px;color:${KHAKI};letter-spacing:0.08em;margin-bottom:6px;opacity:0.85">
+        ${escapeHtml(leg.ref)}
+      </div>
+      <div style="font-family:'Crimson Pro',serif;font-size:12px;color:${KHAKI};line-height:1.58;opacity:0.92">
+        ${escapeHtml(leg.note)}
+      </div>
+      ${route.confidence === 'disputed' && route.disputedNote
+        ? `<div style="font-family:'Crimson Pro',serif;font-size:10.5px;color:${KHAKI};opacity:0.68;line-height:1.5;margin-top:9px;border-left:2px solid ${GOLD}35;padding-left:8px">${escapeHtml(route.disputedNote)}</div>`
+        : ''}
+    `)
+  }
+
+  /**
+   * Draws the legs in order. The stagger exists so the movement can be read as a
+   * sequence — it is NOT a moving dot chasing the line, which would turn a study
+   * tool into a documentary.
+   *
+   * Confidence is in the stroke: a located route is solid, an approximate one is
+   * finely broken, and a disputed one is openly dashed with its dispute stated in
+   * the panel. Drawing a confident line through contested ground would be the
+   * cartographic version of asserting a disputed date.
+   */
+  function drawRoute(map: L.Map, route: TopoRoute) {
+    clearRouteLayers()
+
+    const dashArray = route.confidence === 'disputed'
+      ? '6,7'
+      : route.confidence === 'approximate' ? '2,5' : undefined
+
+    const drawn: L.LatLngTuple[] = []
+
+    route.legs.forEach((leg, i) => {
+      const from = resolvePlace(leg.from)
+      const to   = resolvePlace(leg.to)
+      if (!from || !to) return
+
+      const a: L.LatLngTuple = [from.lat, from.lon]
+      const b: L.LatLngTuple = [to.lat, to.lon]
+      drawn.push(a, b)
+
+      const line = L.polyline([a, b], {
+        pane:      'topoRoutes',
+        color:     GOLD,
+        weight:    2.2,
+        opacity:   0,
+        dashArray,
+        lineCap:   'round',
+      })
+      line.addTo(map)
+      line.bindPopup(legPopup(route, leg, i), {
+        className: 'topo-popup', maxWidth: 340, closeButton: false,
+      })
+      routeLayersRef.current.push(line)
+      legLayersRef.current.push(line)
+
+      for (const point of [a, b]) {
+        const dot = L.circleMarker(point, {
+          pane:        'topoRoutes',
+          radius:      3,
+          color:       GOLD,
+          weight:      1,
+          opacity:     0,
+          fillColor:   GOLD,
+          fillOpacity: 0,
+          interactive: false,
+        })
+        dot.addTo(map)
+        routeLayersRef.current.push(dot)
+        const dotTimer = window.setTimeout(
+          () => dot.setStyle({ opacity: 0.75, fillOpacity: 0.8 }), i * 200)
+        routeTimersRef.current.push(dotTimer)
+      }
+
+      const timer = window.setTimeout(() => line.setStyle({ opacity: 0.88 }), i * 200)
+      routeTimersRef.current.push(timer)
+    })
+
+    // The reader must never lose where he is inside the larger movement, so the
+    // passage's own place keeps a ring of its own for as long as the route is up.
+    for (const target of resolved.targets) {
+      const halo = L.circleMarker([target.lat, target.lon], {
+        pane:        'topoRoutes',
+        radius:      13,
+        color:       GOLD,
+        weight:      1.3,
+        opacity:     0.85,
+        dashArray:   '2,4',
+        fill:        false,
+        interactive: false,
+      })
+      halo.addTo(map)
+      routeLayersRef.current.push(halo)
+    }
+
+    if (drawn.length > 0) {
+      map.flyToBounds(L.latLngBounds(drawn), {
+        padding:       [70, 70],
+        maxZoom:       9,
+        duration:      1.6,
+        easeLinearity: 0.22,
+      })
+    }
+  }
+
+  function openLeg(index: number) {
+    const map = mapRef.current
+    const line = legLayersRef.current[index]
+    if (!map || !line) return
+    line.setStyle({ opacity: 1, weight: 3 })
+    line.openPopup(line.getBounds().getCenter())
+  }
+
+  // ── Fly to whatever this passage actually names ─────────────────────────────
+  function flyToPassage() {
+    const map = mapRef.current
+    if (!map) return
+    const targets = resolved.targets
+    if (targets.length === 0) return
+
+    if (targets.length === 1) {
+      const only = targets[0]
+      // A region or a river is an area — flying to a point at zoom 12 would put
+      // the reader inside it with no way to see its shape.
+      if (only.bounds) {
+        map.flyToBounds(only.bounds, {
+          padding: [60, 60], maxZoom: 10, duration: 1.8, easeLinearity: 0.22,
+        })
+      } else {
+        map.flyTo([only.lat, only.lon], 12, { duration: 1.8, easeLinearity: 0.25 })
+      }
+      return
+    }
+
+    const bounds = L.latLngBounds([])
+    for (const t of targets) {
+      if (t.bounds) bounds.extend(t.bounds)
+      else bounds.extend([t.lat, t.lon])
+    }
+    map.flyToBounds(bounds.pad(0.12), {
+      padding:       [60, 60],
+      maxZoom:       13,
+      duration:      1.8,
+      easeLinearity: 0.22,
+    })
+  }
+
+  function toggleRoute(route: TopoRoute) {
+    const map = mapRef.current
+    if (!map) return
+    if (activeRouteId === route.id) {
+      clearRouteLayers()
+      setActiveRouteId(null)
+      flyToPassage()
+    } else {
+      drawRoute(map, route)
+      setActiveRouteId(route.id)
+    }
+  }
+
   // ── Init Leaflet map (once) ─────────────────────────────────────────────────
   useEffect(() => {
     if (!divRef.current || mapRef.current) return
@@ -557,6 +1404,26 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
           -1px  1px  1px  rgba(4,9,6,0.98),
            0    0    7px  rgba(4,9,6,0.75);
       }
+      .topo-zone-name {
+        /* Regions and rivers are named the way an atlas names them: wide-tracked,
+           quiet, sitting in the terrain rather than on top of it. Deliberately
+           lighter than a city name so it never competes with one. */
+        position: absolute;
+        transform: translate(-50%, -50%);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        font-weight: 500;
+        letter-spacing: 0.3em;
+        white-space: nowrap;
+        text-indent: 0.3em;
+        -webkit-font-smoothing: antialiased;
+        text-shadow:
+           1px  0   1px rgba(4,9,6,0.95),
+          -1px  0   1px rgba(4,9,6,0.95),
+           0    1px 1px rgba(4,9,6,0.95),
+           0   -1px 1px rgba(4,9,6,0.95),
+           0    0   8px rgba(4,9,6,0.8);
+        transition: opacity 200ms linear, font-size 120ms linear;
+      }
       .topo-popup .leaflet-popup-content-wrapper {
         background: transparent !important;
         border: none !important;
@@ -586,13 +1453,34 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
       preferCanvas: true,
     })
 
+    /**
+     * Stacking order, bottom to top: terrain zones, then water and rivers, then
+     * their names, then routes, then the city markers and their labels, which
+     * Leaflet already puts at 600 and 650. A journey is drawn ON the terrain and
+     * UNDER the places it connects — it is not a UI layer floating over the map.
+     */
+    const PANES: Array<[string, number, boolean]> = [
+      ['topoRegions',    350, true],
+      ['topoFeatures',   360, true],
+      ['topoZoneLabels', 370, false],
+      ['topoRoutes',     450, true],
+    ]
+    for (const [name, z, interactive] of PANES) {
+      const pane = map.createPane(name)
+      pane.style.zIndex = String(z)
+      if (!interactive) pane.style.pointerEvents = 'none'
+    }
+
     L.control.zoom({ position: 'bottomright' }).addTo(map)
     mapRef.current = map
 
     // Resize the names on every zoom change. 'zoom' fires continuously during a
     // pinch or wheel zoom so the type tracks the gesture instead of snapping at
     // the end of it; 'zoomend' catches the final resting value.
-    const onZoom = () => styleCityLabels(labelsRef.current, map.getZoom())
+    const onZoom = () => {
+      styleCityLabels(labelsRef.current, map.getZoom())
+      styleZoneLabels(zoneLabelsRef.current, map.getZoom())
+    }
     map.on('zoom', onZoom)
     map.on('zoomend', onZoom)
 
@@ -602,7 +1490,14 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
     return () => {
       map.off('zoom', onZoom)
       map.off('zoomend', onZoom)
+      routeTimersRef.current.forEach(t => window.clearTimeout(t))
+      routeTimersRef.current = []
       labelsRef.current = []
+      zoneLabelsRef.current = []
+      regionLayersRef.current = []
+      featureLayersRef.current = []
+      routeLayersRef.current = []
+      legLayersRef.current = []
       map.remove()
       mapRef.current = null
       if (styleElRef.current) document.head.removeChild(styleElRef.current)
@@ -615,35 +1510,30 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
     mapRef.current?.invalidateSize()
   }, [width, height])
 
-  // ── React to new geo-references → rebuild markers + auto-fly ───────────────
+  // ── React to new geo-references → rebuild layers + auto-fly ────────────────
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
 
+    // A new passage clears any journey that was up. The primary view is always
+    // about THIS passage; the wider movement has to be asked for again.
+    clearRouteLayers()
+    setActiveRouteId(null)
+
+    // Order matters: buildMarkers resets the city-label list, and buildFeatures
+    // appends its peaks to it and re-runs the declutter pass over both.
+    zoneLabelsRef.current = []
+    buildRegions(map, resolved.regionRefs)
     buildMarkers(map, refMap, undefined, assetImages.cities)
+    buildFeatures(map, resolved.featureRefs)
+    styleZoneLabels(zoneLabelsRef.current, map.getZoom())
 
-    if (refMap.size === 0) return
-
-    const matched = TOPO_CITIES.filter(c => refMap.has(c.name))
-    if (matched.length === 0) return
-
-    if (matched.length === 1) {
-      const { lat, lon } = matched[0]
-      map.flyTo([lat, lon], 12, { duration: 1.8, easeLinearity: 0.25 })
-    } else {
-      const lats = matched.map(c => c.lat)
-      const lons = matched.map(c => c.lon)
-      const sw: L.LatLngTuple = [Math.min(...lats) - 0.4, Math.min(...lons) - 0.4]
-      const ne: L.LatLngTuple = [Math.max(...lats) + 0.4, Math.max(...lons) + 0.4]
-      map.flyToBounds(L.latLngBounds(sw, ne), {
-        padding:       [60, 60],
-        maxZoom:       13,
-        duration:      1.8,
-        easeLinearity: 0.22,
-      })
-    }
+    // No silent return. When nothing resolves, the map holds still and the panel
+    // says so — see the notice in the render below. A reader who opened the map
+    // deserves to know it looked.
+    flyToPassage()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refMap])
+  }, [resolved])
 
   return (
     <div style={{ position:'relative', width, height, background:'#0a140e', overflow:'hidden' }}>
@@ -672,7 +1562,7 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
       </div>
 
       {/* Auto-zoom indicator badge */}
-      {refMap.size > 0 && (
+      {matchedCount > 0 && (
         <div style={{
           position:'absolute', bottom:36, left:10, zIndex:1000,
           background:`${OLIVE}f0`, border:`1px solid ${KHAKI}45`,
@@ -680,7 +1570,126 @@ export function TopoMap({ geoReferences, width, height }: TopoMapProps) {
           fontFamily:'JetBrains Mono, monospace', fontSize:7,
           color:KHAKI, letterSpacing:'0.1em',
         }}>
-          ◉ {refMap.size} LOCATION{refMap.size > 1 ? 'S' : ''} MARKED
+          ◉ {matchedCount} LOCATION{matchedCount > 1 ? 'S' : ''} MARKED
+        </div>
+      )}
+
+      {/*
+        The map used to fail silently: no match meant an early return and a map
+        that simply sat there, leaving the reader to wonder whether it was broken.
+        It now says what happened, and names the places it could not place.
+      */}
+      {matchedCount === 0 && (geoReferences?.length ?? 0) > 0 && (
+        <div style={{
+          position:'absolute', bottom:36, left:10, right:10, zIndex:1000,
+          maxWidth:340,
+          background:`${OLIVE}f0`, border:`1px solid ${KHAKI}30`,
+          borderRadius:6, padding:'6px 10px',
+          fontFamily:'JetBrains Mono, monospace', fontSize:7,
+          color:KHAKI, letterSpacing:'0.1em', lineHeight:1.7,
+        }}>
+          <div style={{ opacity:0.85 }}>◌ NO MAPPED LOCATION FOR THIS PASSAGE</div>
+          {resolved.unmatched.length > 0 && (
+            <div style={{ opacity:0.5, marginTop:2, letterSpacing:'0.06em' }}>
+              NOT ON THE MAP — {resolved.unmatched.slice(0, 4).join(' · ').toUpperCase()}
+              {resolved.unmatched.length > 4 ? ` +${resolved.unmatched.length - 4}` : ''}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/*
+        The journey control. Off by default, and only offered at all when the open
+        passage sits inside a route's scope — the primary view stays about THIS
+        passage and the wider movement is one deliberate click away.
+      */}
+      {availableRoute && (
+        <div style={{
+          position:'absolute', top:10, right:10, zIndex:1000,
+          display:'flex', flexDirection:'column', alignItems:'flex-end', gap:6,
+          maxWidth:'min(300px, calc(100% - 20px))',
+        }}>
+          <button
+            onClick={() => toggleRoute(availableRoute)}
+            style={{
+              textAlign:'right',
+              padding:'5px 10px',
+              background:   activeRoute ? `${GOLD}22` : `${KHAKI}0c`,
+              border:       `1px solid ${activeRoute ? `${GOLD}70` : `${KHAKI}35`}`,
+              borderRadius: 5,
+              color:        activeRoute ? GOLD : KHAKI,
+              cursor:       'pointer',
+              transition:   'all 0.15s',
+            }}>
+            <div style={{
+              fontFamily:'JetBrains Mono, monospace', fontSize:7,
+              letterSpacing:'0.16em', opacity:0.75,
+            }}>
+              {activeRoute ? 'HIDE THE JOURNEY' : 'SHOW THE JOURNEY'}
+            </div>
+            <div style={{
+              fontFamily:"'Crimson Pro', serif", fontSize:12.5,
+              lineHeight:1.3, marginTop:1,
+            }}>
+              {availableRoute.name}
+            </div>
+          </button>
+
+          {activeRoute && (
+            <div style={{
+              width:'100%',
+              background:`${OLIVE}f2`, border:`1px solid ${KHAKI}30`,
+              borderRadius:6, padding:'8px 10px',
+              maxHeight:260, overflowY:'auto',
+            }}>
+              <div style={{
+                fontFamily:'JetBrains Mono, monospace', fontSize:6.5,
+                letterSpacing:'0.14em', color:KHAKI, opacity:0.5,
+              }}>
+                {activeRoute.scope} · {activeRoute.confidence.toUpperCase()}
+              </div>
+
+              {/* Confidence is shown, not hidden. */}
+              {activeRoute.confidence === 'disputed' && activeRoute.disputedNote && (
+                <div style={{
+                  fontFamily:"'Crimson Pro', serif", fontSize:11,
+                  color:KHAKI, opacity:0.72, lineHeight:1.5,
+                  marginTop:6, paddingLeft:7, borderLeft:`2px solid ${GOLD}40`,
+                }}>
+                  {activeRoute.disputedNote}
+                </div>
+              )}
+
+              <div style={{ marginTop:7, display:'flex', flexDirection:'column', gap:1 }}>
+                {activeRoute.legs.map((leg, i) => (
+                  <button key={`${leg.from}-${leg.to}-${i}`}
+                    onClick={() => openLeg(i)}
+                    style={{
+                      textAlign:'left', width:'100%',
+                      background:'transparent', border:'none',
+                      borderRadius:3, padding:'3px 4px',
+                      color:KHAKI, cursor:'pointer',
+                    }}>
+                    <span style={{
+                      fontFamily:'JetBrains Mono, monospace', fontSize:6.5,
+                      letterSpacing:'0.1em', opacity:0.45, marginRight:5,
+                    }}>
+                      {String(i + 1).padStart(2, '0')}
+                    </span>
+                    <span style={{ fontFamily:"'Crimson Pro', serif", fontSize:11.5, opacity:0.9 }}>
+                      {leg.from} → {leg.to}
+                    </span>
+                    <span style={{
+                      fontFamily:'JetBrains Mono, monospace', fontSize:6.5,
+                      letterSpacing:'0.08em', opacity:0.4, marginLeft:5,
+                    }}>
+                      {leg.ref}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

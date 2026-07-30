@@ -9,6 +9,7 @@ const {
   selectScopedResults,
   validateCommentarySynthesis,
 } = require('./commentary-contract')
+const { withRetry, parseModelJSON, checkGenerationInput } = require('./plainread/runtime')
 const licenseStore = require('./license/store')
 const { initLicenseStore, touchClock } = licenseStore
 const { FEATURES } = require('./license/features')
@@ -243,40 +244,6 @@ app.on('activate', () => {
 const Anthropic = require('@anthropic-ai/sdk')
 
 // Retry with exponential backoff for 529 overloaded errors
-async function withRetry(fn, maxAttempts = 4, baseDelayMs = 3000) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn()
-    } catch (err) {
-      const is529 = err?.status === 529 || err?.message?.includes('overloaded')
-      if (is529 && attempt < maxAttempts) {
-        const delay = baseDelayMs * Math.pow(2, attempt - 1) // 3s, 6s, 12s
-        await new Promise(r => setTimeout(r, delay))
-        continue
-      }
-      throw err
-    }
-  }
-}
-
-// Robust JSON extraction from model output — handles code fences, prose
-// wrappers, trailing commas, and both object and array roots.
-function parseModelJSON(res) {
-  const rawText = res.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
-  let raw = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-  const firstBrace = raw.indexOf('{'), firstBracket = raw.indexOf('[')
-  const isArray = firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)
-  const start = isArray ? firstBracket : firstBrace
-  const end = isArray ? raw.lastIndexOf(']') : raw.lastIndexOf('}')
-  if (start !== -1 && end > start) raw = raw.slice(start, end + 1)
-  raw = raw.replace(/,(\s*[}\]])/g, '$1')
-  try { return JSON.parse(raw) }
-  catch (e) {
-    console.error('[parseModelJSON] failed:', e.message, '| excerpt:', raw.slice(Math.max(0, raw.length - 300)))
-    throw new Error('The model returned malformed data — please try again.')
-  }
-}
-
 function theologyRetrievalRoot() {
   if (process.env.THEOLOGY_RETRIEVAL_PATH) return process.env.THEOLOGY_RETRIEVAL_PATH
   return app.isPackaged
@@ -444,6 +411,13 @@ function explicitGeoReferences(raw, passageText) {
 }
 
 ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) => {
+  // Ceilings before anything else. The passage arrives from the caller and is
+  // interpolated raw into three separate model calls, so an oversized paste is
+  // multiplied by three. On the desktop that spends the user's own money; once
+  // this runs on a server it spends Cole's, and the sender pays nothing.
+  // Refused here, before a token is committed.
+  checkGenerationInput({ text, reference })
+
   // Timing. plain-read already logs its own; without this one we know the total
   // wall clock a reader waits but not how it splits between the analysis fan-out
   // and the document generation — and you cannot make something faster until you

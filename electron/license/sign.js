@@ -24,21 +24,25 @@ const PRIVATE_KEY_PATH = path.join(os.homedir(), '.operator-license-key')
  * `null` for expiry means perpetual.
  */
 const PLANS = {
-  // The individual subscription. Everything.
-  operator: { features: () => paidFeatureIds(), seats: 1, months: 12 },
+  // $99/year, auto-renewing in Stripe. 13 months rather than 12 so a slow
+  // renewal, a card that needed re-authorizing, or a late webhook never takes
+  // the tool out of a paying man's hands. On each renewal charge, sign a fresh
+  // one and email it — that is how cancellation is handled, since an offline
+  // license can never learn it was cancelled. It simply lapses.
+  annual: { features: () => paidFeatureIds(), seats: 1, months: 13 },
 
-  // Monthly billing, same grants, shorter life so a cancellation lapses.
-  'operator-monthly': { features: () => paidFeatureIds(), seats: 1, months: 1 },
+  // $249 once, 25 of them, then the link closes itself. Five years, not
+  // "lifetime" — a perpetual grant becomes an unfunded liability the day
+  // hosted inference ships.
+  founding: { features: () => paidFeatureIds(), seats: 1, months: 60 },
 
-  // Founding supporters. Same product, rate held for three years.
-  founding: { features: () => paidFeatureIds(), seats: 1, months: 36 },
+  // Organizations. Seats are declared and honored, not counted; real
+  // enforcement needs the activation server. Override with --seats.
+  org: { features: () => paidFeatureIds(), seats: 5, months: 13 },
 
-  // Organizations. Seats are declared here and honored, not counted — real
-  // enforcement needs the activation server.
-  org: { features: () => paidFeatureIds(), seats: 5, months: 12 },
-
-  // For the seven testers and anyone Cole hands it to directly.
-  comp: { features: () => paidFeatureIds(), seats: 1, months: 12 },
+  // The seven testers, missionaries, and pastors of churches under 50 — the
+  // published exception, so it is a policy lookup rather than a 9pm decision.
+  comp: { features: () => paidFeatureIds(), seats: 1, months: 13 },
 }
 
 function parseArgs(argv) {

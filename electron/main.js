@@ -9,6 +9,9 @@ const {
   selectScopedResults,
   validateCommentarySynthesis,
 } = require('./commentary-contract')
+const licenseStore = require('./license/store')
+const { initLicenseStore, touchClock } = licenseStore
+const { FEATURES } = require('./license/features')
 const isDev = process.env.NODE_ENV === 'development'
 
 // Updates are ON for packaged builds. Both Mac targets are signed and notarized
@@ -175,10 +178,57 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   const Store = (await import('electron-store')).default
-  store = new Store()
+
+  // electron-store defaults clearInvalidConfig to false, so a corrupt or
+  // truncated config.json throws here. With no catch, that rejection meant
+  // createWindow() never ran and the user got a bouncing dock icon, no window
+  // and no error — nothing to act on and nothing to report. The file is
+  // rewritten in full on every set(), so a crash or full disk mid-write is a
+  // real way to reach that state.
+  //
+  // Losing history is bad. Being unable to open the app at all is worse, and it
+  // is the one failure a man cannot work around on a Sunday morning.
+  try {
+    store = new Store()
+  } catch (e) {
+    console.log('[store] config unreadable, resetting:', e?.message || e)
+    try {
+      store = new Store({ clearInvalidConfig: true })
+      dialog.showMessageBox({
+        type: 'warning',
+        title: 'Settings were reset',
+        message: 'The Operator could not read its settings file and has started fresh.',
+        detail: 'Your saved studies may be gone and you may need to paste your keys again. Your license is stored separately and is unaffected.',
+        buttons: ['OK'],
+      })
+    } catch (fatal) {
+      dialog.showErrorBox(
+        'The Operator could not start',
+        `Its settings could not be created or repaired.\n\n${fatal?.message || fatal}\n\nCheck that your disk is not full, then open it again.`,
+      )
+      app.quit()
+      return
+    }
+  }
+
+  // The license lives in its own file so it can never share a fate with the
+  // history store — clearing a corrupt config must not destroy what a man paid
+  // for, since he would then need the app to open in order to re-paste the key
+  // that the app needs in order to open properly.
+  initLicenseStore(Store)
+  touchClock()
+
   buildMenu()
   createWindow()
   startUpdateChecks()
+}).catch((e) => {
+  // Last line of defence: anything unhandled above must produce a visible
+  // failure rather than a silent no-window start.
+  console.log('[startup] fatal:', e?.message || e)
+  try {
+    dialog.showErrorBox('The Operator could not start', String(e?.message || e))
+  } catch { /* dialog itself unavailable */ }
+  app.quit()
 })
 
 app.on('window-all-closed', () => {
@@ -268,6 +318,40 @@ ipcMain.handle('get-app-version', () => app.getVersion())
 ipcMain.handle('secret-status', () => secretStatus())
 
 ipcMain.handle('save-api-keys', (_, values) => saveSecrets(values))
+
+// ── Licensing ──────────────────────────────────────────────────────────────
+// The renderer asks what this install may do; it never decides for itself. UI
+// gating is presentation only — every capability that actually calls a model is
+// gated here in main by requireFeature(), after that handler's cache return.
+
+ipcMain.handle('license-status', () => licenseStore.entitlements())
+
+ipcMain.handle('license-set', (_, licenseString) => licenseStore.setLicense(null, licenseString))
+
+ipcMain.handle('license-catalog', () => ({
+  features: FEATURES,
+  free: licenseStore.FREE_FEATURES,
+  installId: licenseStore.getInstallId(),
+}))
+
+/**
+ * Throw unless this install is entitled to the capability.
+ *
+ * Placed after each handler's cache return, so re-opening work a man has
+ * already generated stays free forever — which is the promise the free tier
+ * makes and the reason the cache read deliberately precedes the key check.
+ *
+ * This is a checkout counter, not a lock. The repo is public and the asar is
+ * patchable, so anyone who could defeat this could simply run from source.
+ * Its job is to let people who want to pay, pay.
+ */
+function requireFeature(featureId) {
+  if (licenseStore.can(null, featureId)) return
+  const err = new Error('This is part of the paid version of The Operator.')
+  err.code = 'LICENSE_REQUIRED'
+  err.feature = featureId
+  throw err
+}
 
 ipcMain.handle('migrate-legacy-api-keys', (_, rendererValues = {}) => {
   const migrated = {}
@@ -404,6 +488,7 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) =
     }
   }
 
+  requireFeature('gen.study')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
 
@@ -760,6 +845,8 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
   return await plainRead({
     analysis,
     apiKey: requireSecret('ANTHROPIC_KEY', 'Anthropic'),
+    // Fires only on a cache miss, so a study already generated re-opens free.
+    onCacheMiss: () => requireFeature('gen.read'),
     requestedReference,
     force: Boolean(force),
     ...(level ? { level } : {}),
@@ -849,6 +936,7 @@ ipcMain.handle('group-guide-generate', async (_, { analysis, plainDoc, force }) 
     if (cached) return cached
   }
 
+  requireFeature('gen.groupguide')
   const guide = await generateGroupGuide({
     analysis,
     plainDoc,
@@ -862,6 +950,7 @@ ipcMain.handle('group-guide-generate', async (_, { analysis, plainDoc, force }) 
 })
 
 ipcMain.handle('group-guide-save', async (_, { analysis, plainDoc, guide }) => {
+  requireFeature('gen.groupguide')
   const verified = await verifyGroupGuideDraft({
     guide,
     analysis,
@@ -946,6 +1035,7 @@ ipcMain.handle('plain-ask', async (_, { doc, analysis, question, history, vaultN
     } catch { notes = null }
   }
 
+  requireFeature('gen.ask')
   return askAboutPassage({
     doc,
     analysis,
@@ -1019,6 +1109,7 @@ ipcMain.handle('profile-get-sermon', (_, id) => {
 
 ipcMain.handle('profile-extract-insights', async (_, { messages }) => {
   if (!store || messages.length < 2) return
+  requireFeature('gen.profile')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store.get('scholar-profile', INITIAL_PROFILE)
@@ -1051,6 +1142,7 @@ Return a JSON array of new insight strings (empty array [] if nothing new). Each
 
 // ── Sermon Draft (3-agent pipeline) ──────────────────────────────────────────
 ipcMain.handle('draft-sermon', async (_, { analysis }) => {
+  requireFeature('gen.sermon')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)
@@ -1249,6 +1341,7 @@ ipcMain.handle('series-delete', (_, id) => {
 })
 
 ipcMain.handle('series-synthesize', async (_, { series }) => {
+  requireFeature('gen.seriesSynth')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const passageSummaries = series.passages.map((p, i) =>
@@ -1312,6 +1405,7 @@ ipcMain.handle('session-load-latest', () => {
 
 // ── Cross-references ──────────────────────────────────────────────────────────
 ipcMain.handle('get-cross-refs', async (_, { reference, mainTheme, biblicalThemes }) => {
+  requireFeature('gen.crossrefs')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const response = await withRetry(() => client.messages.create({
@@ -1334,6 +1428,7 @@ ipcMain.handle('word-study', async (_, { word, clauseText, reference }) => {
   const wordStudyCache = store?.get('word-study-cache-v2', {}) ?? {}
   if (wordStudyCache[cacheKey]) return wordStudyCache[cacheKey]
 
+  requireFeature('gen.wordstudy')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const response = await withRetry(() => client.messages.create({
@@ -1455,6 +1550,7 @@ ipcMain.handle('fetch-bible', async (_, { reference, translation = 'kjv' }) => {
 
 // ── Scholar Chat ──────────────────────────────────────────────────────────────
 ipcMain.handle('scholar-chat', async (event, { messages, passageContext, streamId }) => {
+  requireFeature('gen.scholar')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)
@@ -1606,6 +1702,7 @@ ipcMain.handle('export-pdf', async (_, { html, reference }) => {
 
 // ── Specialist Agent Chat (Exegetical / Theological / Homiletical) ────────────
 ipcMain.handle('agent-chat', async (event, { agentType, messages, passageContext, streamId }) => {
+  requireFeature('gen.agents')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)
@@ -1875,6 +1972,7 @@ If no problems exist, return {"flags":[]}.`,
 
 // ── Mission Brief — 5-paragraph OPORD-style sermon summary ───────────────────
 ipcMain.handle('mission-brief', async (_, { analysis, draft }) => {
+  requireFeature('gen.mission')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const response = await withRetry(() => client.messages.create({
@@ -1920,6 +2018,7 @@ ipcMain.handle('pick-media-file', async () => {
 })
 
 ipcMain.handle('review-delivery', async (_, { fileToken, audioBase64, mimeType, manuscript, reference }) => {
+  requireFeature('gen.delivery')
   const openaiKey = requireSecret('OPENAI_KEY', 'OpenAI')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
 

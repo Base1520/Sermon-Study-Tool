@@ -891,6 +891,7 @@ async function plainRead({
   deferVerify = false,
   onVerified,
   onSection,
+  onCacheMiss,
   verifyFn = verifyPlainRead,
   mechanicsPath,
   level = PLAIN_READ_DEFAULT_LEVEL,
@@ -926,6 +927,13 @@ async function plainRead({
     const hit = cache.get(key)
     if (hit) return { ...hit, fromCache: true }
   }
+
+  // Entitlement is checked HERE, for exactly the reason the cache read comes
+  // first: a document already generated belongs to the reader whether or not
+  // he is currently licensed. Only generation is sold. Placing this any earlier
+  // — including in the caller, where apiKey is evaluated as an argument —
+  // would take away work he already has.
+  if (typeof onCacheMiss === 'function') onCacheMiss()
 
   if (!apiKey) throw new Error('plainRead: apiKey is required')
   if (typeof createClient !== 'function') throw new Error('plainRead: createClient is required')

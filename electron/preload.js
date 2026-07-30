@@ -39,6 +39,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   testAnthropicKey: (apiKey) => ipcRenderer.invoke('test-anthropic-key', apiKey),
   secretStatus: () => ipcRenderer.invoke('secret-status'),
+
+  // Licensing. The renderer reads status to decide what to SHOW; it never
+  // decides what may RUN — every paid capability is gated in main.
+  licenseStatus: () => ipcRenderer.invoke('license-status'),
+  licenseSet: (licenseString) => ipcRenderer.invoke('license-set', licenseString),
+  licenseCatalog: () => ipcRenderer.invoke('license-catalog'),
   saveApiKeys: (keys) => ipcRenderer.invoke('save-api-keys', keys),
   migrateLegacyApiKeys: (keys) => ipcRenderer.invoke('migrate-legacy-api-keys', keys),
   setUiZoom: (f) => ipcRenderer.invoke('set-ui-zoom', f),

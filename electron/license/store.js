@@ -10,6 +10,64 @@ const { effectiveFeatures, FREE_FEATURES } = require('./features')
 
 const LICENSE_KEY = 'license-string'
 const INSTALL_ID_KEY = 'install-id'
+const CLOCK_KEY = 'last-seen-date'
+
+/**
+ * The license lives in its own file, separate from the history store.
+ *
+ * Two reasons, both about not losing a paying customer's access:
+ *  - The main config.json is large and rewritten in full on every set(). If it
+ *    is ever corrupted, the recovery is to clear it — which must not also
+ *    destroy the license someone paid for.
+ *  - It deliberately does NOT go through safeStorage. That ties decryption to
+ *    app identity, which the rename to com.base1520.theoperator already broke
+ *    once, and it throws outright on managed machines where OS encryption is
+ *    unavailable. A signed license needs no confidentiality: it is already
+ *    tamper-evident, and it is the customer's own key.
+ */
+let licenseStore = null
+
+/** Called once at startup with electron-store's constructor. */
+function initLicenseStore(StoreClass) {
+  try {
+    licenseStore = new StoreClass({ name: 'license' })
+  } catch (e) {
+    try {
+      licenseStore = new StoreClass({ name: 'license', clearInvalidConfig: true })
+    } catch {
+      // Running unlicensed is a working product; refusing to start is not.
+      console.log('[license] store unavailable, running free:', e?.message || e)
+      licenseStore = null
+    }
+  }
+  return licenseStore
+}
+
+/** Tests inject their own; main uses the module singleton. */
+const resolve = (store) => store || licenseStore
+
+/**
+ * Record the furthest date this install has ever seen.
+ *
+ * Catches the naive attack on an expiring license: set the clock back a year.
+ * It does not catch someone who also edits license.json, and that is the right
+ * ceiling — the asar is patchable and the repo is public, so more hardening
+ * buys nothing.
+ */
+function touchClock(store) {
+  const s = resolve(store)
+  const today = new Date().toISOString().slice(0, 10)
+  const seen = s?.get(CLOCK_KEY)
+  if (typeof seen !== 'string' || today > seen) s?.set(CLOCK_KEY, today)
+  return s?.get(CLOCK_KEY) || today
+}
+
+/** True when the system clock is behind the furthest date we have recorded. */
+function clockRolledBack(store) {
+  const seen = resolve(store)?.get(CLOCK_KEY)
+  if (typeof seen !== 'string') return false
+  return new Date().toISOString().slice(0, 10) < seen
+}
 
 /**
  * A stable per-install identifier, created once on first call.
@@ -24,17 +82,18 @@ const INSTALL_ID_KEY = 'install-id'
  * this machine only if a future activation step sends it deliberately.
  */
 function getInstallId(store) {
-  let id = store?.get(INSTALL_ID_KEY)
+  const s = resolve(store)
+  let id = s?.get(INSTALL_ID_KEY)
   if (typeof id !== 'string' || id.length < 8) {
     id = crypto.randomUUID()
-    store?.set(INSTALL_ID_KEY, id)
+    s?.set(INSTALL_ID_KEY, id)
   }
   return id
 }
 
 /** The raw license string as pasted, or '' when running free. */
 function getLicenseString(store) {
-  const s = store?.get(LICENSE_KEY)
+  const s = resolve(store)?.get(LICENSE_KEY)
   return typeof s === 'string' ? s : ''
 }
 
@@ -47,7 +106,14 @@ function getLicenseString(store) {
  */
 function entitlements(store, opts = {}) {
   const licenseString = getLicenseString(store)
-  const result = verifyLicense(licenseString, opts)
+  let result = verifyLicense(licenseString, opts)
+
+  // A clock behind the high-water mark means dates cannot be trusted, so an
+  // expiring license is treated as expired. A perpetual one is unaffected —
+  // there is nothing to cheat.
+  if (result.valid && result.payload?.expires && clockRolledBack(store)) {
+    result = { ...result, valid: false, reason: 'expired', features: [], expired: true, inGrace: false }
+  }
 
   return {
     features: [...effectiveFeatures(result.valid ? result.features : [])],
@@ -74,19 +140,23 @@ function entitlements(store, opts = {}) {
  * customer, and keeping it lets the app say "renew" instead of "who are you".
  */
 function setLicense(store, licenseString, opts = {}) {
+  const s = resolve(store)
   const cleaned = typeof licenseString === 'string' ? licenseString.trim() : ''
 
   if (!cleaned) {
-    store?.delete(LICENSE_KEY)
+    s?.delete(LICENSE_KEY)
     return { ok: true, cleared: true, ...entitlements(store, opts) }
   }
 
   const result = verifyLicense(cleaned, opts)
   if (!result.valid && result.reason !== 'expired') {
+    // Rejected, and deliberately WITHOUT touching what is already stored. A man
+    // fumbling a paste of a new key must not lose the working one he already
+    // had — that turns a typo into a support ticket and a lockout.
     return { ok: false, error: describeLicense(result), reason: result.reason }
   }
 
-  store?.set(LICENSE_KEY, cleaned)
+  s?.set(LICENSE_KEY, cleaned)
   return { ok: true, cleared: false, ...entitlements(store, opts) }
 }
 
@@ -96,6 +166,9 @@ function can(store, featureId, opts = {}) {
 }
 
 module.exports = {
+  initLicenseStore,
+  touchClock,
+  clockRolledBack,
   getInstallId,
   getLicenseString,
   entitlements,
@@ -103,5 +176,6 @@ module.exports = {
   can,
   LICENSE_KEY,
   INSTALL_ID_KEY,
+  CLOCK_KEY,
   FREE_FEATURES,
 }

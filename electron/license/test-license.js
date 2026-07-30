@@ -31,7 +31,7 @@ const basePayload = (over = {}) => ({
   issuedTo: 'pastor@church.org',
   org: null,
   tier: 'operator',
-  features: ['pulpit.outline', 'atlas.map'],
+  features: ['gen.study', 'gen.read'],
   seats: 1,
   issued: '2026-07-30',
   expires: '2027-07-30',
@@ -43,7 +43,7 @@ console.log('\nAUTHENTICITY')
   const lic = mint(basePayload())
   const r = verifyLicense(lic, { publicKeyPem: TEST_PUB, now: new Date('2026-08-01') })
   ok('a well-formed license verifies', r.valid, r.reason)
-  ok('grants come through', r.features.includes('pulpit.outline'))
+  ok('grants come through', r.features.includes('gen.study'))
 
   // Tamper with the payload, keep the signature.
   const [p, s] = lic.split('.')
@@ -98,7 +98,7 @@ console.log('\nFORWARD COMPATIBILITY — a newer license must not brick an older
 {
   const future = mint(basePayload({
     v: 99,
-    features: ['pulpit.outline', 'feature.that.does.not.exist.yet'],
+    features: ['gen.study', 'feature.that.does.not.exist.yet'],
     somethingNew: { nested: true },
   }))
   const r = verifyLicense(future, { publicKeyPem: TEST_PUB, now: new Date('2026-08-01') })
@@ -106,7 +106,7 @@ console.log('\nFORWARD COMPATIBILITY — a newer license must not brick an older
   ok('unknown fields are ignored', r.valid)
   ok('unknown feature ids are carried, not dropped',
     r.features.includes('feature.that.does.not.exist.yet'))
-  ok('known grants still work alongside unknown ones', r.features.includes('pulpit.outline'))
+  ok('known grants still work alongside unknown ones', r.features.includes('gen.study'))
 }
 
 console.log('\nSEATS — enterprise-ready from the first license')
@@ -126,7 +126,7 @@ console.log('\nTHE FREE TIER')
   ok('a paid feature is locked with no license',
     !hasFeature(paidFeatureIds()[0], []))
   ok('a license adds to free rather than replacing it',
-    effectiveFeatures(['pulpit.outline']).has(FREE_FEATURES[0]))
+    effectiveFeatures(['gen.study']).has(FREE_FEATURES[0]))
   ok('the free list and the paid list do not overlap',
     paidFeatureIds().every((f) => !FREE_FEATURES.includes(f)))
   ok('there is something worth paying for', paidFeatureIds().length > 0)
@@ -185,7 +185,7 @@ console.log('\nPERSISTENCE — a fake electron-store, no Electron needed')
 
   const good = setLicense(s, mint(basePayload({ seats: 25, org: 'Grace Seminary' })), opts)
   ok('a good license is accepted', good.ok && good.licensed, good.error || '')
-  ok('paid features unlock', can(s, 'pulpit.outline', opts))
+  ok('paid features unlock', can(s, 'gen.study', opts))
   ok('seats survive the round trip', entitlements(s, opts).seats === 25)
   ok('the org survives the round trip', entitlements(s, opts).org === 'Grace Seminary')
 
@@ -197,7 +197,56 @@ console.log('\nPERSISTENCE — a fake electron-store, no Electron needed')
 
   const cleared = setLicense(s, '', opts)
   ok('clearing returns to free', cleared.ok && cleared.cleared && !cleared.licensed)
-  ok('paid features re-lock after clearing', !can(s, 'pulpit.outline', opts))
+  ok('paid features re-lock after clearing', !can(s, 'gen.study', opts))
+}
+
+console.log('\nCLOCK ROLLBACK')
+{
+  const makeStore = () => {
+    const m = new Map()
+    return { get: (k, d) => (m.has(k) ? m.get(k) : d), set: (k, v) => m.set(k, v), delete: (k) => m.delete(k) }
+  }
+  const { touchClock, clockRolledBack, setLicense, entitlements, CLOCK_KEY } = require('./store')
+  const opts = { publicKeyPem: TEST_PUB, now: new Date('2026-08-01') }
+
+  const s = makeStore()
+  touchClock(s)
+  ok('a high-water date is recorded', typeof s.get(CLOCK_KEY) === 'string')
+  ok('a forward clock is not a rollback', !clockRolledBack(s))
+
+  // Pretend this install once saw a date far in the future.
+  s.set(CLOCK_KEY, '2099-01-01')
+  ok('a clock behind the high-water mark is detected', clockRolledBack(s))
+
+  setLicense(s, mint(basePayload({ expires: '2027-07-30' })), opts)
+  ok('an expiring license is refused while the clock is rolled back',
+    !entitlements(s, opts).licensed)
+
+  // A perpetual license has nothing to cheat, so rollback must not punish it.
+  const s2 = makeStore()
+  s2.set(CLOCK_KEY, '2099-01-01')
+  setLicense(s2, mint(basePayload({ expires: null })), opts)
+  ok('a perpetual license is unaffected by clock rollback',
+    entitlements(s2, opts).licensed)
+}
+
+console.log('\nTHE FREE/PAID LINE — the money-critical invariant')
+{
+  const { FEATURES, featureForHandler } = require('./features')
+  const METERED = ['analyze-passage','plain-read','plain-ask','group-guide-generate',
+    'get-cross-refs','word-study','scholar-chat','agent-chat','draft-sermon',
+    'series-synthesize','mission-brief','profile-extract-insights','review-delivery']
+
+  for (const ch of METERED) {
+    const f = featureForHandler(ch)
+    ok(`${ch} is gated`, f !== null && !FREE_FEATURES.includes(f), f || 'NOT MAPPED')
+  }
+  ok('nothing free claims an IPC handler',
+    FREE_FEATURES.every((id) => !FEATURES[id]?.handler))
+  ok('every catalog entry is either free or paid, never both',
+    Object.keys(FEATURES).every((id) => FREE_FEATURES.includes(id) !== paidFeatureIds().includes(id)))
+  ok('the second-key requirement is flagged for the pricing page',
+    FEATURES['gen.delivery']?.requiresSecondKey === 'OPENAI_KEY')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

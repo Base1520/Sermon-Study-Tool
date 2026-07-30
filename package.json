@@ -14,7 +14,7 @@
     "build:beta": "VITE_ADMIN=false vite build && electron-builder --mac",
     "build:beta-win": "VITE_ADMIN=false vite build && electron-builder --win --x64",
     "build:mac": "VITE_ADMIN=false vite build && electron-builder --mac --dir",
-    "test:release": "node electron/license/test-license.js && node electron/plainread/test-situation.js && node electron/plainread/test-outline.js && node electron/plainread/test-levels.js && node electron/plainread/test-voice.js && node electron/plainread/test-doctrine.js && node electron/plainread/test-plainread.js && node electron/plainread/test-ask.js && node electron/groupguide/test-groupguide.js && tsc --noEmit",
+    "test:release": "node electron/license/test-license.js && node electron/license/test-gate.js && node electron/plainread/test-situation.js && node electron/plainread/test-outline.js && node electron/plainread/test-levels.js && node electron/plainread/test-voice.js && node electron/plainread/test-doctrine.js && node electron/plainread/test-plainread.js && node electron/plainread/test-ask.js && node electron/groupguide/test-groupguide.js && tsc --noEmit",
     "eval:commentary": "node scripts/evaluate-commentary-retrieval.js",
     "publish": "VITE_ADMIN=false vite build && electron-builder --publish always",
     "vite": "vite --port ${PORT:-5173}",

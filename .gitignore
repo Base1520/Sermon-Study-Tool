@@ -7,3 +7,8 @@ dist-electron/
 
 # 6.7MB commentary corpus — never let `git add -A` swallow this
 resources/theology-retrieval/library.sqlite3
+
+# license signing key — the private half must never enter this repo (it is public)
+.operator-license-key
+.operator-license-key.pub
+*-license-key

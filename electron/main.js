@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, ipcMain, shell, dialog, safeStorage } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const crypto = require('crypto')
 const { execFile } = require('child_process')
 const packageMetadata = require('../package.json')
 const {
@@ -10,6 +11,7 @@ const {
   validateCommentarySynthesis,
 } = require('./commentary-contract')
 const { withRetry, parseModelJSON, checkGenerationInput } = require('./plainread/runtime')
+const { createRecorder, summarize } = require('./plainread/usage')
 const licenseStore = require('./license/store')
 const { initLicenseStore, touchClock } = licenseStore
 const { FEATURES } = require('./license/features')
@@ -286,6 +288,42 @@ ipcMain.handle('secret-status', () => secretStatus())
 
 ipcMain.handle('save-api-keys', (_, values) => saveSecrets(values))
 
+// ── Cost ledger ────────────────────────────────────────────────────────────
+//
+// Appends one line per model call to cost-ledger.jsonl in userData. Nothing in
+// the pricing plan has ever been measured — every figure is arithmetic on
+// max_tokens ceilings, and models rarely run to ceiling. Sixty days of the
+// seven testers using this produces the real number at zero cost, because they
+// are on their own keys.
+//
+// Deliberately a plain append-only file, not the settings store: it must never
+// be able to corrupt config.json, and it should be readable with `tail`.
+
+let ledgerPath = null
+function ledgerFile() {
+  if (!ledgerPath) ledgerPath = path.join(app.getPath('userData'), 'cost-ledger.jsonl')
+  return ledgerPath
+}
+
+const recordUsage = createRecorder((line) => {
+  fs.appendFileSync(ledgerFile(), line)
+})
+
+/** One id per study so the analyze calls, the document, its retries and the verify pass roll up together. */
+function newStudyId() {
+  return crypto.randomUUID().slice(0, 8)
+}
+
+ipcMain.handle('cost-summary', () => {
+  try {
+    const raw = fs.readFileSync(ledgerFile(), 'utf8')
+    const rows = raw.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return null } })
+    return summarize(rows.filter(Boolean))
+  } catch {
+    return { calls: 0, totalUsd: 0, note: 'no usage recorded yet' }
+  }
+})
+
 // ── Licensing ──────────────────────────────────────────────────────────────
 // The renderer asks what this install may do; it never decides for itself. UI
 // gating is presentation only — every capability that actually calls a model is
@@ -313,6 +351,24 @@ ipcMain.handle('license-catalog', () => ({
  * Its job is to let people who want to pay, pay.
  */
 function requireFeature(featureId) {
+  // ENFORCEMENT IS OFF BY DEFAULT, AND MUST STAY OFF UNTIL THE UNLOCK UI EXISTS.
+  //
+  // The gates below are written, wired and tested. What does not exist yet is
+  // any way for a user to DO something about being refused: there is no license
+  // field, no error branch, and no buy link in the renderer. Meanwhile the
+  // auto-updater is armed with autoDownload and autoInstallOnAppQuit, so a
+  // published release reaches every installed copy overnight without anyone
+  // choosing it.
+  //
+  // Turning enforcement on before the unlock path exists would mean seven men
+  // who were promised early access open the app one morning, press Study, and
+  // are told they have not paid — with nothing on screen to fix it. That is the
+  // worst possible first contact with a price, and it lands on friends.
+  //
+  // Flip this on by setting OPERATOR_ENFORCE=1, in the same commit that ships
+  // the license field. Not before.
+  if (process.env.OPERATOR_ENFORCE !== '1') return
+
   if (licenseStore.can(null, featureId)) return
   const err = new Error('This is part of the paid version of The Operator.')
   err.code = 'LICENSE_REQUIRED'
@@ -799,6 +855,10 @@ const { plainRead } = require('./plainread/pipeline')
 //     requestId against the request in flight and drop anything stale. Two
 //     passages in quick succession produce two streams.
 ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force, level, requestId }) => {
+  // Ties this document, its retries and its verify pass to one study in the
+  // ledger, so summarize() reports cost per STUDY rather than per API call.
+  const __studyId = newStudyId()
+
   // Timing, logged to the terminal. Added because "it feels slow" and "it IS
   // slow" are different problems with different fixes, and nobody could tell
   // them apart. The generate call writes ~2400 words at the plain level; if
@@ -821,6 +881,11 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
     apiKey: requireSecret('ANTHROPIC_KEY', 'Anthropic'),
     // Fires only on a cache miss, so a study already generated re-opens free.
     onCacheMiss: () => requireFeature('gen.read'),
+    // Records the document call AND each retry separately. A validation
+    // failure regenerates the whole 6,000-token document, so the meter counts
+    // one study while the bill counts two — invisible unless attempts are
+    // logged apart.
+    onUsage: (label, usage, model) => recordUsage(label, usage, model, { studyId: __studyId, ref: requestedReference }),
     requestedReference,
     force: Boolean(force),
     ...(level ? { level } : {}),

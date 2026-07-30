@@ -892,6 +892,7 @@ async function plainRead({
   onVerified,
   onSection,
   onCacheMiss,
+  onUsage,
   verifyFn = verifyPlainRead,
   mechanicsPath,
   level = PLAIN_READ_DEFAULT_LEVEL,
@@ -987,7 +988,7 @@ async function plainRead({
      * earning its keep. cache_write on the first call of a session is expected.
      * BOTH ZERO on a repeat call means it is silently no-opping again.
      */
-    const __logUsage = (r) => {
+    const __logUsage = (r, attempt = 1) => {
       const u = r?.usage
       if (!u) return
       console.log(
@@ -996,6 +997,14 @@ async function plainRead({
         `  cache_read=${u.cache_read_input_tokens ?? 0}` +
         `  out=${u.output_tokens ?? '?'}`
       )
+      // Persist it. Every price in the plan rests on an estimate derived from
+      // max_tokens ceilings; this is the only thing that replaces those with
+      // facts. Labelled by attempt because a validation failure regenerates the
+      // WHOLE document — the meter counts one study while the bill counts two,
+      // and that gap is invisible unless each attempt is recorded separately.
+      if (typeof onUsage === 'function') {
+        try { onUsage(attempt === 1 ? 'plain-read' : `plain-read.retry${attempt - 1}`, u, MODEL) } catch { /* never break a study */ }
+      }
     }
 
     const res = await requestDocument({
@@ -1058,7 +1067,7 @@ async function plainRead({
       },
     })
 
-    __logUsage(res)
+    __logUsage(res, attempt + 1)
 
     // A truncated or prose-wrapped response is the failure a second sample is
     // MOST likely to fix, and it was the one failure that got ZERO retries: the
@@ -1234,6 +1243,27 @@ async function plainRead({
     // back in through the fast path. The deferred cache write happens in
     // runDeferredVerification, once, after the check actually returns ok.
     if (cache?.set && doc.verification?.status === 'ok') cache.set(key, doc)
+    else if (cache?.set) {
+      // REFUSED ENTRY TO THE CACHE, and this needs to be visible.
+      //
+      // Only a verified document is cached. So when the verifier fails, the
+      // reader still gets his document and it still cost full price — but it is
+      // never written. Not "not this time": NEVER, for that passage, for every
+      // user, because the failure is deterministic. The same text fails the same
+      // fences every time.
+      //
+      // That is a permanently uncacheable passage generating full cost on every
+      // request forever, and nothing else in the system reports it. Measuring
+      // cache hit rate without this would show a low rate and suggest Scripture
+      // study just is not concentrated — when the real cause is our own verifier
+      // refusing to fill the cache.
+      console.log(`[plain-read] CACHE REFUSED  ref=${requestedReference ?? '?'} status=${doc.verification?.status ?? 'none'} key=${key.slice(0, 12)}`)
+      if (typeof onUsage === 'function') {
+        try {
+          onUsage('cache.refused', { input_tokens: 0, output_tokens: 0 }, MODEL)
+        } catch { /* never break a study */ }
+      }
+    }
 
     // ---- the check, off the critical path -------------------------------
     // Started AFTER everything above, so the promise closes over a finished

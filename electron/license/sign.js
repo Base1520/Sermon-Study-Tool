@@ -2,7 +2,7 @@
 // Issue a signed license. Run by Cole, on Cole's machine, never in CI and never
 // on a server — the private key stays at ~/.operator-license-key.
 //
-//   node electron/license/sign.js --email pastor@church.org --plan operator
+//   node electron/license/sign.js --email pastor@church.org --plan annual
 //   node electron/license/sign.js --email admin@seminary.edu --plan org --seats 25 \
 //                                 --org "Grace Seminary" --years 1
 //
@@ -59,7 +59,7 @@ function b64url(buf) {
   return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-function issue({ email, plan = 'operator', seats, org, months, years, features }) {
+function issue({ email, plan = 'annual', seats, org, months, years, features }) {
   if (!email) throw new Error('--email is required')
 
   const preset = PLANS[plan]

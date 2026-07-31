@@ -10,6 +10,20 @@ interface Props {
   hasExistingEsvKey?: boolean
 }
 
+/** What main reports back about this install's entitlement. */
+interface LicenseState {
+  licensed: boolean
+  message: string
+  issuedTo?: string | null
+  org?: string | null
+  tier?: string | null
+  seats?: number
+  daysLeft?: number | null
+  inGrace?: boolean
+  error?: string
+  ok?: boolean
+}
+
 const ZOOMS = [
   { f: 1,    label: 'NORMAL' },
   { f: 1.15, label: 'LARGE' },
@@ -31,6 +45,40 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
   const [showAnthropicHelp, setShowAnthropicHelp] = useState(!hasExistingKey)
   const [testing, setTesting] = useState(false)
   const [testError, setTestError] = useState<FriendlyError | null>(null)
+
+  // Licensing. Kept separate from the key fields on purpose: a license is
+  // applied on its own, immediately, and must not be hostage to whether the
+  // Anthropic key happens to validate at the same moment.
+  const [licenseKey, setLicenseKey] = useState('')
+  const [licenseState, setLicenseState] = useState<LicenseState | null>(null)
+  const [licenseBusy, setLicenseBusy] = useState(false)
+  const [licenseError, setLicenseError] = useState<string | null>(null)
+
+  useEffect(() => {
+    ;(window as any).electronAPI?.licenseStatus?.()
+      .then((s: LicenseState) => setLicenseState(s))
+      .catch(() => {})
+  }, [])
+
+  async function applyLicense() {
+    const value = licenseKey.trim()
+    if (!value || licenseBusy) return
+    setLicenseBusy(true)
+    setLicenseError(null)
+    try {
+      const result = await (window as any).electronAPI.licenseSet(value)
+      if (result?.ok) {
+        setLicenseState(result)
+        setLicenseKey('')
+      } else {
+        setLicenseError(result?.error ?? 'That license key did not verify.')
+      }
+    } catch (e: any) {
+      setLicenseError(friendlyApiError(e).detail)
+    } finally {
+      setLicenseBusy(false)
+    }
+  }
 
   const canSave = Boolean(key.trim() || hasExistingKey) && !testing
 
@@ -186,6 +234,70 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
             onBlur={e => (e.target.style.borderColor = BASE.borderDim)}
             onKeyDown={e => e.key === 'Enter' && canSave && void connect()}
           />
+        </div>
+
+        {/* License. Applied on its own button so it never waits on the API key. */}
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.khaki, letterSpacing: '0.12em', marginBottom: 6, opacity: 0.9 }}>
+            LICENSE KEY <span style={{ color: BASE.steel, fontWeight: 400 }}>(optional — unlocks new studies)</span>
+          </div>
+
+          {licenseState?.licensed ? (
+            <div style={{
+              fontFamily: 'Crimson Pro, serif', fontSize: 12, lineHeight: 1.5,
+              color: BASE.boneMid, background: `${BASE.olive}18`,
+              border: `1px solid ${BASE.borderGold}`, borderRadius: 10, padding: '10px 13px',
+            }}>
+              {/* Named, deliberately and persistently. A man will not run a tool
+                  with another man's name on it — which is most of the defence a
+                  shareable key can honestly have. */}
+              <span style={{ color: BASE.gold }}>Licensed</span>
+              {licenseState.org
+                ? <> to <strong style={{ color: BASE.bone }}>{licenseState.org}</strong></>
+                : licenseState.issuedTo
+                  ? <> to <strong style={{ color: BASE.bone }}>{licenseState.issuedTo}</strong></>
+                  : null}
+              {typeof licenseState.seats === 'number' && licenseState.seats > 1 && <> · {licenseState.seats} seats</>}
+              {licenseState.inGrace
+                ? <div style={{ color: BASE.khaki, marginTop: 4 }}>Expired, still working while you renew.</div>
+                : typeof licenseState.daysLeft === 'number'
+                  ? <div style={{ color: BASE.steel, marginTop: 4 }}>{licenseState.daysLeft} days remaining.</div>
+                  : null}
+            </div>
+          ) : (
+            <>
+              <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel, lineHeight: 1.5, marginBottom: 8 }}>
+                Came in your email as one long line. Without it the Academy, the worked study,
+                the maps and everything you have already studied still work.
+              </div>
+              <input
+                type="text" value={licenseKey}
+                onChange={e => setLicenseKey(e.target.value)}
+                placeholder="Paste your license key"
+                autoComplete="off" spellCheck={false}
+                style={{ ...fieldStyle, fontFamily: licenseKey ? 'JetBrains Mono' : 'Crimson Pro, serif', fontSize: 11 }}
+                onFocus={e => (e.target.style.borderColor = `${BASE.khaki}66`)}
+                onBlur={e => (e.target.style.borderColor = BASE.borderDim)}
+                onKeyDown={e => e.key === 'Enter' && void applyLicense()}
+              />
+              {licenseKey.trim() && (
+                <button onClick={() => void applyLicense()} disabled={licenseBusy}
+                  style={{
+                    marginTop: 8, padding: '8px 16px', borderRadius: 10,
+                    cursor: licenseBusy ? 'wait' : 'pointer',
+                    background: BASE.goldMid, border: `1px solid ${BASE.borderGold}`,
+                    color: BASE.gold, fontFamily: 'Crimson Pro, serif', fontSize: 13,
+                  }}>
+                  {licenseBusy ? 'Checking…' : 'Activate'}
+                </button>
+              )}
+              {licenseError && (
+                <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.khaki, marginTop: 8, lineHeight: 1.5 }}>
+                  {licenseError}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>

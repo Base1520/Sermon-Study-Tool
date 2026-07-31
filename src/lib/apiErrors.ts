@@ -45,6 +45,49 @@ export function friendlyApiError(err: unknown): FriendlyError {
   const msg = innerMessage(raw)
   const hay = `${raw} ${msg}`.toLowerCase()
 
+  // Licensing first. These are not provider failures — nothing is broken, and a
+  // man told "something went wrong" when the real answer is "this part is paid"
+  // will go looking for a bug that does not exist. They also have to outrank the
+  // generic matchers below, because "LICENSE_REQUIRED" would otherwise never be
+  // reached on a string that happens to contain the word billing.
+
+  if (hay.includes('license_required')) {
+    return {
+      headline: 'This part is in the full version',
+      detail:
+        'Everything you have already studied is still yours — open it, ask about it, export it, ' +
+        'and nothing you have goes away. Running a NEW study is what the full version adds. ' +
+        'Paste a license key in settings if you have one.',
+    }
+  }
+
+  if (hay.includes('license_expired')) {
+    return {
+      headline: 'Your license has run out',
+      detail:
+        'Every study you have already run still opens, free, forever. ' +
+        'Renewing turns new studies back on — and your key will still be in the same email it came in.',
+    }
+  }
+
+  if (hay.includes('license_invalid')) {
+    return {
+      headline: 'That license key did not verify',
+      detail:
+        'The most common cause is a partial copy — the key is one long line and email clients ' +
+        'sometimes cut it. Copy the whole thing and paste it again. Your old key was not touched.',
+    }
+  }
+
+  if (hay.includes('input_too_large')) {
+    return {
+      headline: 'That passage is too long',
+      detail:
+        'Study one passage at a time rather than a whole book — the reading is built to work ' +
+        'a unit of thought at a time, and it is a better study for it.',
+    }
+  }
+
   if (hay.includes('credit balance is too low') || hay.includes('billing')) {
     return {
       headline: 'Out of API credits',

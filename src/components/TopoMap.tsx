@@ -726,7 +726,12 @@ function styleCityLabels(labels: CityLabel[], zoom: number): void {
     el.style.fontSize = `${labelPxFor(zoom, base).toFixed(2)}px`
     // Cleared here and re-applied by the declutter pass below, so a label that
     // no longer collides at this zoom springs back to its true position.
-    el.style.transform = ''
+    //
+    // MUST NOT BE `transform`. Leaflet positions a permanent tooltip by setting
+    // el.style.transform to a translate3d() — clearing that does not reset our
+    // nudge, it erases the label's POSITION, dropping every city name onto the
+    // map pane's origin in a pile in the corner. marginTop is ours alone.
+    el.style.marginTop = ''
   }
   declutterLabels(labels)
 }
@@ -753,22 +758,47 @@ function declutterLabels(labels: CityLabel[]): void {
   const ordered = [...visible].sort((a, b) =>
     (a.important === b.important ? a.tier - b.tier : a.important ? -1 : 1))
 
+  // TWO COORDINATE SPACES, AND THEY ARE NOT THE SAME ONE.
+  //
+  // getBoundingClientRect() reports SCREEN pixels: every ancestor CSS transform is
+  // already baked in. style.transform, on the other hand, applies in LAYOUT pixels.
+  //
+  // In PLAIN READ nothing above the map is transformed, so the two spaces coincide
+  // and mixing them is invisible. On the PULPIT desk this same component is mounted
+  // inside a ReactFlow node, and ReactFlow scales the entire canvas — so a rect
+  // there is (zoom x) its layout size, and a nudge computed from that rect moved
+  // every label by 1/zoom times the distance intended. That is why the desk's
+  // labels sat visibly wrong and never settled: re-running the pass just repeated
+  // the same wrong arithmetic at the new zoom.
+  //
+  // Collision DETECTION needs no correction — everything scales together, so
+  // overlap relationships are preserved. Only the nudge distance has to be
+  // converted back into layout space.
+  const probe = visible[0].el
+  const probeScale = probe.offsetWidth > 0
+    ? probe.getBoundingClientRect().width / probe.offsetWidth
+    : 1
+  // Guard against a degenerate scale (a collapsed or hidden ancestor) turning the
+  // division into an absurd offset that throws labels off the map entirely.
+  const scale = probeScale > 0.01 && Number.isFinite(probeScale) ? probeScale : 1
+
   const placed: DOMRect[] = []
   const overlaps = (r: DOMRect) => placed.some(p =>
     r.left < p.right && r.right > p.left && r.top < p.bottom && r.bottom > p.top)
 
   for (const { el } of ordered) {
-    el.style.transform = ''
+    el.style.marginTop = ''
     let rect = el.getBoundingClientRect()
     if (!overlaps(rect)) { placed.push(rect); continue }
 
     // Try alternating up/down in one-line steps. Vertical only — horizontal
     // movement would slide a name away from the dot it belongs to.
-    const step = Math.max(rect.height + 2, 12)
+    // rect.height is screen px; marginTop below is layout px, hence the divide.
+    const step = Math.max(rect.height / scale + 2, 12)
     let settled = false
     for (let i = 1; i <= 4 && !settled; i += 1) {
       for (const dir of [-1, 1]) {
-        el.style.transform = `translateY(${dir * i * step}px)`
+        el.style.marginTop = `${dir * i * step}px`
         rect = el.getBoundingClientRect()
         if (!overlaps(rect)) { settled = true; break }
       }

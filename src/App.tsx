@@ -2,7 +2,8 @@ import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } fro
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels'
 import { motion, AnimatePresence } from 'motion/react'
 import { friendlyApiError, type FriendlyError } from './lib/apiErrors'
-import { HostedAccount, type UpgradeOffer } from './components/HostedAccount'
+import { HostedAccount } from './components/HostedAccount'
+import { offerFromError, type UpgradeOffer } from './lib/hostedError'
 import { PassageInput } from './components/PassageInput'
 import { Desk } from './components/Desk'
 import { CanonicalStrip } from './components/CanonicalStrip'
@@ -522,8 +523,9 @@ export default function App() {
       /* UPGRADE_REQUIRED and SERVICE_PAUSED are not failures — they are the
          server telling the reader what it costs to continue. Show the offer,
          not a red error box. */
-      if (e?.upgrade) {
-        setUpgradeOffer(e.upgrade)
+      const offer = offerFromError(e)
+      if (offer) {
+        setUpgradeOffer(offer)
         setPendingPassage(null)
         setAnalysisStreamId(null)
         setLoading(false)

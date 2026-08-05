@@ -239,6 +239,16 @@ async function me(store) {
   }
 }
 
+/** Buy a one-off block of studies. Deliberately separate from checkout(). */
+async function topup(store) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('topup: OPERATOR_API_URL is not set')
+  const res = await fetch(`${base}/v1/topup`, { method: 'POST', headers: headers(store) })
+  const body = await readJsonOrText(res)
+  if (!res.ok) throw new Error(body?.error || `top-up failed (${res.status})`)
+  return body.url
+}
+
 /** Start a subscription. Returns a Stripe URL for the caller to open. */
 async function checkout(store, { plan, email }) {
   const base = hostedBaseUrl()
@@ -325,6 +335,7 @@ module.exports = {
   ask,
   me,
   checkout,
+  topup,
   redeem,
   claim,
   hostedBaseUrl,

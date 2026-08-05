@@ -398,8 +398,39 @@ async function analyzePassage({
   return result
 }
 
+/**
+ * Strip everything that is not the READING from an analysis before it is used to
+ * generate or to build a cache key.
+ *
+ * `historyId` is the offender. main.js merges it into the object it returns, the
+ * renderer holds that as `analysis` state and sends it straight back on the next
+ * call, and pipeline.js hashes the WHOLE object to build the document cache key.
+ * A per-entry id inside it therefore makes every key unique — so the document
+ * cache has never hit for anyone, on the desktop or the server, no matter how
+ * many people study the same passage. It is the single largest margin lever in
+ * the hosted model and it was silently disabled by an id that has nothing to do
+ * with the reading.
+ *
+ * Anything else that is per-user, per-session or per-install belongs here too.
+ */
+const NON_CONTENT_KEYS = ['historyId', 'studyId', '__studyId', 'savedAt', 'annotations']
+
+function forGeneration(analysis) {
+  if (!analysis || typeof analysis !== 'object') return analysis
+  let stripped = null
+  for (const k of NON_CONTENT_KEYS) {
+    if (k in analysis) {
+      stripped = stripped || { ...analysis }
+      delete stripped[k]
+    }
+  }
+  return stripped || analysis
+}
+
 module.exports = {
   analyzePassage,
+  forGeneration,
+  NON_CONTENT_KEYS,
   analysisCacheKey,
   explicitGeoReferences,
   measurePassage,

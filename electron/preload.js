@@ -51,6 +51,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hostedMe: () => ipcRenderer.invoke('hosted-me'),
   hostedRedeem: (code) => ipcRenderer.invoke('hosted-redeem', code),
   hostedCheckout: (payload) => ipcRenderer.invoke('hosted-checkout', payload),
+  hostedTopup: () => ipcRenderer.invoke('hosted-topup'),
   hostedClaim: () => ipcRenderer.invoke('hosted-claim'),
   licenseSet: (licenseString) => ipcRenderer.invoke('license-set', licenseString),
   licenseCatalog: () => ipcRenderer.invoke('license-catalog'),

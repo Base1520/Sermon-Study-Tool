@@ -297,6 +297,12 @@ app.post('/v1/read', route(async (req, res) => {
   const release = async () => {
     // A reading that failed must leave the claim rideable again, or a man pays a
     // second study to retry something he never received.
+    //
+    // BOUNDED, because an UNCONDITIONAL release turns one credit into unlimited
+    // generations: disconnect mid-stream, the claim goes back to 'analyzed',
+    // ride it again, disconnect again — each attempt spending real Opus tokens
+    // and no attempt ever costing a study. releaseStudyForRetry only restores a
+    // claim that has not already been retried too many times.
     await engine.releaseStudyForRetry(db, studyId).catch(() => {})
     // Nothing to give back if this reading was riding a claim it did not make.
     if (settled || !accountId || ridesPriorClaim) return
@@ -377,11 +383,39 @@ app.post('/v1/read', route(async (req, res) => {
  *     the reader already has a reading
  */
 const MAX_ASKS_PER_DAY = 100
+/** Generous for a real reading (~20KB), far below what could outrun the cap. */
+const MAX_ASK_CHARS = 200_000
 
 app.post('/v1/ask', route(async (req, res) => {
   const { doc, analysis, question, history, vaultNotes } = req.body || {}
   if (!question || !String(question).trim()) return res.status(400).json({ error: 'question is required' })
   if (!doc) return res.status(400).json({ error: 'doc is required' })
+
+  // BOUND THE INPUT. doc, analysis and history are all client-supplied and all
+  // go into the prompt, so their size is a cost the sender picks and Cole pays.
+  // Without this the route is an open Opus proxy with a nice name.
+  const payloadChars = JSON.stringify({ doc, analysis, history, vaultNotes }).length
+  if (payloadChars > MAX_ASK_CHARS) {
+    return res.status(413).json({ error: 'INPUT_TOO_LARGE', message: 'That reading is too large to ask about.' })
+  }
+  if (String(question).length > 2000) {
+    return res.status(413).json({ error: 'INPUT_TOO_LARGE', message: 'That question is too long.' })
+  }
+
+  // An ask must be ABOUT a study someone paid for. An install that has never
+  // run one has nothing to ask about, and letting it through made this the
+  // cheapest way to spend Cole's key without ever taking a credit.
+  if (!req.identity.account) {
+    const { rows } = await db.query(
+      `SELECT 1 FROM study WHERE install_id = $1 LIMIT 1`, [req.identity.installId ?? ''])
+    if (rows.length === 0) {
+      return res.status(402).json({
+        error: 'UPGRADE_REQUIRED',
+        headline: 'Run a study first.',
+        message: 'Questions are answered from a reading. Study a passage and then ask about it.',
+      })
+    }
+  }
 
   const accountId = req.identity.account?.id ?? null
   const installId = req.identity.installId
@@ -511,6 +545,21 @@ app.use((err, _req, res, _next) => {
 // server is holding live studies people have paid for.
 process.on('unhandledRejection', (e) => console.error('[fatal] unhandled rejection:', e?.stack || e))
 process.on('uncaughtException', (e) => console.error('[fatal] uncaught exception:', e?.stack || e))
+
+/**
+ * Clear reservations left behind by crashed work.
+ *
+ * sweepStaleReservations existed and had no caller, so a hold orphaned by a
+ * container restart mid-study sat in the table forever. Combined with an
+ * unbounded in-flight sum that was a brake tightening on its own with every
+ * deploy. Runs every five minutes, and failure is logged rather than fatal —
+ * a sweep that cannot run must not take down a server that is otherwise fine.
+ */
+setInterval(() => {
+  meter.sweepStaleReservations(db)
+    .then((n) => { if (n) console.log(`[meter] swept ${n} stale reservation(s)`) })
+    .catch((e) => console.error('[meter] sweep failed:', e.message))
+}, 5 * 60 * 1000).unref()
 
 const port = process.env.PORT || 8080
 app.listen(port, () => console.log(`[operator] listening on ${port}`))

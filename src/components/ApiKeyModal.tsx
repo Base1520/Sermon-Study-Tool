@@ -45,6 +45,14 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
       .catch(() => setHostedBuild(false))
   }, [])
 
+  // Escape is the reflex every user already has for a modal. Without it, a
+  // first-run hosted user whose only button was disabled had no way out at all.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   const [zoom, setZoom] = useState(1)
   useEffect(() => {
     ;(window as any).electronAPI.getUiZoom?.().then((z: number) => setZoom(z ?? 1)).catch(() => {})
@@ -93,7 +101,10 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
     }
   }
 
-  const canSave = Boolean(key.trim() || hasExistingKey) && !testing
+  // On a hosted build the Anthropic field is hidden, so keying this on it left
+  // the ESV key unsavable and the only button dead — with no Cancel, that was a
+  // modal a first-run user could not get out of.
+  const canSave = Boolean(key.trim() || hasExistingKey || (hostedBuild && esvKey.trim())) && !testing
 
   async function connect() {
     if (!canSave) return
@@ -164,7 +175,10 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
 
         {hostedBuild && (
           <div style={{ marginBottom: 24 }}>
-            <HostedAccount />
+            {/* onChanged is not optional in practice: without it, redeeming a
+                code here updated the server and nothing in the app, so the user
+                sat looking at the same modal wondering whether it had worked. */}
+            <HostedAccount onChanged={onClose} />
           </div>
         )}
 
@@ -333,7 +347,11 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
             }}>
             {testing ? 'Checking connection…' : 'Check & Connect →'}
           </button>
-          {hasExistingKey && (
+          {/* A hosted build must ALWAYS be able to leave this modal. It opens on
+              first launch, its Anthropic field is hidden, and gating the only
+              exit on "do you already have a key" made it a dead end for exactly
+              the person the hosted build exists for. */}
+          {(hasExistingKey || hostedBuild) && (
             <button onClick={onClose}
               style={{
                 padding: '11px 20px', borderRadius: 10, cursor: 'pointer',

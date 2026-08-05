@@ -18,7 +18,7 @@ const ENGINE = path.join(__dirname, '../../electron/plainread')
 const { plainRead, cacheKeyFor } = require(path.join(ENGINE, 'pipeline'))
 const { withRetry, parseModelJSON, checkGenerationInput } = require(path.join(ENGINE, 'runtime'))
 const { priceCall } = require(path.join(ENGINE, 'usage'))
-const { analyzePassage, analysisCacheKey } = require(path.join(ENGINE, 'analyze'))
+const { analyzePassage, analysisCacheKey, forGeneration } = require(path.join(ENGINE, 'analyze'))
 const { askAboutPassage } = require(path.join(ENGINE, 'ask'))
 
 /**
@@ -109,8 +109,12 @@ async function studyCost(db, studyId) {
  * while the rest is still being written, rather than watching a spinner for a
  * hundred seconds.
  */
-async function runPlainRead(db, { analysis, requestedReference, level, accountId, studyId, installId, onSection }) {
+async function runPlainRead(db, { analysis: rawAnalysis, requestedReference, level, accountId, studyId, installId, onSection }) {
   checkGenerationInput({ reference: requestedReference })
+
+  // Strip per-user keys BEFORE anything hashes this. historyId rides in from the
+  // renderer and would make every cache key unique — see forGeneration().
+  const analysis = forGeneration(rawAnalysis)
 
   const pending = []
   const record = makeRecorder(db, { accountId, studyId, reference: requestedReference, installId }, pending)
@@ -271,14 +275,25 @@ async function finishStudy(db, studyId) {
  * Without this, a man whose document failed validation would be charged a second
  * study to try again for something he never received.
  */
+const MAX_RETRIES_PER_STUDY = 3
+
 async function releaseStudyForRetry(db, studyId) {
+  // COUNTED. An unconditional release is a free-generation machine: ride the
+  // claim, disconnect mid-stream, the claim returns to 'analyzed', ride it
+  // again — every attempt spending real Opus tokens and none of them ever
+  // costing a study. Three attempts covers every honest failure (a validation
+  // retry, a dropped connection, a crash) and closes the loop.
   await db.query(
-    `UPDATE study SET state = 'analyzed', updated_at = now()
-      WHERE id = $1 AND state = 'reading'`, [studyId])
+    `UPDATE study
+        SET state = CASE WHEN retries >= $2 THEN 'done' ELSE 'analyzed' END,
+            retries = retries + 1,
+            updated_at = now()
+      WHERE id = $1 AND state = 'reading'`,
+    [studyId, MAX_RETRIES_PER_STUDY])
 }
 
 module.exports = {
   runPlainRead, runAnalyze, makeRecorder, makeCache, preloadCache, writeCache,
   studyCost, openStudy, claimStudyForReading, finishStudy, releaseStudyForRetry,
-  runAsk, askCountToday,
+  runAsk, askCountToday, MAX_RETRIES_PER_STUDY,
 }

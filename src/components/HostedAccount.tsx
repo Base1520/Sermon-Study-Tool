@@ -28,15 +28,9 @@ interface Entitlement {
   plans?: Record<string, { label: string; priceUsd: number; studiesPerMonth: number }>
 }
 
-/** The server's own words when it refuses. Never paraphrase these. */
-export interface UpgradeOffer {
-  error?: string
-  code?: string
-  headline?: string
-  body?: string
-  message?: string
-  actions?: Array<{ kind?: string; plan?: string; label: string }>
-}
+// The offer type lives in lib/hostedError.ts beside the decoder that produces it.
+import type { UpgradeOffer } from '../lib/hostedError'
+export type { UpgradeOffer }
 
 const api = () => (window as any).electronAPI
 
@@ -94,7 +88,9 @@ export function HostedAccount({ offer, onClose, onChanged }: {
     if (busy) return
     setBusy(true); setError(null)
     try {
-      await api().hostedCheckout({ plan })
+      // 'topup' is a one-off purchase, not a plan change. Routing it through
+      // the subscription checkout would try to start a second subscription.
+      if (plan === 'topup') { await api().hostedTopup() } else { await api().hostedCheckout({ plan }) }
       setNote('Checkout opened in your browser. Come back when you are done — this will pick it up.')
       // The app never sees the browser's return, so it asks the server instead.
       // "Not yet" is a normal answer here; the webhook and the customer's

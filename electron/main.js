@@ -15,7 +15,7 @@ const { createRecorder, summarize } = require('./plainread/usage')
 // The analysis fan-out lives in the engine, not here, so the hosted server can
 // run the identical calls. This file keeps only what is genuinely the desktop's:
 // the electron-store cache, the history dedupe, the gate and the secret.
-const { analyzePassage, analysisCacheKey, explicitGeoReferences } = require('./plainread/analyze')
+const { analyzePassage, analysisCacheKey, explicitGeoReferences, forGeneration } = require('./plainread/analyze')
 // The hosted path. Inert unless OPERATOR_API_URL is set — see hosted/client.js.
 const hosted = require('./hosted/client')
 
@@ -29,17 +29,47 @@ const hosted = require('./hosted/client')
  * smuggling a unique id inside it would make every key unique and switch the
  * shared cache off entirely — the exact margin lever this work just repaired.
  */
-const hostedStudyIds = new Map()
+const STUDY_ID_KEY = 'hosted-study-ids'
+const studyKey = (reference) => String(reference ?? '').trim().toLowerCase()
+
+/**
+ * PERSISTED, not in-memory.
+ *
+ * It was a Map, and that quietly cost people money. A free user analyses a
+ * passage — spending his ONE lifetime credit — closes the app, comes back and
+ * opens the reader. The Map is gone, so the reading cannot ride the claim he
+ * already paid for; it asks for a new one, and he has none. He is shown a
+ * paywall for the second half of a study he already bought, with no way to
+ * recover it. For a subscriber it is the same event billed as a second study.
+ */
 const rememberStudy = (reference, studyId) => {
-  if (!reference || !studyId) return
-  hostedStudyIds.set(String(reference).trim().toLowerCase(), studyId)
-  // Bounded. A long session must not accumulate ids forever.
-  if (hostedStudyIds.size > 50) {
-    hostedStudyIds.delete(hostedStudyIds.keys().next().value)
+  if (!reference || !studyId || !store) return
+  const all = store.get(STUDY_ID_KEY, {})
+  all[studyKey(reference)] = { studyId, at: Date.now() }
+  // Bounded, oldest first, so a long-lived install does not grow this forever.
+  const keys = Object.keys(all)
+  if (keys.length > 50) {
+    keys.sort((a, b) => (all[a].at ?? 0) - (all[b].at ?? 0))
+    for (const k of keys.slice(0, keys.length - 50)) delete all[k]
   }
+  store.set(STUDY_ID_KEY, all)
 }
-const recallStudy = (reference) =>
-  hostedStudyIds.get(String(reference ?? '').trim().toLowerCase()) ?? null
+
+const recallStudy = (reference) => {
+  const entry = store?.get(STUDY_ID_KEY, {})?.[studyKey(reference)]
+  if (!entry) return null
+  // A claim the server has long since closed is worse than none: sending it
+  // just fails the ride and takes a fresh study anyway. A day is generous.
+  if (Date.now() - (entry.at ?? 0) > 24 * 60 * 60 * 1000) return null
+  return entry.studyId
+}
+
+const forgetStudy = (reference) => {
+  if (!store) return
+  const all = store.get(STUDY_ID_KEY, {})
+  delete all[studyKey(reference)]
+  store.set(STUDY_ID_KEY, all)
+}
 
 /**
  * Turn a server refusal into something the renderer can render.
@@ -50,13 +80,32 @@ const recallStudy = (reference) =>
  */
 function asRendererError(e) {
   if (e instanceof hosted.HostedRefusal) {
-    const err = new Error(e.payload?.headline || e.message)
+    /**
+     * ELECTRON DESTROYS CUSTOM ERROR PROPERTIES ACROSS IPC.
+     *
+     * An Error thrown from an ipcMain.handle reaches the renderer as a plain
+     * Error whose message is the original message — every extra field is gone.
+     * So `err.upgrade = payload` looked right, passed review, and arrived as
+     * undefined: the renderer's `if (e?.upgrade)` never fired and every paywall
+     * rendered as a red SYSTEM FAULT box. The subscribe buttons were
+     * unreachable, which means nobody could ever have paid.
+     *
+     * The offer therefore travels INSIDE the message, as a tagged JSON string
+     * the renderer parses back out. Ugly, and the only thing that survives.
+     */
+    const err = new Error(`${OFFER_TAG}${JSON.stringify({
+      code: e.code,
+      status: e.status,
+      ...(e.payload || {}),
+    })}`)
     err.code = e.code
-    err.upgrade = e.payload
     return err
   }
   return e
 }
+
+/** The marker the renderer looks for. Must match src/lib/hostedError.ts. */
+const OFFER_TAG = '__OPERATOR_OFFER__'
 const licenseStore = require('./license/store')
 const { initLicenseStore, touchClock } = licenseStore
 const { FEATURES } = require('./license/features')
@@ -156,12 +205,33 @@ function hasEmbeddedSecret(name) {
  * about whose key is being spent without ever seeing the key itself.
  */
 function secretStatus() {
+  /**
+   * A HOSTED BUILD ALREADY HAS AN ANTHROPIC KEY — IT IS JUST NOT ON THIS MACHINE.
+   *
+   * This is the flag the renderer uses as "may this install generate?" (App.tsx
+   * gates SEND IT and the reader on it). Reporting false on a hosted build made
+   * the entire app dead on arrival: the user pressed SEND IT, the renderer
+   * returned before any IPC, and the settings modal it opened had no key field
+   * to fill in — because on a hosted build the key form is deliberately hidden.
+   * Every hosted branch in this file was unreachable code on a downloaded build.
+   *
+   * Precedent is `hasEmbeddedSecret`, which reports true for a key the user also
+   * never sees. Same idea: the question is "can work be done", not "is there a
+   * string in this store".
+   */
+  const hostedKey = Boolean(hosted.hostedBaseUrl())
   const status = Object.fromEntries(
-    SECRET_NAMES.map((name) => [name, Boolean(readSecret(name)) || hasEmbeddedSecret(name)]),
+    SECRET_NAMES.map((name) => [
+      name,
+      Boolean(readSecret(name)) || hasEmbeddedSecret(name) ||
+        (name === 'ANTHROPIC_KEY' && hostedKey),
+    ]),
   )
   status.embedded = Object.fromEntries(
     SECRET_NAMES.map((name) => [name, hasEmbeddedSecret(name) && !readSecret(name)]),
   )
+  // So the UI can say whose key is being spent without ever seeing one.
+  status.hosted = hostedKey
   return status
 }
 
@@ -494,6 +564,14 @@ ipcMain.handle('hosted-checkout', async (_, { plan, email }) => {
  * browser's return. "Not yet" is a normal answer, not an error — the webhook
  * and the customer's browser race each other.
  */
+/** Buy more studies. One-off, never a stored intent. */
+ipcMain.handle('hosted-topup', async () => {
+  if (!hosted.hostedBaseUrl()) throw new Error('This build is not connected to the server.')
+  const url = await hosted.topup(store)
+  await shell.openExternal(url)
+  return { ok: true, url }
+})
+
 ipcMain.handle('hosted-claim', async () => {
   if (!hosted.hostedBaseUrl()) return { ok: false }
   return hosted.claim(store)
@@ -782,7 +860,7 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) =
 // not the pastor, so none of it may cross this boundary. Do not add a
 // store.get('scholar-profile') here, and do not pass a profile through the
 // payload. The only thing that goes to the model is the passage analysis.
-const { plainRead } = require('./plainread/pipeline')
+const { plainRead, cacheKeyFor } = require('./plainread/pipeline')
 
 // `level` is optional and passed straight through. Omitted, pipeline.js falls
 // back to DEFAULT_LEVEL, whose system prompt is byte-identical to the one used
@@ -865,10 +943,27 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
   // Same streaming contract as the local path: onSection(key, value) forwarded
   // to the same renderer event, so the desk cannot tell the two apart.
   if (hosted.hostedBaseUrl()) {
+    /**
+     * THE LOCAL CACHE IS CHECKED FIRST, and that is not an optimisation.
+     *
+     * Re-opening a study you already ran must be free. Without this, every
+     * re-open went to the server, which CHARGES BEFORE it checks its own cache —
+     * so a reader who opened last week's study three times paid three times, and
+     * a free user could not re-open his one study at all. The desktop already
+     * keeps every document it has generated; hand it back.
+     */
+    const cleanAnalysis = forGeneration(analysis)
+    const localKey = cacheKeyFor(cleanAnalysis, level)
+    const cachedDoc = store?.get(localKey, null)
+    if (cachedDoc && !force) {
+      __done('served from local cache')
+      return cachedDoc
+    }
+
     const priorStudyId = recallStudy(requestedReference ?? analysis?.reference)
     try {
       const doc = await hosted.plainRead(store, {
-        analysis,
+        analysis: forGeneration(analysis),
         reference: requestedReference ?? analysis?.reference,
         level,
         studyId: priorStudyId,
@@ -890,7 +985,10 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
       })
       // The claim is spent. Holding the id would make a re-read of the same
       // passage try to ride a study the server has already closed.
-      hostedStudyIds.delete(String(requestedReference ?? analysis?.reference ?? '').trim().toLowerCase())
+      forgetStudy(requestedReference ?? analysis?.reference)
+      // Written under the key the read above looks for, so the next open of this
+      // study costs nothing. Same contract as the local path's own cache.
+      try { if (store && doc) store.set(localKey, doc) } catch {}
       __done('hosted done')
       return doc
     } catch (e) {
@@ -901,7 +999,10 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
 
   try {
   return await plainRead({
-    analysis,
+    // Same strip as the server. The local cache is keyed the same way, so this
+    // has been silently disabled on the desktop too — every reader has been
+    // regenerating documents he had already paid for.
+    analysis: forGeneration(analysis),
     apiKey: requireSecret('ANTHROPIC_KEY', 'Anthropic'),
     // Fires only on a cache miss, so a study already generated re-opens free.
     onCacheMiss: () => requireFeature('gen.read'),

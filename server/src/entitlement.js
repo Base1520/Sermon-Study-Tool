@@ -30,6 +30,9 @@
  * top-up — so nobody can save money by staying small and topping up, which is
  * how a badly-priced overage cannibalises its own subscriptions.
  */
+/** Where "move up" actually goes. Heavy is the top, so it has no next. */
+const NEXT_PLAN_UP = { free: 'starter', starter: 'standard', standard: 'heavy' }
+
 const PLANS = {
   free: {
     label: 'Field',
@@ -130,13 +133,22 @@ function upgradePrompt(ent, { used = 0 } = {}) {
     body:
       'Everything you have already studied is still here — read it, ask about it, ' +
       'export it. Nothing you paid for goes away.',
+    // Every action names the thing it DOES. They used to carry only a `kind`,
+    // and the renderer keys its buttons off `plan` — so a subscriber who ran out
+    // mid-month was shown a heading and no buttons at all, with no way to buy
+    // the top-up this very object was offering him.
     actions: [
-      { kind: 'topup', label: `Add ${TOPUP.studies} studies — $${TOPUP.priceUsd}` },
-      ...(ent.plan !== 'heavy'
-        ? [{ kind: 'upgrade', label: `Move up — more studies, cheaper each` }]
-        : []),
+      { kind: 'topup', plan: 'topup', label: `Add ${TOPUP.studies} studies — $${TOPUP.priceUsd}` },
+      ...NEXT_PLAN_UP[ent.plan]
+        ? [{
+            kind: 'upgrade',
+            plan: NEXT_PLAN_UP[ent.plan],
+            label: `${PLANS[NEXT_PLAN_UP[ent.plan]].label} — $${PLANS[NEXT_PLAN_UP[ent.plan]].priceUsd}/mo · ` +
+                   `${PLANS[NEXT_PLAN_UP[ent.plan]].studiesPerMonth} studies`,
+          }]
+        : [],
     ],
   }
 }
 
-module.exports = { PLANS, TOPUP, entitlementFor, upgradePrompt, perStudy }
+module.exports = { PLANS, TOPUP, entitlementFor, upgradePrompt, perStudy, NEXT_PLAN_UP }

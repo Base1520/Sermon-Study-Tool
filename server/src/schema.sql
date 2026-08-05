@@ -185,6 +185,10 @@ CREATE TABLE IF NOT EXISTS study (
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
+-- How many times this claim has been handed back after a failed reading. An
+-- unbounded retry is an unbounded spend on one credit — see releaseStudyForRetry.
+ALTER TABLE study ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS study_account_idx ON study(account_id, created_at);
 CREATE INDEX IF NOT EXISTS study_install_idx ON study(install_id, created_at);
 

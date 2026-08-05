@@ -25,6 +25,17 @@ const { PLANS, TOPUP } = require('./entitlement')
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' })
 
+/**
+ * Same wrapper as index.js, and needed for the same reason.
+ *
+ * express 4 does not catch a rejected handler promise. Every route in this file
+ * awaits Stripe's API — the single most likely thing in the stack to time out or
+ * 500 — and an unwrapped rejection means the request gets NO response at all:
+ * the app's subscribe button spins forever, and the rejection escapes to the
+ * process, where Node's default is to terminate.
+ */
+const route = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+
 /** Map a Stripe price id to one of our plans. Set these in the environment. */
 const PRICE_TO_PLAN = {
   [process.env.STRIPE_PRICE_STARTER]: 'starter',
@@ -134,7 +145,7 @@ async function creditTopUp(db, session) {
 
 function mount(app, db) {
   // ── Start a subscription ──────────────────────────────────────────────────
-  app.post('/v1/checkout', async (req, res) => {
+  app.post('/v1/checkout', route(async (req, res) => {
     const { plan, email } = req.body || {}
     if (!PLANS[plan] || plan === 'free') return res.status(400).json({ error: 'unknown plan' })
 
@@ -182,10 +193,10 @@ function mount(app, db) {
       allow_promotion_codes: true,
     })
     res.json({ url: session.url })
-  })
+  }))
 
   // ── Buy more studies, deliberately, never automatically ───────────────────
-  app.post('/v1/topup', async (req, res) => {
+  app.post('/v1/topup', route(async (req, res) => {
     const customerId = req.identity.account?.stripeCustomerId
     if (!customerId) return res.status(401).json({ error: 'sign in first' })
     if (!process.env.STRIPE_PRICE_TOPUP) return res.status(500).json({ error: 'top-up not configured' })
@@ -198,10 +209,10 @@ function mount(app, db) {
       cancel_url: `${process.env.PUBLIC_URL}/`,
     })
     res.json({ url: session.url, studies: TOPUP.studies, priceUsd: TOPUP.priceUsd })
-  })
+  }))
 
   // ── Manage or cancel — Stripe hosts it, so we never build a billing UI ────
-  app.post('/v1/portal', async (req, res) => {
+  app.post('/v1/portal', route(async (req, res) => {
     const customerId = req.identity.account?.stripeCustomerId
     if (!customerId) return res.status(401).json({ error: 'sign in first' })
     const session = await stripe.billingPortal.sessions.create({
@@ -209,7 +220,7 @@ function mount(app, db) {
       return_url: process.env.PUBLIC_URL,
     })
     res.json({ url: session.url })
-  })
+  }))
 
   /**
    * Collect the subscription this install just paid for.
@@ -223,7 +234,7 @@ function mount(app, db) {
    * created, so only the app that started the checkout can collect the token.
    * The token is returned ONCE and only its hash is stored.
    */
-  app.post('/v1/claim', async (req, res) => {
+  app.post('/v1/claim', route(async (req, res) => {
     const installId = req.identity.installId
     if (!installId) return res.status(400).json({ error: 'x-install-id header required' })
 
@@ -252,18 +263,18 @@ function mount(app, db) {
       accountId: account.id, installId, label: 'The Operator',
     })
     res.json({ token, email: account.email, ...state })
-  })
+  }))
 
   // Called when the browser comes back from checkout, so entitlement is correct
   // immediately rather than whenever the webhook lands. Same function, so the
   // two can never disagree.
-  app.get('/v1/checkout/confirm', async (req, res) => {
+  app.get('/v1/checkout/confirm', route(async (req, res) => {
     const { session_id } = req.query
     if (!session_id) return res.status(400).json({ error: 'session_id required' })
     const session = await stripe.checkout.sessions.retrieve(String(session_id))
     const state = await syncCustomer(db, String(session.customer))
     res.json({ ok: true, ...state })
-  })
+  }))
 }
 
 module.exports = { mount, mountWebhook, syncCustomer, creditTopUp, PRICE_TO_PLAN }

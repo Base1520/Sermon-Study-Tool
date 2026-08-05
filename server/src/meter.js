@@ -215,8 +215,16 @@ async function committedSpend(db, { hours = 24 } = {}) {
         WHERE at > now() - ($1 || ' hours')::interval`,
       [hours],
     ),
+    // TIME-BOUNDED. A reservation is money promised for work in flight, and work
+    // in flight lasts minutes. Summing every reserved_usd ever written meant a
+    // hold leaked by a crash or a redeploy counted against the ceiling FOREVER —
+    // each deploy ratcheting the brake tighter until it eventually paused a
+    // service that was spending nothing.
     db.query(
-      `SELECT COALESCE(SUM(reserved_usd), 0) AS in_flight FROM usage_period`,
+      `SELECT COALESCE(SUM(reserved_usd), 0) AS in_flight
+         FROM usage_period
+        WHERE updated_at > now() - ($1 || ' minutes')::interval`,
+      [RESERVATION_TTL_MINUTES],
     ),
   ])
   const reconciled = Number(spent.rows[0].reconciled)

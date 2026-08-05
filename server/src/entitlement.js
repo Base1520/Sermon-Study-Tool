@@ -1,0 +1,126 @@
+/**
+ * entitlement.js — what a given account is allowed to do, and what it costs.
+ *
+ * THE SHAPE OF THE PRODUCT, in one file:
+ *
+ *   Download it and it works. No account, no key, no setup — that is the whole
+ *   lesson of the beta, where seven men asked for the tool, two downloaded it,
+ *   and none ran a study. The wall was never the app; it was being asked to go
+ *   get an API key first.
+ *
+ *   FREE gets the pre-generated library and ONE live study, ever. The library
+ *   costs a fixed amount to build once and serves every free user forever at
+ *   zero marginal cost, because a cache hit never touches a model. The single
+ *   live study is what makes the free tier honest — a man gets to run HIS OWN
+ *   passage, not a demo someone chose for him — and it is bounded: a thousand
+ *   free users is a one-time cost, not a recurring one.
+ *
+ *   PAID gets a monthly allowance. The upgrade prompt appears when the free
+ *   study is spent, at the exact moment its value has just been demonstrated.
+ *
+ * WHY ENTITLEMENT IS SERVER-SIDE AND KEYED TO AN ACCOUNT, NOT A DEVICE:
+ * a phone has to be able to pick up the same subscription later. Tie it to a
+ * machine and mobile becomes a migration; tie it to an account and mobile is
+ * just another sign-in.
+ */
+
+/**
+ * The tiers. Every allowance is priced so the tier is profitable even if every
+ * subscriber maxes it out, and every tier is CHEAPER PER STUDY than buying a
+ * top-up — so nobody can save money by staying small and topping up, which is
+ * how a badly-priced overage cannibalises its own subscriptions.
+ */
+const PLANS = {
+  free: {
+    label: 'Field',
+    priceUsd: 0,
+    studiesPerMonth: 0,
+    lifetimeStudies: 1,          // one live study, ever — the taste of the real thing
+    library: true,
+  },
+  starter: { label: 'Starter',  priceUsd: 30,  studiesPerMonth: 40,  library: true },
+  standard:{ label: 'Standard', priceUsd: 50,  studiesPerMonth: 80,  library: true },
+  heavy:   { label: 'Heavy',    priceUsd: 150, studiesPerMonth: 300, library: true },
+}
+
+/** Bought deliberately, never auto-charged. Priced ABOVE every tier's per-study rate. */
+const TOPUP = { label: 'Top-up', priceUsd: 15, studies: 15 }
+
+/** Per-study price at each tier, and the guarantee that the ladder points the right way. */
+function perStudy(plan) {
+  const p = PLANS[plan]
+  if (!p || !p.studiesPerMonth) return null
+  return p.priceUsd / p.studiesPerMonth
+}
+
+/**
+ * Resolve what this account may do right now.
+ *
+ * Deliberately tolerant of a missing or unknown plan — an account row that has
+ * drifted out of step with Stripe should degrade to free, never to an error. A
+ * man who cannot be identified still gets the library.
+ */
+function entitlementFor(account) {
+  const planKey = PLANS[account?.plan] ? account.plan : 'free'
+  const plan = PLANS[planKey]
+
+  // Status is set explicitly rather than inferred, because Stripe's default
+  // grace period leaves a subscription "active" after a card fails — the single
+  // most expensive default in this stack for a metered product.
+  const paying = planKey !== 'free' && account?.status === 'active'
+
+  return {
+    plan: planKey,
+    label: plan.label,
+    paying,
+    library: true,                         // always, for everyone, forever
+    allowance: paying ? plan.studiesPerMonth : 0,
+    lifetimeStudies: plan.lifetimeStudies ?? 0,
+    perStudyUsd: perStudy(planKey),
+  }
+}
+
+/**
+ * The upgrade prompt — what the user is told when the door closes.
+ *
+ * Two rules, both learned from products that got this wrong:
+ *
+ *  1. LEAD WITH WHAT HE STILL HAS. Everything already studied stays readable,
+ *     forever, licensed or not. It cost real money once and it is his. A paywall
+ *     that appears to take something away is the one that gets resented.
+ *  2. NEVER AUTO-CHARGE. The top-up is a deliberate two-click purchase. An
+ *     unexpected $15 does more damage to a bivocational pastor than a lockout
+ *     ever will, and bill shock is the best-documented driver of churn in
+ *     usage-priced products.
+ */
+function upgradePrompt(ent, { used = 0 } = {}) {
+  if (!ent.paying) {
+    return {
+      code: 'FREE_STUDY_SPENT',
+      headline: 'That was your free study.',
+      body:
+        'It stays here — read it, ask about it, export it, come back to it in a year. ' +
+        'So does everything in the library. What a subscription adds is running new ' +
+        'passages of your own choosing, whenever you want.',
+      actions: [
+        { kind: 'subscribe', plan: 'starter',  label: `Starter — $${PLANS.starter.priceUsd}/mo · ${PLANS.starter.studiesPerMonth} studies` },
+        { kind: 'subscribe', plan: 'standard', label: `Standard — $${PLANS.standard.priceUsd}/mo · ${PLANS.standard.studiesPerMonth} studies` },
+      ],
+    }
+  }
+  return {
+    code: 'ALLOWANCE_SPENT',
+    headline: `You've used all ${ent.allowance} studies this month.`,
+    body:
+      'Everything you have already studied is still here — read it, ask about it, ' +
+      'export it. Nothing you paid for goes away.',
+    actions: [
+      { kind: 'topup', label: `Add ${TOPUP.studies} studies — $${TOPUP.priceUsd}` },
+      ...(ent.plan !== 'heavy'
+        ? [{ kind: 'upgrade', label: `Move up — more studies, cheaper each` }]
+        : []),
+    ],
+  }
+}
+
+module.exports = { PLANS, TOPUP, entitlementFor, upgradePrompt, perStudy }

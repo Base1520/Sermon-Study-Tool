@@ -24,6 +24,21 @@ const engine = require('./engine')
 const db = new Pool({ connectionString: process.env.DATABASE_URL })
 const app = express()
 app.set('trust proxy', 1)
+
+// THE WEBHOOK IS MOUNTED FIRST, AND THAT ORDER IS THE WHOLE POINT.
+//
+// Stripe signs the raw request bytes. express.json() consumes the stream and
+// hands the route a parsed object, and constructEvent() cannot verify an
+// object — so with the parser registered first, EVERY webhook failed its
+// signature check and returned 400. Stripe kept retrying, every retry failed,
+// and no subscription state ever reached this database: a customer's payment
+// succeeded and their account stayed 'free' forever, while a customer whose
+// card failed stayed 'active' and kept spending Cole's tokens.
+//
+// Proven, not assumed: an express app with json() before raw() delivers
+// `typeof req.body === 'object'` to the raw handler.
+require('./stripe').mountWebhook(app, db)
+
 app.use(express.json({ limit: '256kb' }))   // a passage is small; anything larger is abuse
 app.use(auth.middleware(db))
 
@@ -139,6 +154,14 @@ app.post('/v1/analyze', async (req, res) => {
   if (refused) return res.status(refused.status).json(refused.body)
 
   const studyId = newStudyId()
+  // The claim is written BEFORE the work, and never depends on the work. A cache
+  // hit spends nothing and writes no usage rows; inferring ownership from usage
+  // meant a cached analysis produced a study its owner could not prove — and
+  // being served from cache is the COMMON case, not the rare one.
+  await engine.openStudy(db, {
+    studyId, accountId, installId: req.identity.installId, reference,
+  })
+
   try {
     const { analysis, cached } = await engine.runAnalyze(db, {
       text, reference, accountId, studyId, installId: req.identity.installId,
@@ -149,8 +172,15 @@ app.post('/v1/analyze', async (req, res) => {
     }
     res.json({ analysis, studyId, cached })
   } catch (e) {
-    // A study that never ran must not eat the allowance.
-    if (accountId) await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
+    // "No result returned" is NOT "no money spent". The fan-out runs up to three
+    // calls in parallel and only two are fatal, so a failure here routinely lands
+    // AFTER real tokens were billed. Book what was actually spent before handing
+    // the credit back, or a retry loop burns money the ceiling never sees.
+    if (accountId) {
+      const spent = await engine.studyCost(db, studyId).catch(() => 0)
+      await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
+      await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+    }
     const code = e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'ANALYSIS_FAILED'
     res.status(code === 'INPUT_TOO_LARGE' ? 413 : 500)
        .json({ error: code, message: e?.message || 'The analysis could not be completed.' })
@@ -180,10 +210,12 @@ app.post('/v1/read', async (req, res) => {
   // downloads this app would get an analysis and a paywall, and the paywall's own
   // words — "it stays here, read it, export it" — would be describing a document
   // that was never written. One credit has to buy a whole study.
-  const ridesPriorClaim =
-    !!priorStudyId &&
-    await engine.studyBelongsTo(db, priorStudyId, { accountId, installId: req.identity.installId }) &&
-    !(await engine.studyHasDocument(db, priorStudyId))
+  // ATOMIC. Two simultaneous readings used to be able to both observe "no
+  // document yet" and both generate — one claim, two bills, both Cole's. This is
+  // a conditional UPDATE, so exactly one caller can take a study's one document.
+  const ridesPriorClaim = await engine.claimStudyForReading(db, {
+    studyId: priorStudyId, accountId, installId: req.identity.installId,
+  })
 
   if (!ridesPriorClaim) {
     const refused = await claimStudy(req, { ent, accountId, periodStart, periodEnd })
@@ -194,8 +226,15 @@ app.post('/v1/read', async (req, res) => {
   // verify pass rolled up as one study in the ledger — which is what makes
   // cost-per-study a measured number rather than an estimate.
   const studyId = ridesPriorClaim ? priorStudyId : newStudyId()
+  if (!ridesPriorClaim) {
+    await engine.openStudy(db, { studyId, accountId, installId: req.identity.installId, reference })
+    await engine.claimStudyForReading(db, { studyId, accountId, installId: req.identity.installId })
+  }
   let settled = false
   const release = async () => {
+    // A reading that failed must leave the claim rideable again, or a man pays a
+    // second study to retry something he never received.
+    await engine.releaseStudyForRetry(db, studyId).catch(() => {})
     // Nothing to give back if this reading was riding a claim it did not make.
     if (settled || !accountId || ridesPriorClaim) return
     settled = true
@@ -228,7 +267,12 @@ app.post('/v1/read', async (req, res) => {
     const doc = await engine.runPlainRead(db, {
       analysis, requestedReference: reference, level, accountId, studyId,
       installId: req.identity.installId,
-      onSection: (section) => { if (!aborted) send({ type: 'section', section }) },
+      // TWO ARGUMENTS. The engine calls onSection(key, value); a one-parameter
+      // handler here captured the key and silently dropped every section's
+      // CONTENT, so the stream carried 39 section names and no text. The reader
+      // saw nothing for the full ~163 seconds and then the whole document at
+      // once — the exact failure the note at the top of this file warns about.
+      onSection: (key, value) => { if (!aborted) send({ type: 'section', key, value }) },
     })
 
     clearInterval(beat)
@@ -244,6 +288,7 @@ app.post('/v1/read', async (req, res) => {
       ).catch(() => {})
     }
 
+    await engine.finishStudy(db, studyId).catch(() => {})
     send({ type: 'done', document: doc, studyId })
     res.end()
   } catch (e) {
@@ -253,6 +298,79 @@ app.post('/v1/read', async (req, res) => {
     send({ type: 'error', code, message: e?.message || 'The reading could not be completed.' })
     res.end()
   }
+})
+
+// ── Redeem an access code ───────────────────────────────────────────────────
+/**
+ * Comped access, no card, no Stripe.
+ *
+ * Cole and Rikki must not be paying to use their own product, and Cole needs to
+ * be able to hand a working copy to a beta tester or a pastor without asking for
+ * a credit card first. A code creates a real account and issues a real device
+ * token, so a comped user travels the identical code path as a paying one —
+ * which is the only way the comped path stays tested.
+ *
+ * Deliberately NOT a magic build or a hidden flag in the app. A comp that lives
+ * on the server can be revoked the moment a code leaks; a comp compiled into a
+ * binary is permanent and public the day someone posts it.
+ */
+app.post('/v1/redeem', async (req, res) => {
+  const raw = String((req.body || {}).code || '').trim().toUpperCase()
+  const installId = req.identity.installId
+  if (!raw) return res.status(400).json({ error: 'code required' })
+  if (!installId) return res.status(400).json({ error: 'x-install-id header required' })
+
+  const { rows } = await db.query(
+    `SELECT code, plan, label, uses_max, uses_count, revoked_at
+       FROM access_code WHERE code = $1`, [raw])
+  const code = rows[0]
+
+  // One message for "wrong" and "revoked" and "used up", on purpose: a distinct
+  // reply for each turns this endpoint into an oracle for guessing codes.
+  const refuse = () => res.status(404).json({
+    error: 'INVALID_CODE',
+    message: "That code isn't valid. Check it and try again.",
+  })
+  if (!code || code.revoked_at) return refuse()
+
+  // Already redeemed on this install — hand back a token rather than refusing,
+  // so reinstalling the app is not a dead end.
+  const prior = await db.query(
+    `SELECT account_id FROM access_code_use WHERE code = $1 AND install_id = $2`,
+    [raw, installId])
+
+  let accountId = prior.rows[0]?.account_id ?? null
+
+  if (!accountId) {
+    if (code.uses_max !== null && code.uses_count >= code.uses_max) return refuse()
+
+    // Claim a use FIRST, conditionally, so two simultaneous redemptions of a
+    // single-use code cannot both succeed.
+    const claimed = await db.query(
+      `UPDATE access_code SET uses_count = uses_count + 1
+        WHERE code = $1 AND revoked_at IS NULL
+          AND (uses_max IS NULL OR uses_count < uses_max)
+        RETURNING uses_count`,
+      [raw])
+    if (claimed.rows.length === 0) return refuse()
+
+    const created = await db.query(
+      `INSERT INTO account (email, plan, status, install_id)
+            VALUES ($1, $2, 'active', $3)
+       ON CONFLICT (email) DO UPDATE SET plan = EXCLUDED.plan, status = 'active'
+        RETURNING id`,
+      [`${raw.toLowerCase()}.${installId}@comp.invalid`, code.plan, installId],
+    )
+    accountId = created.rows[0].id
+    await db.query(
+      `INSERT INTO access_code_use (code, install_id, account_id) VALUES ($1,$2,$3)
+       ON CONFLICT (code, install_id) DO NOTHING`,
+      [raw, installId, accountId])
+  }
+
+  const token = await auth.issueDeviceToken(db, { accountId, installId, label: code.label || 'Comp' })
+  const { rows: acct } = await db.query(`SELECT plan, status FROM account WHERE id = $1`, [accountId])
+  res.json({ token, ...entitlementFor(acct[0]), label: code.label ?? null })
 })
 
 // ── Stripe ──────────────────────────────────────────────────────────────────

@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS account (
   paid_through    timestamptz
 );
 
+-- Which install started the checkout that created this account. Without it a man
+-- can pay $30 and the desktop app has no way to learn that the payment was his —
+-- he comes back from Stripe still anonymous and still behind the free-tier wall.
+-- This is what /v1/claim matches on to hand his install a device token.
+ALTER TABLE account ADD COLUMN IF NOT EXISTS install_id text;
+CREATE INDEX IF NOT EXISTS account_install_idx ON account(install_id);
+
 -- ── Devices ─────────────────────────────────────────────────────────────────
 -- A desktop app cannot hold a browser session. Each install gets a long-lived
 -- bearer token tied to an account, revocable individually so one shared laptop
@@ -114,6 +121,72 @@ CREATE TABLE IF NOT EXISTS document_cache (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- ── Access codes ────────────────────────────────────────────────────────────
+-- Comped access, handed out by Cole. Two reasons this is a table and not a
+-- constant in the code: a code must be revocable the moment it leaks, and Cole
+-- must be able to see who used one without reading a deploy log.
+--
+-- `uses_max` NULL means unlimited redemptions of the same code (a launch code);
+-- 1 means a personal code that dies when it is claimed.
+CREATE TABLE IF NOT EXISTS access_code (
+  code        text PRIMARY KEY,
+  plan        text NOT NULL DEFAULT 'comp',
+  label       text,                        -- 'Cole', 'Rikki', 'Beta 7'
+  uses_max    int,                         -- NULL = unlimited
+  uses_count  int NOT NULL DEFAULT 0,
+  revoked_at  timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS access_code_use (
+  code       text NOT NULL REFERENCES access_code(code) ON DELETE CASCADE,
+  install_id text NOT NULL,
+  account_id uuid REFERENCES account(id) ON DELETE SET NULL,
+  at         timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (code, install_id)          -- redeeming twice on one install is a no-op
+);
+
+-- ── Top-ups ─────────────────────────────────────────────────────────────────
+-- A $15 top-up used to take the money and grant nothing: no webhook path, no
+-- column, no ledger. The session id is the idempotency key, because Stripe
+-- delivers events more than once and a double-credit is as wrong as none.
+CREATE TABLE IF NOT EXISTS topup (
+  session_id         text PRIMARY KEY,
+  stripe_customer_id text,
+  studies            int NOT NULL,
+  at                 timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE account ADD COLUMN IF NOT EXISTS topup_studies int NOT NULL DEFAULT 0;
+
+-- ── Studies ─────────────────────────────────────────────────────────────────
+-- A study is a CLAIM, written the moment one is charged for, and it is the only
+-- thing /v1/read authorises against.
+--
+-- Ownership used to be inferred from usage_event — "did this caller's id appear
+-- on a model call for this study?" — which was wrong in the most common case in
+-- the product: a cache HIT spends nothing, writes no usage rows, and therefore
+-- produced a study nobody could prove they owned. A free user would spend their
+-- one lifetime credit on a cached analysis and then be refused the reading.
+--
+-- `state` also makes the one-document rule atomic. Two simultaneous /v1/read
+-- calls used to be able to both look, both see no document yet, and both
+-- generate at Cole's expense on a single claim. The transition
+-- analyzed -> reading is now a conditional UPDATE, so exactly one wins.
+CREATE TABLE IF NOT EXISTS study (
+  id           text PRIMARY KEY,
+  account_id   uuid REFERENCES account(id) ON DELETE SET NULL,
+  install_id   text,
+  reference    text,
+  -- analyzed: paid for, no document yet — may be ridden
+  -- reading:  a document is being generated right now
+  -- done:     a document was delivered; the claim is spent
+  state        text NOT NULL DEFAULT 'analyzed',
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS study_account_idx ON study(account_id, created_at);
+CREATE INDEX IF NOT EXISTS study_install_idx ON study(install_id, created_at);
 
 -- ── Anonymous installs ──────────────────────────────────────────────────────
 -- The free tier works with no account at all, so the one lifetime study is

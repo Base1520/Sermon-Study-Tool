@@ -41,6 +41,22 @@ const PLANS = {
   starter: { label: 'Starter',  priceUsd: 30,  studiesPerMonth: 40,  library: true },
   standard:{ label: 'Standard', priceUsd: 50,  studiesPerMonth: 80,  library: true },
   heavy:   { label: 'Heavy',    priceUsd: 150, studiesPerMonth: 300, library: true },
+
+  /**
+   * Comped access. Not for sale and never shown in the plan picker.
+   *
+   * Exists because the people who most need to use this daily — Cole, Rikki,
+   * and anyone he hands a code to — must not be paying Stripe to use their own
+   * product, and must not be quietly consuming a paid tier's allowance either.
+   * It is a distinct plan rather than "just set them to heavy" so that revenue
+   * reporting can tell a customer from a comp, and so a comped account never
+   * looks like an active subscription that Stripe will one day fail to renew.
+   *
+   * The allowance is high but NOT infinite. An unmetered account is a hole in
+   * the same global ceiling that protects the Anthropic bill, and a bug in a
+   * loop does not care whose account it is running under.
+   */
+  comp:    { label: 'Comp',     priceUsd: 0,   studiesPerMonth: 500, library: true, hidden: true },
 }
 
 /** Bought deliberately, never auto-charged. Priced ABOVE every tier's per-study rate. */

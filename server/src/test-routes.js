@@ -59,10 +59,16 @@ function fakeDb() {
       if (r) { r.used = Math.max(r.used - 1, 0); r.reserved = Math.max(r.reserved - p[2], 0) }
       return { rows: [], rowCount: 1 }
     }
-    if (/SUM\(actual_usd\)/.test(sql)) {
-      let a = 0, res = 0
-      for (const r of periods.values()) { a += r.actual; res += r.reserved }
-      return { rows: [{ reconciled: a, in_flight: res }] }
+    if (/UPDATE account/.test(sql) && /topup_studies/.test(sql)) return { rows: [] }
+    if (/SUM\(usd\).*AS reconciled/s.test(sql)) {
+      // Reconciled spend now comes from usage_event; this fake has none, so the
+      // committed total is carried entirely by live reservations.
+      return { rows: [{ reconciled: 0 }] }
+    }
+    if (/SUM\(reserved_usd\).*AS in_flight/s.test(sql)) {
+      let res = 0
+      for (const r of periods.values()) res += r.reserved
+      return { rows: [{ in_flight: res }] }
     }
     if (/FROM settings/.test(sql)) return { rows: [{ value: '50' }] }
     throw new Error('unhandled SQL: ' + sql.slice(0, 50))

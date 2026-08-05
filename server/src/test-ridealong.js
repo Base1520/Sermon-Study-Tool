@@ -20,9 +20,11 @@ const close = (a, b) => Math.abs(a - b) < 1e-9
 function fakeDb() {
   const periods = new Map()
   const events = []            // { study_id, account_id, label, usd }
+  const accounts = new Map()   // id -> { topup_studies }
   let queue = Promise.resolve()
   const api = {
-    _periods: periods, _events: events,
+    _periods: periods, _events: events, _accounts: accounts,
+    setTopUp: (id, n) => accounts.set(id, { topup_studies: n }),
     row: (a, s) => periods.get(a + '|' + s),
     addEvent: (e) => events.push(e),
     query(sql, params) { queue = queue.then(() => run(sql, params)); return queue },
@@ -63,14 +65,22 @@ function fakeDb() {
     if (/WHERE study_id = \$1 AND account_id = \$2/.test(sql)) {
       return { rows: events.filter(e => e.study_id === p[0] && e.account_id === p[1]).slice(0, 1) }
     }
+    if (/SUM\(usd\).*AS reconciled/s.test(sql)) {
+      return { rows: [{ reconciled: events.reduce((n, e) => n + e.usd, 0) }] }
+    }
+    if (/SUM\(reserved_usd\).*AS in_flight/s.test(sql)) {
+      let res = 0
+      for (const r of periods.values()) res += r.reserved
+      return { rows: [{ in_flight: res }] }
+    }
     if (/SUM\(usd\)/.test(sql)) {
       const usd = events.filter(e => e.study_id === p[0]).reduce((n, e) => n + e.usd, 0)
       return { rows: [{ usd }] }
     }
-    if (/SUM\(actual_usd\)/.test(sql)) {
-      let a = 0, res = 0
-      for (const r of periods.values()) { a += r.actual; res += r.reserved }
-      return { rows: [{ reconciled: a, in_flight: res }] }
+    if (/UPDATE account/.test(sql) && /topup_studies = topup_studies - 1/.test(sql)) {
+      const a = accounts.get(p[0])
+      if (a && a.topup_studies > 0) { a.topup_studies--; return { rows: [{ topup_studies: a.topup_studies }] } }
+      return { rows: [] }
     }
     if (/FROM settings/.test(sql)) return { rows: [{ value: '50' }] }
     throw new Error('unhandled SQL: ' + sql.replace(/\s+/g, ' ').slice(0, 70))

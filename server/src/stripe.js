@@ -20,6 +20,7 @@
 
 const express = require('express')
 const Stripe = require('stripe')
+const auth = require('./auth')
 const { PLANS, TOPUP } = require('./entitlement')
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' })
@@ -67,9 +68,16 @@ async function syncCustomer(db, customerId) {
   return { plan, status }
 }
 
-function mount(app, db) {
-  // The webhook needs the RAW body to verify the signature, so it is registered
-  // before any json parser can consume it.
+/**
+ * The webhook, mounted SEPARATELY and FIRST.
+ *
+ * Stripe signs raw bytes. If express.json() has already run, this route receives
+ * a parsed object and constructEvent() rejects it — which is exactly what was
+ * happening: every event 400'd, so a successful payment never reached the
+ * database and a failed card never stopped anyone's allowance. It lives in its
+ * own function purely so index.js can mount it above the parser.
+ */
+function mountWebhook(app, db) {
   app.post('/v1/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     let event
     try {
@@ -90,11 +98,41 @@ function mount(app, db) {
 
     try {
       await syncCustomer(db, customerId)
+      // A completed top-up is a payment, not a subscription change, so
+      // syncCustomer says nothing about it. Credit it here or the customer paid
+      // $15 for nothing.
+      if (event.type === 'checkout.session.completed' && event.data.object.mode === 'payment') {
+        await creditTopUp(db, event.data.object)
+      }
     } catch (e) {
       console.error('[stripe] sync failed for', customerId, e.message)
     }
   })
+}
 
+/**
+ * Add top-up studies to an account, exactly once.
+ *
+ * Stripe delivers events more than once, so the session id is the idempotency
+ * key: the insert is what grants the credit, and a duplicate event loses the
+ * race to the primary key and grants nothing.
+ */
+async function creditTopUp(db, session) {
+  const { rowCount } = await db.query(
+    `INSERT INTO topup (session_id, stripe_customer_id, studies)
+          VALUES ($1, $2, $3)
+     ON CONFLICT (session_id) DO NOTHING`,
+    [session.id, session.customer, TOPUP.studies],
+  )
+  if (!rowCount) return   // already credited
+  await db.query(
+    `UPDATE account SET topup_studies = topup_studies + $2 WHERE stripe_customer_id = $1`,
+    [session.customer, TOPUP.studies],
+  )
+  console.log(`[stripe] credited ${TOPUP.studies} top-up studies to ${session.customer}`)
+}
+
+function mount(app, db) {
   // ── Start a subscription ──────────────────────────────────────────────────
   app.post('/v1/checkout', async (req, res) => {
     const { plan, email } = req.body || {}
@@ -116,11 +154,20 @@ function mount(app, db) {
         metadata: { installId: req.identity.installId || '' },
       })
       customerId = customer.id
+      // DO NOTHING ON CONFLICT. This used to be
+      //   ON CONFLICT (email) DO UPDATE SET stripe_customer_id = EXCLUDED...
+      // which let anyone who merely TYPED someone else's address repoint that
+      // account at a Stripe customer they controlled — before paying a cent —
+      // severing the victim from their real subscription and their billing
+      // portal. An email a stranger typed is not proof of anything.
+      //
+      // install_id is what binds this payment back to the app that started it;
+      // /v1/claim below is how that install collects its device token.
       await db.query(
-        `INSERT INTO account (email, stripe_customer_id)
-              VALUES ($1, $2)
-         ON CONFLICT (email) DO UPDATE SET stripe_customer_id = EXCLUDED.stripe_customer_id`,
-        [email || `${customerId}@placeholder.invalid`, customerId],
+        `INSERT INTO account (email, stripe_customer_id, install_id)
+              VALUES ($1, $2, $3)
+         ON CONFLICT (email) DO NOTHING`,
+        [email || `${customerId}@placeholder.invalid`, customerId, req.identity.installId || null],
       )
     }
 
@@ -164,6 +211,46 @@ function mount(app, db) {
     res.json({ url: session.url })
   })
 
+  /**
+   * Collect the subscription this install just paid for.
+   *
+   * THE FLOW HAD NO END. Checkout opened in a browser, the money moved, and the
+   * app was never told — issueDeviceToken() had no caller anywhere in the
+   * codebase. A man paid $30, came back, and every request was still anonymous
+   * and still hit the free-tier wall. This is the missing step.
+   *
+   * The install id is the binding: /v1/checkout wrote it onto the account it
+   * created, so only the app that started the checkout can collect the token.
+   * The token is returned ONCE and only its hash is stored.
+   */
+  app.post('/v1/claim', async (req, res) => {
+    const installId = req.identity.installId
+    if (!installId) return res.status(400).json({ error: 'x-install-id header required' })
+
+    const { rows } = await db.query(
+      `SELECT id, email, stripe_customer_id, plan, status
+         FROM account WHERE install_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [installId],
+    )
+    const account = rows[0]
+    if (!account) return res.status(404).json({ error: 'NO_ACCOUNT', message: 'No purchase found for this install yet.' })
+
+    // Re-read Stripe rather than trusting our cache — the webhook may not have
+    // landed yet, and this is the moment the user is staring at the screen.
+    let state = { plan: account.plan, status: account.status }
+    try { state = await syncCustomer(db, account.stripe_customer_id) } catch { /* fall back to cache */ }
+
+    if (state.status !== 'active') {
+      return res.status(409).json({ error: 'NOT_ACTIVE', status: state.status,
+        message: 'The subscription is not active yet. Try again in a moment.' })
+    }
+
+    const token = await auth.issueDeviceToken(db, {
+      accountId: account.id, installId, label: 'The Operator',
+    })
+    res.json({ token, email: account.email, ...state })
+  })
+
   // Called when the browser comes back from checkout, so entitlement is correct
   // immediately rather than whenever the webhook lands. Same function, so the
   // two can never disagree.
@@ -176,4 +263,4 @@ function mount(app, db) {
   })
 }
 
-module.exports = { mount, syncCustomer, PRICE_TO_PLAN }
+module.exports = { mount, mountWebhook, syncCustomer, creditTopUp, PRICE_TO_PLAN }

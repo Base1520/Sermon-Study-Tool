@@ -89,6 +89,17 @@ function fakeDb(initial = {}) {
     if (/FROM settings/.test(sql)) {
       return { rows: [{ value: settings.get('daily_ceiling_usd') }] }
     }
+    // No top-up balance in this fake — the top-up path has its own tests.
+    if (/UPDATE account/.test(sql) && /topup_studies = topup_studies - 1/.test(sql)) {
+      return { rows: [] }
+    }
+    if (/SUM\(usd\).*AS reconciled/s.test(sql)) return { rows: [{ reconciled: 0 }] }
+    if (/SUM\(reserved_usd\).*AS in_flight/s.test(sql)) {
+      let res = 0
+      for (const r of rows.values()) res += Number(r.reserved_usd ?? 0)
+      return { rows: [{ in_flight: res }] }
+    }
+
     throw new Error('unhandled SQL in fake: ' + sql.slice(0, 60))
   }
 }

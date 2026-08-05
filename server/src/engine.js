@@ -15,7 +15,7 @@ const path = require('path')
 const Anthropic = require('@anthropic-ai/sdk')
 
 const ENGINE = path.join(__dirname, '../../electron/plainread')
-const { plainRead } = require(path.join(ENGINE, 'pipeline'))
+const { plainRead, cacheKeyFor } = require(path.join(ENGINE, 'pipeline'))
 const { withRetry, parseModelJSON, checkGenerationInput } = require(path.join(ENGINE, 'runtime'))
 const { priceCall } = require(path.join(ENGINE, 'usage'))
 const { analyzePassage, analysisCacheKey } = require(path.join(ENGINE, 'analyze'))
@@ -67,12 +67,16 @@ async function writeCache(db, key, document) {
  * one. Every row carries the study id, so the analyze fan-out, the document,
  * its retries and the verify pass roll up into a single number per study.
  */
-function makeRecorder(db, { accountId, studyId, reference, installId }) {
+function makeRecorder(db, { accountId, studyId, reference, installId }, pending) {
   return (label, usage, model) => {
     if (!usage) return null
     const priced = priceCall(usage, model)
-    // Never let accounting delay or break a study in progress.
-    db.query(
+    // Never let accounting delay or break a study in progress — but DO keep the
+    // promise. Settlement sums these rows the instant the engine returns, and a
+    // fire-and-forget insert can lose that race: studyCost() reads zero, the
+    // reservation is released, and real spend never reaches the ledger or the
+    // global ceiling. Collected here and awaited before anyone asks for a total.
+    const write = db.query(
       `INSERT INTO usage_event
          (account_id, study_id, label, model, input_tokens, output_tokens,
           cache_write_tokens, cache_read_tokens, usd, reference, install_id)
@@ -82,6 +86,7 @@ function makeRecorder(db, { accountId, studyId, reference, installId }) {
        priced.cacheWriteTokens, priced.cacheReadTokens,
        priced.costUsd, reference ?? null, installId ?? null],
     ).catch((e) => console.error('[usage] write failed:', e.message))
+    pending?.push(write)
     return priced
   }
 }
@@ -106,9 +111,15 @@ async function studyCost(db, studyId) {
 async function runPlainRead(db, { analysis, requestedReference, level, accountId, studyId, installId, onSection }) {
   checkGenerationInput({ reference: requestedReference })
 
-  const record = makeRecorder(db, { accountId, studyId, reference: requestedReference, installId })
+  const pending = []
+  const record = makeRecorder(db, { accountId, studyId, reference: requestedReference, installId }, pending)
   const writes = []
-  const preloaded = await preloadCache(db, [])   // engine computes its own key; misses write through
+  // THE MARGIN LEVER, and it was switched off. This used to preload an EMPTY
+  // key list, so the shared document cache could never hit and every account
+  // paid full generation cost for a passage already written. cacheKeyFor() is
+  // the pipeline's own key function, so the key we look up is by construction
+  // the key it will look for.
+  const preloaded = await preloadCache(db, [cacheKeyFor(analysis, level)])
   const cache = makeCache(preloaded, (k, v) => writes.push(writeCache(db, k, v)))
 
   const doc = await plainRead({
@@ -124,7 +135,7 @@ async function runPlainRead(db, { analysis, requestedReference, level, accountId
     onUsage: record,
   })
 
-  await Promise.allSettled(writes)
+  await Promise.allSettled([...writes, ...pending])
   return doc
 }
 
@@ -143,7 +154,8 @@ async function runAnalyze(db, { text, reference, accountId, studyId, installId, 
     `SELECT document FROM document_cache WHERE cache_key = $1`, [key])
   if (rows.length) return { analysis: rows[0].document, cached: true }
 
-  const record = makeRecorder(db, { accountId, studyId, reference, installId })
+  const pending = []
+  const record = makeRecorder(db, { accountId, studyId, reference, installId }, pending)
   const analysis = await analyzePassage({
     text,
     reference,
@@ -156,59 +168,76 @@ async function runAnalyze(db, { text, reference, accountId, studyId, installId, 
   })
 
   await writeCache(db, key, analysis)
+  await Promise.allSettled(pending)   // settlement reads these rows next
   return { analysis, cached: false }
 }
 
 /**
- * Has this study already produced a document?
+ * Write the claim, the moment it is charged for.
  *
- * The guard that lets /v1/read ride the reservation /v1/analyze already made.
- * A study id only exists because analyze paid for it, and one reservation buys
- * exactly one document — so a client replaying the same id cannot get a second
- * one for free.
+ * MUST NOT depend on model usage. It used to: ownership was inferred from
+ * usage_event, so a CACHE HIT — which spends nothing and writes no usage rows —
+ * produced a study its owner could not prove. In the product's most common path
+ * (someone studies a passage another user already ran) a free user spent their
+ * one lifetime credit and was then refused the reading.
  */
-async function studyHasDocument(db, studyId) {
+async function openStudy(db, { studyId, accountId, installId, reference }) {
+  await db.query(
+    `INSERT INTO study (id, account_id, install_id, reference, state)
+          VALUES ($1, $2, $3, $4, 'analyzed')
+     ON CONFLICT (id) DO NOTHING`,
+    [studyId, accountId ?? null, installId ?? null, reference ?? null],
+  )
+}
+
+/**
+ * Try to take this study's ONE document, atomically.
+ *
+ * Returns true only for the caller that wins. The old check was a SELECT
+ * followed by a decision, so two simultaneous readings could both see "no
+ * document yet" and both generate — one claim, two bills, both paid by Cole.
+ * A conditional UPDATE makes the winner unambiguous.
+ *
+ * The identity clause is the ownership check too, so a study can only be
+ * claimed by the account that bought it or, for a free study, by the install
+ * that bought it. `account_id IS NULL` on the anonymous branch stops a leaked
+ * study id being used to ride a paying customer's reservation.
+ */
+async function claimStudyForReading(db, { studyId, accountId, installId }) {
+  if (!studyId) return false
+  const identity = accountId
+    ? { clause: 'account_id = $2', param: accountId }
+    : { clause: 'install_id = $2 AND account_id IS NULL', param: installId }
+  if (!identity.param) return false
+
   const { rows } = await db.query(
-    `SELECT 1 FROM usage_event WHERE study_id = $1 AND label LIKE 'plain-read%' LIMIT 1`,
-    [studyId],
+    `UPDATE study
+        SET state = 'reading', updated_at = now()
+      WHERE id = $1 AND ${identity.clause} AND state = 'analyzed'
+      RETURNING id`,
+    [studyId, identity.param],
   )
   return rows.length > 0
 }
 
+/** The document was delivered. The claim is spent. */
+async function finishStudy(db, studyId) {
+  await db.query(`UPDATE study SET state = 'done', updated_at = now() WHERE id = $1`, [studyId])
+}
+
 /**
- * Does this study id belong to this caller?
+ * The reading failed. Put the claim back so a retry can ride it.
  *
- * ANONYMOUS COUNTS. It used to require an account, and that quietly broke the
- * single most important screen in the product: a free user spent their one
- * lifetime study on /v1/analyze and was then refused the reading — shown a
- * paywall promising "it stays here, read it, export it" about a document that
- * had never been generated. The free study has to deliver a WHOLE study.
- *
- * Still bounded, because riding also requires that the study has not already
- * produced a document: one reservation, one document. A free user cannot get a
- * second one without a new analysis, and that is refused.
+ * Without this, a man whose document failed validation would be charged a second
+ * study to try again for something he never received.
  */
-async function studyBelongsTo(db, studyId, { accountId, installId }) {
-  if (!studyId) return false
-  if (accountId) {
-    const { rows } = await db.query(
-      `SELECT 1 FROM usage_event WHERE study_id = $1 AND account_id = $2 LIMIT 1`,
-      [studyId, accountId],
-    )
-    return rows.length > 0
-  }
-  if (!installId) return false
-  // An anonymous study must ALSO have no account on it, so a leaked study id
-  // cannot be used to ride a paying customer's reservation.
-  const { rows } = await db.query(
-    `SELECT 1 FROM usage_event
-      WHERE study_id = $1 AND install_id = $2 AND account_id IS NULL LIMIT 1`,
-    [studyId, installId],
-  )
-  return rows.length > 0
+async function releaseStudyForRetry(db, studyId) {
+  await db.query(
+    `UPDATE study SET state = 'analyzed', updated_at = now()
+      WHERE id = $1 AND state = 'reading'`, [studyId])
 }
 
 module.exports = {
   runPlainRead, runAnalyze, makeRecorder, makeCache, preloadCache, writeCache,
-  studyCost, studyHasDocument, studyBelongsTo,
+  studyCost, openStudy, claimStudyForReading, finishStudy, releaseStudyForRetry,
 }

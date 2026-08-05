@@ -67,6 +67,33 @@ async function reserveStudy(db, { accountId, allowance, periodStart, periodEnd }
   )
 
   if (rows.length === 0) {
+    // THE MONTHLY ALLOWANCE IS GONE — SPEND A TOP-UP IF HE BOUGHT ONE.
+    //
+    // Top-ups were sold and never granted: the $15 checkout took the money and
+    // no code path anywhere turned it into studies. The decrement is conditional
+    // on a positive balance in the same statement, so two simultaneous requests
+    // cannot both spend the last one.
+    const { rows: topped } = await db.query(
+      `UPDATE account
+          SET topup_studies = topup_studies - 1
+        WHERE id = $1 AND topup_studies > 0
+        RETURNING topup_studies`,
+      [accountId],
+    )
+    if (topped.length > 0) {
+      // The reservation still has to be held, or in-flight top-up work is money
+      // the global ceiling cannot see.
+      await db.query(
+        `INSERT INTO usage_period (account_id, period_start, period_end, studies_used, reserved_usd)
+              VALUES ($1, $2, $3, 0, $4)
+         ON CONFLICT (account_id, period_start) DO UPDATE
+                SET reserved_usd = usage_period.reserved_usd + $4,
+                    updated_at   = now()`,
+        [accountId, periodStart, periodEnd, STUDY_RESERVE_USD],
+      )
+      return { ok: true, used: allowance, allowance, fromTopUp: true, topUpRemaining: topped[0].topup_studies }
+    }
+
     const { rows: cur } = await db.query(
       `SELECT studies_used FROM usage_period WHERE account_id = $1 AND period_start = $2`,
       [accountId, periodStart],
@@ -162,15 +189,38 @@ async function sweepStaleReservations(db) {
  * one entirely under Cole's control, so it must not be the one that is blind.
  */
 async function committedSpend(db, { hours = 24 } = {}) {
-  const { rows } = await db.query(
-    `SELECT COALESCE(SUM(actual_usd), 0) AS reconciled,
-            COALESCE(SUM(reserved_usd), 0) AS in_flight
-       FROM usage_period
-      WHERE updated_at > now() - ($1 || ' hours')::interval`,
-    [hours],
-  )
-  const reconciled = Number(rows[0].reconciled)
-  const inFlight = Number(rows[0].in_flight)
+  // RECONCILED SPEND COMES FROM usage_event, NOT usage_period, for two reasons
+  // that were each independently making this brake useless.
+  //
+  // 1. ANONYMOUS SPEND WAS INVISIBLE. Free studies never touch usage_period —
+  //    they are tracked in anon_install — so every dollar the free tier burned
+  //    was absent from the only number the ceiling looks at. Since the install
+  //    id is client-supplied, a script rotating it gets unlimited free studies,
+  //    and the one safeguard meant to stop a runaway bill could not see a single
+  //    cent of it. usage_event has a row for every model call, anonymous or not.
+  //
+  // 2. THE WINDOW WAS NOT A WINDOW. usage_period rows are monthly, so summing
+  //    any row "updated in the last 24 hours" counted the WHOLE month's spend as
+  //    today's the moment one small study touched the row. A man at $45 for the
+  //    month would trip a $50 daily ceiling on his next click. usage_event rows
+  //    are timestamped individually, so the interval means what it says.
+  //
+  // In-flight reservations still come from usage_period — that is where money
+  // promised but not yet spent lives, and it is the whole point of counting
+  // committed rather than settled money.
+  const [spent, held] = await Promise.all([
+    db.query(
+      `SELECT COALESCE(SUM(usd), 0) AS reconciled
+         FROM usage_event
+        WHERE at > now() - ($1 || ' hours')::interval`,
+      [hours],
+    ),
+    db.query(
+      `SELECT COALESCE(SUM(reserved_usd), 0) AS in_flight FROM usage_period`,
+    ),
+  ])
+  const reconciled = Number(spent.rows[0].reconciled)
+  const inFlight = Number(held.rows[0].in_flight)
   return { reconciled, inFlight, committed: reconciled + inFlight }
 }
 

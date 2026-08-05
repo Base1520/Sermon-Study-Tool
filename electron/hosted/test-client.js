@@ -134,28 +134,33 @@ const withEnv = async (url, fn) => {
       // A chunk boundary lands mid-line, and a ping interrupts the sections.
       const chunks = [
         '{"type":"ping"}\n{"type":"sec',
-        'tion","section":{"key":"a","value":1}}\n',
+        'tion","key":"a","value":"first section text"}\n',
         '{"type":"ping"}\n',
-        '{"type":"section","section":{"key":"b","value":2}}\n{"type":"done","document":{"ok":true}}\n',
+        '{"type":"section","key":"b","value":2}\n{"type":"done","document":{"ok":true}}\n',
       ]
       const seen = []
       const doc = await withFetch(async () => streamResponse(chunks),
         () => client.plainRead(fakeStore(), { analysis: {}, reference: 'r', onSection: (k, v) => seen.push([k, v]) }))
       ok('a line torn across two chunks is reassembled', seen.length === 2, JSON.stringify(seen))
       ok('sections arrive in order with their values', seen[0][0] === 'a' && seen[1][1] === 2)
+      // The bug this guards: a one-parameter handler on the server dropped every
+      // section's CONTENT, so the stream carried names and no text and the reader
+      // saw nothing until the whole document landed at once.
+      ok('a section carries its CONTENT, not just its name', seen[0][1] === 'first section text',
+         JSON.stringify(seen[0]))
       ok('pings are not mistaken for content', !seen.some(([k]) => k === undefined))
       ok('the document comes back', doc.ok === true)
 
       // Garbage on the wire must not take down a working study.
       const seen2 = []
       const doc2 = await withFetch(async () => streamResponse([
-        'not json at all\n{"type":"section","section":{"key":"a","value":1}}\n{"type":"done","document":{"ok":1}}\n',
+        'not json at all\n{"type":"section","key":"a","value":1}\n{"type":"done","document":{"ok":1}}\n',
       ]), () => client.plainRead(fakeStore(), { analysis: {}, reference: 'r', onSection: (k, v) => seen2.push(k) }))
       ok('an unparseable line is skipped, not fatal', seen2.length === 1 && doc2.ok === 1)
 
       // A throwing renderer callback must not kill the read.
       const doc3 = await withFetch(async () => streamResponse([
-        '{"type":"section","section":{"key":"a","value":1}}\n{"type":"done","document":{"ok":2}}\n',
+        '{"type":"section","key":"a","value":1}\n{"type":"done","document":{"ok":2}}\n',
       ]), () => client.plainRead(fakeStore(), { analysis: {}, reference: 'r', onSection: () => { throw new Error('window gone') } }))
       ok('a dead window cannot fail the study', doc3.ok === 2)
     })
@@ -165,7 +170,7 @@ const withEnv = async (url, fn) => {
   {
     await withEnv('https://api.example.com', async () => {
       let err = null
-      await withFetch(async () => streamResponse(['{"type":"section","section":{"key":"a","value":1}}\n']),
+      await withFetch(async () => streamResponse(['{"type":"section","key":"a","value":1}\n']),
         async () => { try { await client.plainRead(fakeStore(), { analysis: {}, reference: 'r' }) } catch (e) { err = e } })
       ok('a stream with no document is an error, not an empty study', !!err)
       ok('and says the reading ended early', /ended before it finished/i.test(err.message))

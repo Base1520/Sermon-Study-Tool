@@ -186,9 +186,10 @@ async function plainRead(store, { analysis, reference, level, studyId, onSection
 
         if (msg.type === 'ping') continue
         if (msg.type === 'section') {
-          // The server sends whatever shape the engine emitted; pass it through
-          // unchanged so the renderer cannot tell the two paths apart.
-          try { onSection?.(msg.section?.key ?? msg.section, msg.section?.value) } catch {}
+          // {type,key,value} on the wire, delivered as the engine's own
+          // (key, value) so main.js can hand the SAME callback to either path
+          // and the renderer cannot tell them apart.
+          try { onSection?.(msg.key, msg.value) } catch {}
         } else if (msg.type === 'done') {
           document = msg.document
         } else if (msg.type === 'error') {
@@ -241,11 +242,49 @@ async function checkout(store, { plan, email }) {
   return body.url
 }
 
+/**
+ * Redeem a comp code. Stores the device token, so the app is a subscriber from
+ * the next request onward.
+ */
+async function redeem(store, code) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('redeem: OPERATOR_API_URL is not set')
+  const res = await fetch(`${base}/v1/redeem`, {
+    method: 'POST',
+    headers: headers(store),
+    body: JSON.stringify({ code }),
+  })
+  const body = await readJsonOrText(res)
+  if (!res.ok) throw new Error(body?.message || 'That code could not be redeemed.')
+  // The token is returned ONCE. If it is not stored here it is gone for good.
+  if (body.token) store?.set('operator-device-token', body.token)
+  return body
+}
+
+/**
+ * Collect a subscription this install just paid for.
+ *
+ * Called after the browser returns from Stripe. Until this existed the payment
+ * flow had no ending — money moved and the app was never told, so a paying man
+ * sat behind the free-tier wall he had just bought his way past.
+ */
+async function claim(store) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('claim: OPERATOR_API_URL is not set')
+  const res = await fetch(`${base}/v1/claim`, { method: 'POST', headers: headers(store) })
+  const body = await readJsonOrText(res)
+  if (!res.ok) return { ok: false, ...body }        // "not yet" is a normal answer here
+  if (body.token) store?.set('operator-device-token', body.token)
+  return { ok: true, ...body }
+}
+
 module.exports = {
   analyze,
   plainRead,
   me,
   checkout,
+  redeem,
+  claim,
   hostedBaseUrl,
   installId,
   HostedRefusal,

@@ -1,0 +1,16 @@
+# The desktop app and its build artifacts have no business in the API image.
+node_modules
+dist
+dist-electron
+src
+build
+resources
+.git
+*.dmg
+*.zip
+*.exe
+electron/main.js
+electron/preload.js
+electron/license
+electron/groupguide
+electron/commentary-contract.js

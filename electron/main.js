@@ -562,17 +562,30 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) =
       store.set(cacheKey, safeCached)
       // Re-surface in history so a re-analyzed passage moves to the top
       const history = store.get('history', [])
-      const existing = history.find(e => e.analysis?.reference === safeCached.reference)
+      // Prefer an entry that already holds work. Duplicates created before the
+      // miss path deduped are still in people's stores, and a bare .find() can
+      // keep returning a blank one forever — pinning the reader to an empty
+      // record while his real notes sit in a sibling entry he can only reach
+      // through History.
+      const matches = history.filter(e => e.analysis?.reference === safeCached.reference)
+      const existing = matches.find(e => e.draft || e.scholarMessages?.length ||
+        (e.annotations && Object.keys(e.annotations).length)) || matches[0]
+      let historyId
       if (existing) {
+        historyId = existing.id
         store.set('history', [
           { ...existing, analysis: safeCached },
           ...history.filter(e => e.id !== existing.id),
         ])
       } else {
         const entry = { id: Date.now().toString(), savedAt: new Date().toISOString(), analysis: safeCached, annotations: {} }
+        historyId = entry.id
         store.set('history', [entry, ...history].slice(0, 100))
       }
-      return safeCached
+      // The renderer needs this to save anything the user writes afterwards.
+      // Returned under a distinct key because the result object is spread
+      // straight into `analysis` state — a bare `id` would collide.
+      return { ...safeCached, historyId }
     }
   }
 
@@ -834,14 +847,31 @@ supplied verse once, with no gaps or overlap.`
   stage('complete')
 
   // ── Cache and save to history ─────────────────────────────────────────────
+  let historyId = null
   if (store) {
     store.set(cacheKey, result)
     const history = store.get('history', [])
-    const entry = { id: Date.now().toString(), savedAt: new Date().toISOString(), analysis: result, annotations: {} }
-    store.set('history', [entry, ...history].slice(0, 100))
+    // Dedupe by reference, exactly as the cache-hit path above does. Without
+    // this, re-running the same passage — which happens on every translation
+    // switch — appended a fresh blank entry each time, and session-load-latest
+    // then restored THAT one instead of the entry holding the reader's work.
+    const matches = history.filter(e => e.analysis?.reference === result.reference)
+    const existing = matches.find(e => e.draft || e.scholarMessages?.length ||
+      (e.annotations && Object.keys(e.annotations).length)) || matches[0]
+    if (existing) {
+      historyId = existing.id
+      store.set('history', [
+        { ...existing, analysis: result },
+        ...history.filter(e => e.id !== existing.id),
+      ])
+    } else {
+      const entry = { id: Date.now().toString(), savedAt: new Date().toISOString(), analysis: result, annotations: {} }
+      historyId = entry.id
+      store.set('history', [entry, ...history].slice(0, 100))
+    }
   }
 
-  return result
+  return historyId ? { ...result, historyId } : result
 })
 
 // ── PLAIN READ — the reader mode of the same engine ──────────────────────────

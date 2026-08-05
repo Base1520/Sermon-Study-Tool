@@ -507,7 +507,12 @@ export default function App() {
     try {
       const result = await (window as any).electronAPI.analyzePassage({ text, reference, apiKey, streamId })
       setAnalysis(result)
-      setCurrentHistoryId(null)
+      // Main returns the history entry this study was saved under. Every
+      // autosave — draft, annotations, scholar chat — is guarded by this id, so
+      // hardcoding null here meant nothing a man wrote after running a study
+      // was ever persisted. It only appeared to work if he relaunched the app
+      // or re-opened the study from History first, which is why it survived.
+      setCurrentHistoryId(result?.historyId ?? null)
     } catch (e: any) {
       const friendly = friendlyApiError(e)
       setError(`${friendly.headline}. ${friendly.detail}`)

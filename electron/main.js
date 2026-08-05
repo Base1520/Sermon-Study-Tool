@@ -221,7 +221,31 @@ function resolveSecret(name) {
 
 function requireSecret(name, label) {
   const value = resolveSecret(name)
-  if (!value) throw new Error(`${label} API key required — add it in Settings.`)
+  if (!value) {
+    /**
+     * ON A HOSTED BUILD, "add it in Settings" IS A LIE.
+     *
+     * The core loop — analyze, read, ask — runs on the server and needs no key.
+     * A handful of deeper tools (word study, cross-references, the scholar
+     * panel, sermon drafting) still call Anthropic directly and have not been
+     * moved to the server yet. On a hosted build there is no key field to add
+     * anything to: the settings modal shows the account panel instead. Telling
+     * a man to go add a key to a form that is not there is the kind of dead end
+     * that makes someone close an app and not reopen it.
+     *
+     * So: say what is actually true, name what still works, and mark it with a
+     * code the renderer can branch on.
+     */
+    if (name === 'ANTHROPIC_KEY' && hosted.hostedBaseUrl()) {
+      const err = new Error(
+        'This tool is not on our servers yet — it still needs your own Anthropic key. ' +
+        'Studying a passage, reading it, and asking about it all work without one.'
+      )
+      err.code = 'NEEDS_OWN_KEY'
+      throw err
+    }
+    throw new Error(`${label} API key required — add it in Settings.`)
+  }
   return value
 }
 
@@ -1072,6 +1096,17 @@ ipcMain.handle('plain-ask', async (_, { doc, analysis, question, history, vaultN
       const ref = doc?.reference || analysis?.reference || analysis?.passageReference || ''
       notes = ref ? (lookupVaultPassage(ref)?.notes ?? null) : null
     } catch { notes = null }
+  }
+
+  // ── HOSTED ────────────────────────────────────────────────────────────────
+  // The reader was promised he could ask about a reading he already has. On a
+  // hosted build that must not depend on him owning an API key.
+  if (hosted.hostedBaseUrl()) {
+    try {
+      return await hosted.ask(store, { doc, analysis, question, history, vaultNotes: notes })
+    } catch (e) {
+      throw asRendererError(e)
+    }
   }
 
   requireFeature('gen.ask')

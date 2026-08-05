@@ -254,6 +254,36 @@ async function checkout(store, { plan, email }) {
 }
 
 /**
+ * Ask a question about a reading, on the server's key.
+ *
+ * Not a study and not billed as one — see the route. A 429 is a real answer the
+ * reader should see plainly, so it comes back as a refusal rather than an error.
+ */
+async function ask(store, { doc, analysis, question, history, vaultNotes }) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('ask: OPERATOR_API_URL is not set')
+
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), ANALYZE_TIMEOUT_MS)
+  let res
+  try {
+    res = await fetch(`${base}/v1/ask`, {
+      method: 'POST',
+      headers: headers(store),
+      body: JSON.stringify({ doc, analysis, question, history, vaultNotes }),
+      signal: ctl.signal,
+    })
+  } finally { clearTimeout(timer) }
+
+  const body = await readJsonOrText(res)
+  if (res.status === 402 || res.status === 429 || res.status === 503) {
+    throw new HostedRefusal(body, res.status)
+  }
+  if (!res.ok) throw new Error(body?.message || `that question could not be answered (${res.status})`)
+  return body
+}
+
+/**
  * Redeem a comp code. Stores the device token, so the app is a subscriber from
  * the next request onward.
  */
@@ -292,6 +322,7 @@ async function claim(store) {
 module.exports = {
   analyze,
   plainRead,
+  ask,
   me,
   checkout,
   redeem,

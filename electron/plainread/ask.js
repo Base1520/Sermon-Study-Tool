@@ -1061,6 +1061,11 @@ async function askAboutPassage({
   retry,
   parse,
   vaultNotes,
+  // The recorder. Optional, and unreported without it — which is what every
+  // ask did before this parameter existed, exactly like the analyze fan-out and
+  // the verify pass. A cost figure that omits a call the reader actually makes
+  // is not a cost figure.
+  onUsage,
 }) {
   const asked = String(question ?? '').trim()
   if (!asked) throw new Error('askAboutPassage: question is required')
@@ -1108,6 +1113,10 @@ async function askAboutPassage({
       messages,
     })
   )
+
+  if (typeof onUsage === 'function') {
+    try { onUsage('ask', res?.usage, MODEL) } catch { /* never break an answer */ }
+  }
 
   // A prose reply instead of JSON is a degraded result, not a dead one: the
   // text is still the answer, and every fence below still runs over it. That

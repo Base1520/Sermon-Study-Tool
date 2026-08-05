@@ -363,6 +363,53 @@ app.post('/v1/read', route(async (req, res) => {
   }
 }))
 
+/**
+ * Ask a question about a reading.
+ *
+ * NOT billed as a study. The paywall promises "read it, ask about it, export
+ * it" about work already paid for; charging a whole study for a follow-up would
+ * make that sentence false.
+ *
+ * What bounds it instead of an allowance:
+ *   - a hard daily cap per caller, so a loop cannot run all night
+ *   - the global ceiling, checked first like every other spending route
+ *   - the document must be supplied, so there is nothing to answer FROM unless
+ *     the reader already has a reading
+ */
+const MAX_ASKS_PER_DAY = 100
+
+app.post('/v1/ask', route(async (req, res) => {
+  const { doc, analysis, question, history, vaultNotes } = req.body || {}
+  if (!question || !String(question).trim()) return res.status(400).json({ error: 'question is required' })
+  if (!doc) return res.status(400).json({ error: 'doc is required' })
+
+  const accountId = req.identity.account?.id ?? null
+  const installId = req.identity.installId
+
+  const ceiling = await meter.ceilingStatus(db)
+  if (ceiling.blockEverything) {
+    return res.status(503).json({ error: 'SERVICE_PAUSED', message: 'The Operator is paused for a moment.' })
+  }
+
+  const asked = await engine.askCountToday(db, { accountId, installId })
+  if (asked >= MAX_ASKS_PER_DAY) {
+    return res.status(429).json({
+      error: 'ASK_LIMIT',
+      headline: "That's a lot of questions for one day.",
+      message: 'The limit resets in a few hours. Everything you have studied stays available.',
+    })
+  }
+
+  try {
+    const answer = await engine.runAsk(db, {
+      doc, analysis, question, history, vaultNotes, accountId, installId,
+    })
+    res.json(answer)
+  } catch (e) {
+    res.status(500).json({ error: 'ASK_FAILED', message: e?.message || 'That question could not be answered.' })
+  }
+}))
+
 // ── Redeem an access code ───────────────────────────────────────────────────
 /**
  * Comped access, no card, no Stripe.

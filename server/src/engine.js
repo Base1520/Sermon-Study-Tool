@@ -19,6 +19,7 @@ const { plainRead, cacheKeyFor } = require(path.join(ENGINE, 'pipeline'))
 const { withRetry, parseModelJSON, checkGenerationInput } = require(path.join(ENGINE, 'runtime'))
 const { priceCall } = require(path.join(ENGINE, 'usage'))
 const { analyzePassage, analysisCacheKey } = require(path.join(ENGINE, 'analyze'))
+const { askAboutPassage } = require(path.join(ENGINE, 'ask'))
 
 /**
  * A cache backed by Postgres, shaped like the one the engine expects.
@@ -173,6 +174,45 @@ async function runAnalyze(db, { text, reference, accountId, studyId, installId, 
 }
 
 /**
+ * Answer a question about a reading already delivered.
+ *
+ * NOT a study, and deliberately not billed as one. The paywall's own words are
+ * "read it, ask about it, export it" — charging a whole study to ask a follow-up
+ * would make that sentence a lie. It is one small call against a document the
+ * reader already paid for.
+ *
+ * Its cost is still recorded, so it reaches the global ceiling like everything
+ * else. What bounds it is askCountToday() at the route.
+ */
+async function runAsk(db, { doc, analysis, question, history, vaultNotes, accountId, installId }) {
+  const record = makeRecorder(db, {
+    accountId, studyId: `ask-${Date.now().toString(36)}`,
+    reference: analysis?.reference, installId,
+  }, [])
+  return askAboutPassage({
+    doc, analysis, question, history, vaultNotes,
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    createClient: (k) => new Anthropic.default({ apiKey: k }),
+    retry: withRetry,
+    parse: parseModelJSON,
+    onUsage: record,
+  })
+}
+
+/** How many questions this caller has asked in the last day. The bound on asks. */
+async function askCountToday(db, { accountId, installId }) {
+  const col = accountId ? 'account_id' : 'install_id'
+  const val = accountId || installId
+  if (!val) return Number.MAX_SAFE_INTEGER
+  const { rows } = await db.query(
+    `SELECT COUNT(*)::int AS n FROM usage_event
+      WHERE ${col} = $1 AND label LIKE 'ask%' AND at > now() - interval '24 hours'`,
+    [val],
+  )
+  return rows[0].n
+}
+
+/**
  * Write the claim, the moment it is charged for.
  *
  * MUST NOT depend on model usage. It used to: ownership was inferred from
@@ -240,4 +280,5 @@ async function releaseStudyForRetry(db, studyId) {
 module.exports = {
   runPlainRead, runAnalyze, makeRecorder, makeCache, preloadCache, writeCache,
   studyCost, openStudy, claimStudyForReading, finishStudy, releaseStudyForRetry,
+  runAsk, askCountToday,
 }

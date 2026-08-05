@@ -1146,7 +1146,7 @@ function applyVerdicts(doc, claims, rawVerdicts) {
  * @param {function} [opts.parse]       parseModelJSON from main.js
  * @returns {Promise<object>} the document, with verification applied
  */
-async function verifyPlainRead({ doc, payload, apiKey, createClient, retry, parse }) {
+async function verifyPlainRead({ doc, payload, apiKey, createClient, retry, parse, onUsage }) {
   if (!doc || typeof doc !== 'object') throw new Error('verifyPlainRead: doc is required')
 
   // The notes pipeline.js supplied to the generator, if any. They travel on the
@@ -1195,6 +1195,13 @@ async function verifyPlainRead({ doc, payload, apiKey, createClient, retry, pars
         messages: [{ role: 'user', content: buildVerifyPrompt(claims, payload) }],
       })
     )
+    // The verify pass is a full Opus call and was never reported, so every study
+    // has been settling short by the cost of its own fact-check — the same class
+    // of gap that left the analyze half out of the ledger. A cost-per-study used
+    // to set prices has to include every call that actually runs.
+    if (typeof onUsage === 'function') {
+      try { onUsage('verify', res?.usage, VERIFY_MODEL) } catch { /* never break a study */ }
+    }
     parsed = parseJSON(res)
   } catch (err) {
     const verification = emptyVerification('failed')

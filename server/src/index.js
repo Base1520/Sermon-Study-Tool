@@ -22,7 +22,32 @@ const meter = require('./meter')
 const engine = require('./engine')
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL })
+
+/**
+ * A pool without an 'error' listener is a process that dies on a dropped idle
+ * connection. Postgres closes idle clients routinely — a restart, a failover, a
+ * network blip — and node-pg emits that on the POOL, where an unhandled 'error'
+ * event is fatal. The pool replaces the client on its own; all this does is stop
+ * a routine event from taking the API down with it.
+ */
+db.on('error', (err) => console.error('[db] idle client error:', err.message))
+
 const app = express()
+
+/**
+ * Wrap an async route so a rejection becomes a 500 instead of a dead server.
+ *
+ * express 4 — which is what package.json pins and the image installs — does NOT
+ * catch a rejected promise from a handler. The rejection escapes to the process,
+ * and Node's default for an unhandled rejection is to TERMINATE. So one bad
+ * request (a Postgres blip inside /v1/me, a malformed body) would take the API
+ * down for everyone, mid-study, including people who had already paid.
+ *
+ * Verify this against the version in server/package.json, not whatever a stray
+ * node_modules resolves to: express 5 handles it, express 4 does not, and the
+ * difference is the whole bug.
+ */
+const route = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 app.set('trust proxy', 1)
 
 // THE WEBHOOK IS MOUNTED FIRST, AND THAT ORDER IS THE WHOLE POINT.
@@ -50,18 +75,18 @@ const period = () => {
 }
 
 // ── Health ──────────────────────────────────────────────────────────────────
-app.get('/health', async (_req, res) => {
+app.get('/health', route(async (_req, res) => {
   try {
     await db.query('SELECT 1')
     res.json({ ok: true })
   } catch (e) {
     res.status(503).json({ ok: false, error: e.message })
   }
-})
+}))
 
 // ── Who am I and what may I do ──────────────────────────────────────────────
 // The client calls this on launch to decide what to show. It never 401s.
-app.get('/v1/me', async (req, res) => {
+app.get('/v1/me', route(async (req, res) => {
   const ent = entitlementFor(req.identity.account)
   const { periodStart } = period()
   let used = 0
@@ -81,7 +106,7 @@ app.get('/v1/me', async (req, res) => {
     plans: Object.fromEntries(Object.entries(PLANS).map(([k, v]) =>
       [k, { label: v.label, priceUsd: v.priceUsd, studiesPerMonth: v.studiesPerMonth }])),
   })
-})
+}))
 
 /**
  * Claim a study, or explain why not.
@@ -96,6 +121,20 @@ async function claimStudy(req, { ent, accountId, periodStart, periodEnd }) {
     return { status: 503, body: {
       error: 'SERVICE_PAUSED',
       message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
+    } }
+  }
+
+  // THE MIDDLE RUNG, which was computed and then never consulted. Without this
+  // the brake had exactly one setting — 150% of the ceiling — so the first thing
+  // that ever stopped a runaway also stopped every paying customer. At 90% the
+  // FREE tier closes and paid work continues: the people who are paying keep
+  // working, and the tier anyone can open with a fresh uuid is the one that
+  // yields. That ordering is the whole point of having two rungs.
+  if (ceiling.blockNewSignups && !accountId) {
+    return { status: 503, body: {
+      error: 'FREE_TIER_PAUSED',
+      headline: 'Free studies are paused right now.',
+      message: 'More people started studies today than expected. Subscribers are unaffected, and this clears on its own.',
     } }
   }
 
@@ -140,7 +179,7 @@ const newStudyId = () =>
 //
 // THIS is where a study is charged. /v1/read then rides the same reservation, so
 // the full flow costs one study and not two. See the studyId branch below.
-app.post('/v1/analyze', async (req, res) => {
+app.post('/v1/analyze', route(async (req, res) => {
   const { text, reference } = req.body || {}
   if (!text || !reference) {
     return res.status(400).json({ error: 'text and reference are required' })
@@ -180,18 +219,42 @@ app.post('/v1/analyze', async (req, res) => {
       const spent = await engine.studyCost(db, studyId).catch(() => 0)
       await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
       await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+    } else if (req.identity.installId) {
+      // THE FREE CREDIT IS THE ONLY ONE HE WILL EVER GET. Spending it on a
+      // crash — a model timeout, a parse failure — and never giving it back
+      // means his single impression of the product is an error message and a
+      // paywall, permanently, with no way to retry. Give it back.
+      await db.query(
+        `UPDATE anon_install SET studies_used = GREATEST(studies_used - 1, 0), updated_at = now()
+          WHERE install_id = $1`, [req.identity.installId]).catch(() => {})
     }
     const code = e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'ANALYSIS_FAILED'
     res.status(code === 'INPUT_TOO_LARGE' ? 413 : 500)
        .json({ error: code, message: e?.message || 'The analysis could not be completed.' })
   }
-})
+}))
 
 // ── The reading ─────────────────────────────────────────────────────────────
-app.post('/v1/read', async (req, res) => {
+/**
+ * The analysis is CLIENT-SUPPLIED and goes straight into the model prompt, so
+ * its size is a cost the sender chooses and Cole pays. checkGenerationInput only
+ * ever bounded the reference string. A real analysis is a few tens of KB; this
+ * ceiling is generous enough never to touch one and tight enough that a single
+ * request cannot outrun the $0.75 worst-case reservation held against it.
+ */
+const MAX_ANALYSIS_CHARS = 120_000
+
+app.post('/v1/read', route(async (req, res) => {
   const { analysis, reference, level, studyId: priorStudyId } = req.body || {}
   if (!analysis || !reference) {
     return res.status(400).json({ error: 'analysis and reference are required' })
+  }
+  const analysisSize = JSON.stringify(analysis).length
+  if (analysisSize > MAX_ANALYSIS_CHARS) {
+    return res.status(413).json({
+      error: 'INPUT_TOO_LARGE',
+      message: `That analysis is too large to read (${Math.round(analysisSize / 1000)}KB).`,
+    })
   }
 
   const ent = entitlementFor(req.identity.account)
@@ -298,7 +361,7 @@ app.post('/v1/read', async (req, res) => {
     send({ type: 'error', code, message: e?.message || 'The reading could not be completed.' })
     res.end()
   }
-})
+}))
 
 // ── Redeem an access code ───────────────────────────────────────────────────
 /**
@@ -314,7 +377,7 @@ app.post('/v1/read', async (req, res) => {
  * on the server can be revoked the moment a code leaks; a comp compiled into a
  * binary is permanent and public the day someone posts it.
  */
-app.post('/v1/redeem', async (req, res) => {
+app.post('/v1/redeem', route(async (req, res) => {
   const raw = String((req.body || {}).code || '').trim().toUpperCase()
   const installId = req.identity.installId
   if (!raw) return res.status(400).json({ error: 'code required' })
@@ -371,10 +434,31 @@ app.post('/v1/redeem', async (req, res) => {
   const token = await auth.issueDeviceToken(db, { accountId, installId, label: code.label || 'Comp' })
   const { rows: acct } = await db.query(`SELECT plan, status FROM account WHERE id = $1`, [accountId])
   res.json({ token, ...entitlementFor(acct[0]), label: code.label ?? null })
-})
+}))
 
 // ── Stripe ──────────────────────────────────────────────────────────────────
 require('./stripe').mount(app, db)
+
+/**
+ * The last stop for anything route() caught.
+ *
+ * Registered AFTER every route, because express picks error handlers by
+ * position. If the response has already started streaming there is nothing to
+ * send — the headers and part of the body are long gone — so the connection is
+ * simply closed rather than corrupted with a JSON error object appended to a
+ * half-written document.
+ */
+app.use((err, _req, res, _next) => {
+  console.error('[route] unhandled:', err?.stack || err?.message || err)
+  if (res.headersSent) return res.end()
+  res.status(500).json({ error: 'SERVER_ERROR', message: 'Something went wrong on our end.' })
+})
+
+// A last-resort net. Nothing should reach here now that routes are wrapped, but
+// an unhandled rejection anywhere else defaults to KILLING the process, and this
+// server is holding live studies people have paid for.
+process.on('unhandledRejection', (e) => console.error('[fatal] unhandled rejection:', e?.stack || e))
+process.on('uncaughtException', (e) => console.error('[fatal] uncaught exception:', e?.stack || e))
 
 const port = process.env.PORT || 8080
 app.listen(port, () => console.log(`[operator] listening on ${port}`))

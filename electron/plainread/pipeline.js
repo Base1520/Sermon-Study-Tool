@@ -653,6 +653,10 @@ async function runDeferredVerification({
   cache,
   key,
   vaultSourced,
+  // The recorder, so the deferred check bills like the inline one. Optional:
+  // omitted, the verify call simply goes unreported, which is what it did for
+  // every study before this parameter existed.
+  onUsage,
   // DEFAULTED, and the default is the entire point. This parameter shipped
   // without one and without a call site that supplied it, so `verifyFn` was
   // `undefined` on every deferred run: the call below threw TypeError, the catch
@@ -664,7 +668,7 @@ async function runDeferredVerification({
 }) {
   let verified
   try {
-    verified = await verifyFn({ doc: preVerifyDoc, payload, apiKey, createClient, retry, parse })
+    verified = await verifyFn({ doc: preVerifyDoc, payload, apiKey, createClient, retry, parse, onUsage })
   } catch {
     verified = { ...preVerifyDoc, verification: skippedVerification() }
     verified.verification.status = 'failed'
@@ -1188,7 +1192,7 @@ async function plainRead({
       verified = { ...doc, verification: pendingVerification() }
     } else if (verify) {
       try {
-        verified = await runVerify({ doc, payload, apiKey, createClient, retry, parse })
+        verified = await runVerify({ doc, payload, apiKey, createClient, retry, parse, onUsage })
       } catch (err) {
         if (err instanceof PlainReadValidationError && attempt === 0) {
           lastError = err
@@ -1280,6 +1284,7 @@ async function plainRead({
         cache,
         key,
         vaultSourced,
+        onUsage,
         // Was omitted, which left runDeferredVerification's `verifyFn` undefined
         // and turned every background check into a swallowed TypeError. Pass it.
         verifyFn: runVerify,

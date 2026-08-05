@@ -245,7 +245,10 @@ function mount(app, db) {
         message: 'The subscription is not active yet. Try again in a moment.' })
     }
 
-    const token = await auth.issueDeviceToken(db, {
+    // Destructured — see the note in index.js /v1/redeem. Returning the whole
+    // { token, deviceId } object here would hand a paying subscriber a token the
+    // client cannot send.
+    const { token } = await auth.issueDeviceToken(db, {
       accountId: account.id, installId, label: 'The Operator',
     })
     res.json({ token, email: account.email, ...state })

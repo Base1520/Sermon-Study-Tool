@@ -431,7 +431,12 @@ app.post('/v1/redeem', route(async (req, res) => {
       [raw, installId, accountId])
   }
 
-  const token = await auth.issueDeviceToken(db, { accountId, installId, label: code.label || 'Comp' })
+  // DESTRUCTURED. issueDeviceToken returns { token, deviceId }; assigning the
+  // whole object made the response `token: {token, deviceId}`, the client stored
+  // the object, and the header went out as "Bearer [object Object]" — so a
+  // redeemed comp code produced a perfectly valid account that then read as
+  // anonymous on every request. Caught end to end, not by a unit test.
+  const { token } = await auth.issueDeviceToken(db, { accountId, installId, label: code.label || 'Comp' })
   const { rows: acct } = await db.query(`SELECT plan, status FROM account WHERE id = $1`, [accountId])
   res.json({ token, ...entitlementFor(acct[0]), label: code.label ?? null })
 }))

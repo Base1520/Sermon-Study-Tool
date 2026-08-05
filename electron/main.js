@@ -574,6 +574,20 @@ ipcMain.handle('hosted-checkout', async (_, { plan, email }) => {
  * browser's return. "Not yet" is a normal answer, not an error — the webhook
  * and the customer's browser race each other.
  */
+/** Beta feedback — submit and read. */
+ipcMain.handle('feedback-submit', async (_, payload) => {
+  if (!hosted.hostedBaseUrl()) return { ok: false, message: 'This build is not connected to the server.' }
+  try {
+    return await hosted.sendFeedback(store, { ...payload, version: app.getVersion(), platform: process.platform })
+  } catch (e) {
+    return { ok: false, message: e.message }
+  }
+})
+ipcMain.handle('feedback-list', async (_, limit) => {
+  if (!hosted.hostedBaseUrl()) return []
+  try { return await hosted.listFeedback(store, limit) } catch { return [] }
+})
+
 /** Stripe's billing page. Opened in the real browser, never inside the app. */
 ipcMain.handle('hosted-portal', async () => {
   if (!hosted.hostedBaseUrl()) throw new Error('This build is not connected to the server.')

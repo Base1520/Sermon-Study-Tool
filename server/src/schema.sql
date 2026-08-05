@@ -122,6 +122,25 @@ CREATE TABLE IF NOT EXISTS document_cache (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- ── Beta feedback ───────────────────────────────────────────────────────────
+-- Was a Supabase project that no longer exists — the host is NXDOMAIN, so every
+-- submission from a tester has been failing, and whatever was already submitted
+-- is gone. It lives here now, next to everything else, so there is one thing to
+-- keep alive instead of two.
+CREATE TABLE IF NOT EXISTS feedback (
+  id         bigserial PRIMARY KEY,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  name       text,
+  category   text NOT NULL DEFAULT 'General',   -- Bug | Feature | UX | General
+  body       text NOT NULL,
+  version    text,
+  platform   text,
+  install_id text,
+  account_id uuid REFERENCES account(id) ON DELETE SET NULL,
+  decision   text                               -- comply | ignore | null
+);
+CREATE INDEX IF NOT EXISTS feedback_created_idx ON feedback(created_at DESC);
+
 -- ── Access codes ────────────────────────────────────────────────────────────
 -- Comped access, handed out by Cole. Two reasons this is a table and not a
 -- constant in the code: a code must be revocable the moment it leaks, and Cole

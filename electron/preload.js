@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hostedCheckout: (payload) => ipcRenderer.invoke('hosted-checkout', payload),
   hostedTopup: () => ipcRenderer.invoke('hosted-topup'),
   hostedPortal: () => ipcRenderer.invoke('hosted-portal'),
+  feedbackSubmit: (payload) => ipcRenderer.invoke('feedback-submit', payload),
+  feedbackList: (limit) => ipcRenderer.invoke('feedback-list', limit),
   hostedClaim: () => ipcRenderer.invoke('hosted-claim'),
   licenseSet: (licenseString) => ipcRenderer.invoke('license-set', licenseString),
   licenseCatalog: () => ipcRenderer.invoke('license-catalog'),

@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { supabase, supabaseReady } from '../lib/supabase'
+/* Feedback moved off Supabase — that project no longer exists (its host is
+   NXDOMAIN), so every report a tester submitted failed and told nobody. It goes
+   through the app's own API now, so there is one backend to keep alive. */
+const api = () => (window as any).electronAPI
 import { BASE, FONT } from '../theme'
 import { OpsPanel } from './OpsPanel'
 
@@ -41,6 +44,14 @@ export function BetaFeedback({ onClose, isAdmin = false }: Props) {
   const [feed, setFeed]       = useState<FeedbackRow[]>([])
   const [feedLoading, setFeedLoading] = useState(false)
   const [appVersion, setAppVersion] = useState('dev')
+  /* null = not yet known. Only a definite false shows OFFLINE, so the panel does
+     not flash a scary banner for the moment before the answer arrives. */
+  const [channelUp, setChannelUp] = useState<boolean | null>(null)
+  useEffect(() => {
+    ;(window as any).electronAPI?.hostedEnabled?.()
+      .then((on: boolean) => setChannelUp(Boolean(on)))
+      .catch(() => setChannelUp(false))
+  }, [])
 
   useEffect(() => {
     ;(window as any).electronAPI?.getAppVersion?.()
@@ -49,72 +60,65 @@ export function BetaFeedback({ onClose, isAdmin = false }: Props) {
   }, [])
 
   const loadFeed = useCallback(async () => {
-    if (!supabase) return
     setFeedLoading(true)
-    const { data } = await supabase
-      .from('beta_feedback')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(100)
-    if (data) setFeed(data as FeedbackRow[])
+    try {
+      const rows = await api()?.feedbackList?.(100)
+      if (Array.isArray(rows)) setFeed(rows as FeedbackRow[])
+    } catch { /* an unreachable feed is not worth an error box */ }
     setFeedLoading(false)
   }, [])
 
-  // Real-time subscription
+  /* Polled rather than live-subscribed. The old realtime channel was the only
+     thing that needed a websocket, and a feed that refreshes every 20 seconds is
+     indistinguishable for a handful of testers. */
   useEffect(() => {
-    if (!supabase || tab !== 'feed') return
+    if (tab !== 'feed') return
     loadFeed()
-    const channel = supabase
-      .channel('beta_feedback_live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'beta_feedback' }, () => {
-        loadFeed()
-      })
-      .subscribe()
-    return () => { supabase!.removeChannel(channel) }
+    const t = setInterval(loadFeed, 20000)
+    return () => clearInterval(t)
   }, [tab, loadFeed])
 
   async function handleSubmit() {
-    if (!supabase || !body.trim()) return
+    if (!body.trim() || submitting) return
     setSubmitting(true)
     setSubmitError(null)
     const n = name.trim() || 'Anonymous'
     localStorage.setItem('beta-name', n)
-    const row = { name: n, category, body: body.trim(), decision: null }
-    const meta = { version: appVersion, platform: navigator.platform || 'unknown' }
 
-    // Try with version/platform; fall back to plain row if those columns
-    // don't exist yet in the table.
-    let { error } = await supabase.from('beta_feedback').insert({ ...row, ...meta })
-    if (error && /column/i.test(error.message)) {
-      ;({ error } = await supabase.from('beta_feedback').insert(row))
+    try {
+      const res = await api()?.feedbackSubmit?.({
+        name: n, category, body: body.trim(),
+        version: appVersion, platform: navigator.platform || 'unknown',
+      })
+      if (!res?.ok) {
+        setSubmitError(res?.message || "Couldn't send. Check your internet and try again.")
+        return
+      }
+      setSubmitted(true)
+      setBody('')
+      setTimeout(() => setSubmitted(false), 3000)
+    } catch (e: any) {
+      setSubmitError(e?.message || "Couldn't send. Check your internet and try again.")
+    } finally {
+      setSubmitting(false)
     }
-
-    setSubmitting(false)
-    if (error) {
-      setSubmitError(`Couldn't send — ${error.message}. Check your internet and try again.`)
-      return
-    }
-    setSubmitted(true)
-    setBody('')
-    setTimeout(() => setSubmitted(false), 3000)
   }
 
-  async function setDecision(id: string, decision: Decision) {
-    if (!supabase || !isAdmin) return
-    const prev = feed
-    // Optimistic update, revert on failure
+  /* Local only, for now. Triaging a report is Cole's call and there is no route
+     for it yet — marking it here is a note to himself that survives the session,
+     not a server write pretending to be one. */
+  function setDecision(id: string, decision: Decision) {
+    if (!isAdmin) return
     setFeed(p => p.map(r => r.id === id ? { ...r, decision } : r))
-    const { error } = await supabase.from('beta_feedback').update({ decision }).eq('id', id)
-    if (error) setFeed(prev)
   }
 
   return (
     <OpsPanel
       title="BETA FEEDBACK"
       tag="FIELD REPORTS · DIRECT LINE"
-      status={supabaseReady
-        ? { label: 'CHANNEL LIVE' }
-        : { label: 'OFFLINE MODE', color: '#c07050' }}
+      status={channelUp === false
+        ? { label: 'OFFLINE MODE', color: '#c07050' }
+        : { label: 'CHANNEL LIVE' }}
       width={480}
       zIndex={9100}
       onClose={onClose}
@@ -143,13 +147,13 @@ export function BetaFeedback({ onClose, isAdmin = false }: Props) {
           <motion.div key="submit" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             style={{ padding: '20px 20px 32px', fontFamily: FONT.mono }}>
 
-            {!supabaseReady && (
+            {channelUp === false && (
               <div style={{
                 background: '#c0505015', border: `1px solid #c0505040`,
                 borderRadius: 8, padding: '10px 14px', marginBottom: 16,
                 fontSize: 9, color: '#c07070', lineHeight: 1.6,
               }}>
-                Supabase not configured yet — feedback won't save until you add your keys. Still usable for demo.
+                This build is not connected to the server, so reports cannot be sent from here.
               </div>
             )}
 

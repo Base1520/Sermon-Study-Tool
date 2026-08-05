@@ -347,6 +347,8 @@ module.exports = {
   checkout,
   topup,
   portal,
+  sendFeedback,
+  listFeedback,
   redeem,
   claim,
   hostedBaseUrl,

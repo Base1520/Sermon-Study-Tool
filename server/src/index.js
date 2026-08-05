@@ -460,6 +460,47 @@ app.post('/v1/ask', route(async (req, res) => {
   }
 }))
 
+// ── Beta feedback ───────────────────────────────────────────────────────────
+/**
+ * Where a tester's report actually lands.
+ *
+ * It used to POST to a Supabase project that has since been deleted — the host
+ * does not resolve — so every submission failed and the app told nobody. Free
+ * and unauthenticated on purpose: a man reporting that the app is broken must
+ * not be blocked by the part of it that is broken.
+ */
+app.post('/v1/feedback', route(async (req, res) => {
+  const { name, category, body, version, platform } = req.body || {}
+  const text = String(body ?? '').trim()
+  if (!text) return res.status(400).json({ error: 'body is required' })
+  if (text.length > 8000) return res.status(413).json({ error: 'that is too long to submit' })
+
+  const CATEGORIES = new Set(['Bug', 'Feature', 'UX', 'General'])
+  const { rows } = await db.query(
+    `INSERT INTO feedback (name, category, body, version, platform, install_id, account_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
+    [
+      String(name ?? '').slice(0, 120) || null,
+      CATEGORIES.has(category) ? category : 'General',
+      text,
+      String(version ?? '').slice(0, 40) || null,
+      String(platform ?? '').slice(0, 40) || null,
+      req.identity.installId ?? null,
+      req.identity.account?.id ?? null,
+    ],
+  )
+  res.json({ ok: true, id: rows[0].id, createdAt: rows[0].created_at })
+}))
+
+/** The feed, newest first. Read-only; decisions stay Cole's to make in SQL. */
+app.get('/v1/feedback', route(async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 50, 200)
+  const { rows } = await db.query(
+    `SELECT id, created_at, name, category, body, version, platform, decision
+       FROM feedback ORDER BY created_at DESC LIMIT $1`, [limit])
+  res.json({ feedback: rows })
+}))
+
 // ── Redeem an access code ───────────────────────────────────────────────────
 /**
  * Comped access, no card, no Stripe.

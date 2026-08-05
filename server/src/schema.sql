@@ -83,8 +83,15 @@ CREATE TABLE IF NOT EXISTS usage_event (
   reference    text,
   at           timestamptz NOT NULL DEFAULT now()
 );
+-- Anonymous work has no account_id, so without this column there is nothing tying
+-- a free study to the install that paid for it — and the free user could never be
+-- allowed to finish the study they already spent their one credit on. Added as an
+-- ALTER because the table above is CREATE ... IF NOT EXISTS and will already exist.
+ALTER TABLE usage_event ADD COLUMN IF NOT EXISTS install_id text;
+
 CREATE INDEX IF NOT EXISTS usage_event_account_idx ON usage_event(account_id, at);
 CREATE INDEX IF NOT EXISTS usage_event_study_idx   ON usage_event(study_id);
+CREATE INDEX IF NOT EXISTS usage_event_install_idx ON usage_event(install_id, study_id);
 
 -- ── Settings ────────────────────────────────────────────────────────────────
 -- The kill switch lives HERE and not in an environment variable, so it can be

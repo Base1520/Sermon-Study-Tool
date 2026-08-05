@@ -67,7 +67,7 @@ async function writeCache(db, key, document) {
  * one. Every row carries the study id, so the analyze fan-out, the document,
  * its retries and the verify pass roll up into a single number per study.
  */
-function makeRecorder(db, { accountId, studyId, reference }) {
+function makeRecorder(db, { accountId, studyId, reference, installId }) {
   return (label, usage, model) => {
     if (!usage) return null
     const priced = priceCall(usage, model)
@@ -75,12 +75,12 @@ function makeRecorder(db, { accountId, studyId, reference }) {
     db.query(
       `INSERT INTO usage_event
          (account_id, study_id, label, model, input_tokens, output_tokens,
-          cache_write_tokens, cache_read_tokens, usd, reference)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          cache_write_tokens, cache_read_tokens, usd, reference, install_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [accountId ?? null, studyId, label, model,
        priced.inputTokens, priced.outputTokens,
        priced.cacheWriteTokens, priced.cacheReadTokens,
-       priced.costUsd, reference ?? null],
+       priced.costUsd, reference ?? null, installId ?? null],
     ).catch((e) => console.error('[usage] write failed:', e.message))
     return priced
   }
@@ -103,10 +103,10 @@ async function studyCost(db, studyId) {
  * while the rest is still being written, rather than watching a spinner for a
  * hundred seconds.
  */
-async function runPlainRead(db, { analysis, requestedReference, level, accountId, studyId, onSection }) {
+async function runPlainRead(db, { analysis, requestedReference, level, accountId, studyId, installId, onSection }) {
   checkGenerationInput({ reference: requestedReference })
 
-  const record = makeRecorder(db, { accountId, studyId, reference: requestedReference })
+  const record = makeRecorder(db, { accountId, studyId, reference: requestedReference, installId })
   const writes = []
   const preloaded = await preloadCache(db, [])   // engine computes its own key; misses write through
   const cache = makeCache(preloaded, (k, v) => writes.push(writeCache(db, k, v)))
@@ -136,14 +136,14 @@ async function runPlainRead(db, { analysis, requestedReference, level, accountId
  * same analysis. The second man to open Romans 8 pays nothing for this half
  * either.
  */
-async function runAnalyze(db, { text, reference, accountId, studyId, onStage }) {
+async function runAnalyze(db, { text, reference, accountId, studyId, installId, onStage }) {
   const key = analysisCacheKey(reference, text)
 
   const { rows } = await db.query(
     `SELECT document FROM document_cache WHERE cache_key = $1`, [key])
   if (rows.length) return { analysis: rows[0].document, cached: true }
 
-  const record = makeRecorder(db, { accountId, studyId, reference })
+  const record = makeRecorder(db, { accountId, studyId, reference, installId })
   const analysis = await analyzePassage({
     text,
     reference,
@@ -175,12 +175,35 @@ async function studyHasDocument(db, studyId) {
   return rows.length > 0
 }
 
-/** Does this study id belong to this caller? Anonymous studies belong to nobody. */
-async function studyBelongsTo(db, studyId, accountId) {
-  if (!studyId || !accountId) return false
+/**
+ * Does this study id belong to this caller?
+ *
+ * ANONYMOUS COUNTS. It used to require an account, and that quietly broke the
+ * single most important screen in the product: a free user spent their one
+ * lifetime study on /v1/analyze and was then refused the reading — shown a
+ * paywall promising "it stays here, read it, export it" about a document that
+ * had never been generated. The free study has to deliver a WHOLE study.
+ *
+ * Still bounded, because riding also requires that the study has not already
+ * produced a document: one reservation, one document. A free user cannot get a
+ * second one without a new analysis, and that is refused.
+ */
+async function studyBelongsTo(db, studyId, { accountId, installId }) {
+  if (!studyId) return false
+  if (accountId) {
+    const { rows } = await db.query(
+      `SELECT 1 FROM usage_event WHERE study_id = $1 AND account_id = $2 LIMIT 1`,
+      [studyId, accountId],
+    )
+    return rows.length > 0
+  }
+  if (!installId) return false
+  // An anonymous study must ALSO have no account on it, so a leaked study id
+  // cannot be used to ride a paying customer's reservation.
   const { rows } = await db.query(
-    `SELECT 1 FROM usage_event WHERE study_id = $1 AND account_id = $2 LIMIT 1`,
-    [studyId, accountId],
+    `SELECT 1 FROM usage_event
+      WHERE study_id = $1 AND install_id = $2 AND account_id IS NULL LIMIT 1`,
+    [studyId, installId],
   )
   return rows.length > 0
 }

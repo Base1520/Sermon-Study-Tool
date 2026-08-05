@@ -56,6 +56,10 @@ function fakeDb() {
     if (/label LIKE 'plain-read%'/.test(sql)) {
       return { rows: events.filter(e => e.study_id === p[0] && /^plain-read/.test(e.label)).slice(0, 1) }
     }
+    if (/AND install_id = \$2 AND account_id IS NULL/.test(sql)) {
+      return { rows: events.filter(e =>
+        e.study_id === p[0] && e.install_id === p[1] && !e.account_id).slice(0, 1) }
+    }
     if (/WHERE study_id = \$1 AND account_id = \$2/.test(sql)) {
       return { rows: events.filter(e => e.study_id === p[0] && e.account_id === p[1]).slice(0, 1) }
     }
@@ -74,9 +78,14 @@ function fakeDb() {
 }
 
 // The two guards, exactly as engine.js implements them.
-const studyBelongsTo = async (db, studyId, accountId) => {
-  if (!studyId || !accountId) return false
-  const { rows } = await db.query('WHERE study_id = $1 AND account_id = $2', [studyId, accountId])
+const studyBelongsTo = async (db, studyId, { accountId, installId }) => {
+  if (!studyId) return false
+  if (accountId) {
+    const { rows } = await db.query('WHERE study_id = $1 AND account_id = $2', [studyId, accountId])
+    return rows.length > 0
+  }
+  if (!installId) return false
+  const { rows } = await db.query('AND install_id = $2 AND account_id IS NULL', [studyId, installId])
   return rows.length > 0
 }
 const studyHasDocument = async (db, studyId) => {
@@ -109,7 +118,7 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
     ok('booking what it really spent', close(afterAnalyze.actual, 0.25), `${afterAnalyze.actual}`)
 
     // ── /v1/read: rides the claim ──
-    const rides = !!studyId && await studyBelongsTo(db, studyId, ACCT) && !(await studyHasDocument(db, studyId))
+    const rides = !!studyId && await studyBelongsTo(db, studyId, { accountId: ACCT }) && !(await studyHasDocument(db, studyId))
     ok('the reading qualifies to ride', rides)
 
     const before = await studyCost(db, studyId)
@@ -132,7 +141,7 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
     db.addEvent({ study_id: studyId, account_id: ACCT, label: 'analyze.core', usd: 0.2 })
     db.addEvent({ study_id: studyId, account_id: ACCT, label: 'plain-read', usd: 0.3 })
 
-    const again = !!studyId && await studyBelongsTo(db, studyId, ACCT) && !(await studyHasDocument(db, studyId))
+    const again = !!studyId && await studyBelongsTo(db, studyId, { accountId: ACCT }) && !(await studyHasDocument(db, studyId))
     ok('an id that already produced a document cannot ride again', again === false)
 
     // ...so it takes a fresh claim, and the allowance moves.
@@ -145,19 +154,46 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
     const db = fakeDb()
     db.addEvent({ study_id: 'study-C', account_id: 'someone-else', label: 'analyze.core', usd: 0.2 })
     ok('a study id belonging to another account is refused',
-       (await studyBelongsTo(db, 'study-C', ACCT)) === false)
+       (await studyBelongsTo(db, 'study-C', { accountId: ACCT })) === false)
     ok('an invented study id is refused',
-       (await studyBelongsTo(db, 'no-such-study', ACCT)) === false)
+       (await studyBelongsTo(db, 'no-such-study', { accountId: ACCT })) === false)
   }
 
-  console.log('\nAN ANONYMOUS CALLER NEVER RIDES')
+  console.log('\nTHE FREE STUDY DELIVERS A WHOLE STUDY')
+  {
+    // The bug this replaces: anonymous callers were refused the ride, so a free
+    // user spent their one credit on the analysis and was shown a paywall
+    // instead of the document — a paywall whose own words promised a document
+    // that had never been written. This is the first screen every downloader
+    // sees, so it is the most expensive bug in the product.
+    const db = fakeDb()
+    db.addEvent({ study_id: 'study-D', account_id: null, install_id: 'install-1', label: 'analyze.core', usd: 0.2 })
+
+    ok('a free user may finish the study they already paid for',
+       (await studyBelongsTo(db, 'study-D', { accountId: null, installId: 'install-1' })) === true)
+    ok('but only for a study that has not produced a document yet',
+       (await studyHasDocument(db, 'study-D')) === false)
+
+    // ...and once it has, the ride is over.
+    db.addEvent({ study_id: 'study-D', account_id: null, install_id: 'install-1', label: 'plain-read', usd: 0.3 })
+    ok('a second document on the same free credit is refused',
+       (await studyHasDocument(db, 'study-D')) === true)
+
+    ok('another install cannot ride it',
+       (await studyBelongsTo(db, 'study-D', { accountId: null, installId: 'install-2' })) === false)
+    ok('and neither can a caller with no install id',
+       (await studyBelongsTo(db, 'study-D', { accountId: null, installId: null })) === false)
+    ok('a missing study id is refused outright',
+       (await studyBelongsTo(db, undefined, { accountId: ACCT })) === false)
+  }
+
+  console.log('\nA LEAKED STUDY ID CANNOT RIDE A PAYING MAN\'S RESERVATION')
   {
     const db = fakeDb()
-    db.addEvent({ study_id: 'study-D', account_id: null, label: 'analyze.core', usd: 0.2 })
-    ok('no account means no ride, so the free tier stays one study',
-       (await studyBelongsTo(db, 'study-D', null)) === false)
-    ok('and a missing study id is refused outright',
-       (await studyBelongsTo(db, undefined, ACCT)) === false)
+    // A subscriber's study. An anonymous caller who somehow learned its id...
+    db.addEvent({ study_id: 'study-E', account_id: ACCT, install_id: 'install-9', label: 'analyze.core', usd: 0.2 })
+    ok('...cannot ride it anonymously, because the row has an account on it',
+       (await studyBelongsTo(db, 'study-E', { accountId: null, installId: 'install-9' })) === false)
   }
 
   console.log('\nA FAILED ANALYSIS GIVES THE STUDY BACK')

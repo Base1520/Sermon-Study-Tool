@@ -141,7 +141,7 @@ app.post('/v1/analyze', async (req, res) => {
   const studyId = newStudyId()
   try {
     const { analysis, cached } = await engine.runAnalyze(db, {
-      text, reference, accountId, studyId,
+      text, reference, accountId, studyId, installId: req.identity.installId,
     })
     if (accountId) {
       const actualUsd = await engine.studyCost(db, studyId)
@@ -171,16 +171,18 @@ app.post('/v1/read', async (req, res) => {
   // ONE STUDY, NOT TWO. A reading is the second half of work /v1/analyze already
   // charged for, so a client that passes back the studyId it was given rides
   // that same reservation. The id cannot be forged into free work: it only
-  // exists because analyze reserved and billed against this very account, and
-  // one reservation buys exactly one document — a replayed id whose document
-  // already exists falls through and pays again.
+  // exists because analyze reserved and billed against this very caller, and one
+  // reservation buys exactly one document — a replayed id whose document already
+  // exists falls through and pays again.
   //
-  // Anonymous callers never qualify. Their one lifetime study is tracked against
-  // an install id they control, so honouring a studyId from them would turn the
-  // free tier into an unlimited one.
+  // THE FREE USER RIDES TOO, and must. A free install gets one lifetime study;
+  // analyze spends it. If the reading then refused them, every single person who
+  // downloads this app would get an analysis and a paywall, and the paywall's own
+  // words — "it stays here, read it, export it" — would be describing a document
+  // that was never written. One credit has to buy a whole study.
   const ridesPriorClaim =
     !!priorStudyId &&
-    await engine.studyBelongsTo(db, priorStudyId, accountId) &&
+    await engine.studyBelongsTo(db, priorStudyId, { accountId, installId: req.identity.installId }) &&
     !(await engine.studyHasDocument(db, priorStudyId))
 
   if (!ridesPriorClaim) {
@@ -225,6 +227,7 @@ app.post('/v1/read', async (req, res) => {
   try {
     const doc = await engine.runPlainRead(db, {
       analysis, requestedReference: reference, level, accountId, studyId,
+      installId: req.identity.installId,
       onSection: (section) => { if (!aborted) send({ type: 'section', section }) },
     })
 

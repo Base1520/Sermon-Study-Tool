@@ -1,0 +1,16 @@
+# What `railway up` must not upload.
+#
+# Deploys from local go through this file, not .dockerignore — the ignore runs
+# before the tarball is built, so anything listed here never leaves the machine.
+# node_modules alone is 558MB and the image installs its own copy anyway.
+node_modules
+dist
+dist-electron
+release
+build
+resources
+*.dmg
+*.zip
+*.exe
+*.blockmap
+.git

@@ -96,6 +96,29 @@ async function settleStudy(db, { accountId, periodStart, actualUsd }) {
 }
 
 /**
+ * Book spend against a reservation that has ALREADY been settled.
+ *
+ * Exists because a study is charged once but runs in two halves: /v1/analyze
+ * reserves, spends and settles; /v1/read then rides the same claim. Calling
+ * settleStudy() a second time would release a $0.75 hold that is no longer held
+ * — clamped at zero it silently eats some other request's in-flight money, which
+ * makes the global ceiling read low at exactly the moment a burst is happening.
+ *
+ * So: add what was actually spent, touch nothing else.
+ */
+async function recordAdditionalSpend(db, { accountId, periodStart, actualUsd }) {
+  const spent = Math.max(Number(actualUsd) || 0, 0)
+  if (!spent) return
+  await db.query(
+    `UPDATE usage_period
+        SET actual_usd = actual_usd + $3,
+            updated_at = now()
+      WHERE account_id = $1 AND period_start = $2`,
+    [accountId, periodStart, spent],
+  )
+}
+
+/**
  * Give back a reservation for a study that never ran — refused downstream, a
  * dropped connection, a crash. Without this a failed request silently eats a
  * man's allowance, which is the kind of quiet unfairness that loses a customer
@@ -180,6 +203,7 @@ async function ceilingStatus(db) {
 module.exports = {
   reserveStudy,
   settleStudy,
+  recordAdditionalSpend,
   releaseStudy,
   sweepStaleReservations,
   committedSpend,

@@ -68,30 +68,26 @@ app.get('/v1/me', async (req, res) => {
   })
 })
 
-// ── The reading ─────────────────────────────────────────────────────────────
-app.post('/v1/read', async (req, res) => {
-  const { analysis, reference, level } = req.body || {}
-  if (!analysis || !reference) {
-    return res.status(400).json({ error: 'analysis and reference are required' })
-  }
-
-  const ent = entitlementFor(req.identity.account)
-  const accountId = req.identity.account?.id ?? null
-  const { periodStart, periodEnd } = period()
-
-  // The global brake, checked before anything is promised.
+/**
+ * Claim a study, or explain why not.
+ *
+ * Shared by both spending routes so the free tier, the paid allowance and the
+ * global brake are enforced identically. Returns null when the caller may
+ * proceed, or the response body to send back when they may not.
+ */
+async function claimStudy(req, { ent, accountId, periodStart, periodEnd }) {
   const ceiling = await meter.ceilingStatus(db)
   if (ceiling.blockEverything) {
-    return res.status(503).json({
+    return { status: 503, body: {
       error: 'SERVICE_PAUSED',
       message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
-    })
+    } }
   }
 
   // Anonymous users get their one lifetime study, tracked against the install.
   if (!accountId) {
     const installId = req.identity.installId
-    if (!installId) return res.status(400).json({ error: 'x-install-id header required' })
+    if (!installId) return { status: 400, body: { error: 'x-install-id header required' } }
     const { rows } = await db.query(
       `INSERT INTO anon_install (install_id, studies_used)
             VALUES ($1, 1)
@@ -102,26 +98,104 @@ app.post('/v1/read', async (req, res) => {
       [installId, ent.lifetimeStudies],
     )
     if (rows.length === 0) {
-      return res.status(402).json({ error: 'UPGRADE_REQUIRED', ...upgradePrompt(ent) })
+      return { status: 402, body: { error: 'UPGRADE_REQUIRED', ...upgradePrompt(ent) } }
     }
-  } else {
-    const claim = await meter.reserveStudy(db, {
-      accountId, allowance: ent.allowance, periodStart, periodEnd,
-    })
-    if (!claim.ok) {
-      return res.status(402).json({
-        error: 'UPGRADE_REQUIRED',
-        used: claim.used,
-        allowance: claim.allowance,
-        ...upgradePrompt(ent, { used: claim.used }),
-      })
-    }
+    return null
   }
 
-  const studyId = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
+  const claim = await meter.reserveStudy(db, { accountId, allowance: ent.allowance, periodStart, periodEnd })
+  if (!claim.ok) {
+    return { status: 402, body: {
+      error: 'UPGRADE_REQUIRED',
+      used: claim.used,
+      allowance: claim.allowance,
+      ...upgradePrompt(ent, { used: claim.used }),
+    } }
+  }
+  return null
+}
+
+const newStudyId = () =>
+  `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
+
+// ── The analysis ────────────────────────────────────────────────────────────
+// The first half of a study, and the reason this route exists at all: until it
+// did, the only thing that could produce an `analysis` was the desktop app using
+// the user's own Anthropic key — so "download it and go" was impossible.
+//
+// THIS is where a study is charged. /v1/read then rides the same reservation, so
+// the full flow costs one study and not two. See the studyId branch below.
+app.post('/v1/analyze', async (req, res) => {
+  const { text, reference } = req.body || {}
+  if (!text || !reference) {
+    return res.status(400).json({ error: 'text and reference are required' })
+  }
+
+  const ent = entitlementFor(req.identity.account)
+  const accountId = req.identity.account?.id ?? null
+  const { periodStart, periodEnd } = period()
+
+  const refused = await claimStudy(req, { ent, accountId, periodStart, periodEnd })
+  if (refused) return res.status(refused.status).json(refused.body)
+
+  const studyId = newStudyId()
+  try {
+    const { analysis, cached } = await engine.runAnalyze(db, {
+      text, reference, accountId, studyId,
+    })
+    if (accountId) {
+      const actualUsd = await engine.studyCost(db, studyId)
+      await meter.settleStudy(db, { accountId, periodStart, actualUsd }).catch(() => {})
+    }
+    res.json({ analysis, studyId, cached })
+  } catch (e) {
+    // A study that never ran must not eat the allowance.
+    if (accountId) await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
+    const code = e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'ANALYSIS_FAILED'
+    res.status(code === 'INPUT_TOO_LARGE' ? 413 : 500)
+       .json({ error: code, message: e?.message || 'The analysis could not be completed.' })
+  }
+})
+
+// ── The reading ─────────────────────────────────────────────────────────────
+app.post('/v1/read', async (req, res) => {
+  const { analysis, reference, level, studyId: priorStudyId } = req.body || {}
+  if (!analysis || !reference) {
+    return res.status(400).json({ error: 'analysis and reference are required' })
+  }
+
+  const ent = entitlementFor(req.identity.account)
+  const accountId = req.identity.account?.id ?? null
+  const { periodStart, periodEnd } = period()
+
+  // ONE STUDY, NOT TWO. A reading is the second half of work /v1/analyze already
+  // charged for, so a client that passes back the studyId it was given rides
+  // that same reservation. The id cannot be forged into free work: it only
+  // exists because analyze reserved and billed against this very account, and
+  // one reservation buys exactly one document — a replayed id whose document
+  // already exists falls through and pays again.
+  //
+  // Anonymous callers never qualify. Their one lifetime study is tracked against
+  // an install id they control, so honouring a studyId from them would turn the
+  // free tier into an unlimited one.
+  const ridesPriorClaim =
+    !!priorStudyId &&
+    await engine.studyBelongsTo(db, priorStudyId, accountId) &&
+    !(await engine.studyHasDocument(db, priorStudyId))
+
+  if (!ridesPriorClaim) {
+    const refused = await claimStudy(req, { ent, accountId, periodStart, periodEnd })
+    if (refused) return res.status(refused.status).json(refused.body)
+  }
+
+  // Reusing the analyze id keeps the fan-out, the document, its retries and the
+  // verify pass rolled up as one study in the ledger — which is what makes
+  // cost-per-study a measured number rather than an estimate.
+  const studyId = ridesPriorClaim ? priorStudyId : newStudyId()
   let settled = false
   const release = async () => {
-    if (settled || !accountId) return
+    // Nothing to give back if this reading was riding a claim it did not make.
+    if (settled || !accountId || ridesPriorClaim) return
     settled = true
     await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
   }
@@ -143,6 +217,11 @@ app.post('/v1/read', async (req, res) => {
   let aborted = false
   req.on('close', () => { aborted = true })
 
+  // Charge the DELTA, not the total. On a ride-along the analyze half is already
+  // in usage_event under this same study id and has already been booked — summing
+  // the whole study here would bill that half twice.
+  const spentBefore = accountId ? await engine.studyCost(db, studyId) : 0
+
   try {
     const doc = await engine.runPlainRead(db, {
       analysis, requestedReference: reference, level, accountId, studyId,
@@ -153,8 +232,13 @@ app.post('/v1/read', async (req, res) => {
 
     if (accountId) {
       settled = true
-      const actualUsd = await engine.studyCost(db, studyId)
-      await meter.settleStudy(db, { accountId, periodStart, actualUsd }).catch(() => {})
+      const actualUsd = (await engine.studyCost(db, studyId)) - spentBefore
+      // A fresh claim still holds its $0.75 reservation and must release it.
+      // A ride-along's hold was released when analyze settled.
+      await (ridesPriorClaim
+        ? meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd })
+        : meter.settleStudy(db, { accountId, periodStart, actualUsd })
+      ).catch(() => {})
     }
 
     send({ type: 'done', document: doc, studyId })

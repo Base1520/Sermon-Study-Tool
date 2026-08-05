@@ -12,6 +12,10 @@ const {
 } = require('./commentary-contract')
 const { withRetry, parseModelJSON, checkGenerationInput } = require('./plainread/runtime')
 const { createRecorder, summarize } = require('./plainread/usage')
+// The analysis fan-out lives in the engine, not here, so the hosted server can
+// run the identical calls. This file keeps only what is genuinely the desktop's:
+// the electron-store cache, the history dedupe, the gate and the secret.
+const { analyzePassage, analysisCacheKey, explicitGeoReferences } = require('./plainread/analyze')
 const licenseStore = require('./license/store')
 const { initLicenseStore, touchClock } = licenseStore
 const { FEATURES } = require('./license/features')
@@ -494,36 +498,6 @@ ipcMain.handle('set-ui-zoom', (event, factor) => {
 })
 ipcMain.handle('get-ui-zoom', () => store?.get('ui-zoom', 1) ?? 1)
 
-function explicitGeoReferences(raw, passageText) {
-  if (!Array.isArray(raw) || !passageText) return []
-  const nonMappable = new Set([
-    'earth',
-    'sea',
-    'heaven',
-    'hades',
-    'four corners of the earth',
-    'broad plain of the earth',
-    'beloved city',
-    'gog',
-    'magog',
-    'gog and magog',
-  ])
-  const normalizedText = String(passageText)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-
-  return raw.filter((entry) => {
-    const place = String(entry?.place ?? '')
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-    if (!place || nonMappable.has(place)) return false
-    return ` ${normalizedText} `.includes(` ${place} `)
-  }).slice(0, 8)
-}
-
 ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) => {
   // Ceilings before anything else. The passage arrives from the caller and is
   // interpolated raw into three separate model calls, so an oversized paste is
@@ -546,8 +520,7 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) =
   stage('start')
   // Core exegesis is source-bound. Personal theology and profile data belong in
   // later pastoral/delivery surfaces, not in the passage analysis request.
-  const textHash = require('crypto').createHash('md5').update(text.trim()).digest('hex').slice(0, 8)
-  const cacheKey = `analysis-cache-v6-${reference.trim().toLowerCase().replace(/\s+/g, '-')}-${textHash}`
+  const cacheKey = analysisCacheKey(reference, text)
   if (store) {
     const cached = store.get(cacheKey, null)
     if (cached) {
@@ -591,260 +564,35 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) =
 
   requireFeature('gen.study')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
-  const client = new Anthropic.default({ apiKey })
 
-  const verseCount = Math.max(
-    (text.match(/^\d+\s/gm) || []).length,
-    text.split(/\n+/).filter(l => l.trim()).length,
-    Math.ceil(text.split(' ').length / 25)
-  )
-  const isLong = verseCount > 6
-  console.log(`[analyze-passage] ${reference}: ${verseCount} verses, isLong=${isLong}`)
+  // The fan-out itself is electron/plainread/analyze.js — the same function the
+  // hosted server calls. Everything around it in this handler (the cache above,
+  // the history below, the gate and the secret) is the desktop's job; the model
+  // calls are the engine's, so a reading can never differ between the two.
+  // The fan-out was never in the cost ledger — createRecorder's own comment
+  // promises "the analyze calls, the document, its retries and the verify pass
+  // roll up together", but nothing here had ever recorded the analyze half. Every
+  // study in the ledger has therefore been under-counted by roughly half its
+  // real cost. It gets its own id for now; joining it to the document's study id
+  // means threading one id through two separate IPC calls, which is a renderer
+  // change, not this one.
+  const __analyzeStudyId = newStudyId()
 
-  const userMsg = `${reference}\n\n"${text}"`
+  const result = await analyzePassage({
+    text,
+    reference,
+    apiKey,
+    createClient: (key) => new Anthropic.default({ apiKey: key }),
+    retry: withRetry,
+    parse: parseModelJSON,
+    onStage: stage,
+    onUsage: (label, usage, model) =>
+      recordUsage(label, usage, model, { studyId: __analyzeStudyId, ref: reference }),
+  })
 
-  const parseJSON = parseModelJSON
-
-  // ── Enrichment prompt (cultural notes + genre) — always parallel + non-fatal ──
-  const enrichPrompt = `You are a biblical scholar identifying cultural background, genre, and geographic references for sermon preparation.
-
-SOURCE DISCIPLINE:
-- The supplied passage controls. Separate what it explicitly says from historical background and interpretive inference.
-- Never state a debated identification, chronology, symbolic referent, or theological system as settled fact.
-- If a background claim is disputed, say so inside the explanation and mark claimStatus "disputed".
-- If a claim is a reasonable synthesis rather than documented background, mark claimStatus "inferred".
-- Do not invent a Roman custom, Jewish practice, ancient memory, geography, or lexical claim.
-- A mixed audience must stay mixed. Do not describe every church in Revelation as persecuted; the seven churches include faithful, pressured, compromised, and complacent congregations.
-- In apocalyptic, name inherited imagery without pretending every symbol has one undisputed decoding.
-
-Return ONLY valid JSON, no markdown:
-{
-  "geoReferences": [
-    {
-      "place": "exact city or region name matching canonical biblical spelling (e.g. 'Rome', 'Corinth', 'Jerusalem')",
-      "verses": ["verse reference where it appears, e.g. 'Romans 1:7'"],
-      "significance": "one sentence on why this location matters to the passage"
-    }
-  ],
-  "culturalNotes": [
-    {
-      "id": "cn1",
-      "phraseId": "p1",
-      "term": "specific word, phrase, or custom",
-      "category": "greco-roman|jewish|roman-legal|ane|hellenistic|household-code|honor-shame",
-      "explanation": "2-4 sentences on what this meant to the original audience and why a modern reader misses it",
-      "significance": "one sentence on how this changes interpretation",
-      "claimStatus": "well-attested|inferred|disputed",
-      "sourceBasis": "passage|biblical-intertext|historical-background"
-    }
-  ],
-  "questionsToConsider": [
-    "5-7 probing questions the preacher should wrestle with before preaching this text — interpretive tensions, likely congregational objections, application blind spots. Direct, specific to THIS passage, no generic filler."
-  ],
-  "genre": {
-    "genre": "Narrative|Law|Poetry|Wisdom|Prophecy|Epistle|Gospel|Apocalyptic|Discourse",
-    "subgenre": "specific descriptor e.g. 'Pauline Theological Argument'",
-    "readingRules": ["4-6 concrete hermeneutical rules specific to this genre and passage"]
-  }
-}
-
-For geoReferences: include ONLY a city, region, river, mountain, sea, or land explicitly named in the supplied passage text. Do not add a recipient city from the book title, a place named in another chapter, or an interpretive identification of a symbol. Do not treat a person, generic terrain, symbolic label, or disputed identification as a map location; "Gog and Magog" is not one mappable place. If the passage itself names no certain mappable location, return an empty array. Maximum 8 locations.
-
-Identify culturally embedded references a first-century reader would grasp but a modern reader misses. Only include references actually present in the text. Maximum 6 cultural notes.`
-
-  let result
-
-  if (isLong) {
-    // ── LONG PASSAGE: 3 parallel calls — split output to avoid token overflow ──
-    // Call 1: phrases only (Opus, 4000 tokens)
-    // Call 2: mainTheme + outline + canonicalContext (Sonnet, 2500 tokens)
-    // Call 3: cultural notes + genre (Sonnet, 2500 tokens)
-
-    const phrasesPrompt = `You are a biblical scholar performing grammatical phrasing analysis for sermon preparation.
-
-Return ONLY valid JSON — no markdown, no extra text:
-{
-  "phrases": [
-    {
-      "id": "p1",
-      "text": "clause text (10 words max)",
-      "type": "main|purpose|result|condition|concession|temporal|causal|relative|infinitival|participial|contrast",
-      "level": 0,
-      "parentId": null,
-      "connective": null,
-      "connectiveFunction": null,
-      "role": "subject|predicate|object|modifier",
-      "theologicalNote": "4 words max"
-    }
-  ]
-}
-
-STRICT: Maximum 16 phrases. You MUST select clauses from the BEGINNING, MIDDLE, and END of the passage in roughly equal thirds. For Psalm 119 specifically: pick ~5 clauses from Aleph–Gimel (vv.1–24), ~6 from Daleth–Mem (vv.25–96), ~5 from Nun–Taw (vv.97–176). Never cluster all selections near the end. Prioritize main declarative clauses, purpose/result clauses, and key contrasts that reveal the full arc.
-
-HIERARCHY IS REQUIRED: You MUST assign parentId relationships. The first phrase (p1) has parentId: null. Subordinate clauses must reference their governing clause via parentId. Level 0 = root/main, level 1 = directly subordinate, level 2 = doubly subordinate. Never return all phrases at level 0 with parentId null — that produces a broken flat diagram. Example: a purpose clause ("that I might not sin against you") should have level:1 and parentId pointing to its governing main clause.`
-
-    const contextPrompt = `You are a biblical scholar providing sermon context analysis.
-
-Do not turn inference into text. If the passage leaves the speaker, throne
-occupant, chronology, symbolic referent, or judgment participants unnamed, keep
-that limit visible. Use "Hades" when the text says Hades, not "hell." Describe a
-book's recipients in their actual mixed conditions rather than reducing them all
-to one pressure. Do not import a preacher's theological profile into the
-passage's meaning.
-
-Return ONLY valid JSON — no markdown, no extra text:
-{
-  "mainTheme": "one sentence capturing the central truth of the passage",
-  "authorIntent": {
-    "doing": "what the author is DOING to the reader in one sentence",
-    "inOrderThat": "the response this text is designed to produce, phrased as: 'in order that ...'"
-  },
-  "outline": [
-    { "point": "I.", "verses": "vv. 7-10", "label": "Main point (7 words max)", "sub": [{ "point": "A.", "label": "sub-point (5 words max)" }] }
-  ],
-  "canonicalContext": {
-    "bookTheme": "7 words max",
-    "passageRole": "12 words max",
-    "biblicalThemes": ["theme1", "theme2", "theme3"],
-    "canonicalConnections": "12 words max",
-    "keyWords": ["word1", "word2", "word3", "word4"]
-  }
-}
-
-STRICT: Max 4 outline points, max 2 sub-points each. Every top-level outline
-point must carry the exact verse range it covers. The ranges must follow the
-passage in order and cover every supplied verse once, with no gaps or overlap.
-All strings concise.`
-
-    console.log('[analyze-passage] long passage — running 3 parallel calls')
-    stage('calls-dispatched')
-    const [phrasesSettled, contextSettled, enrichSettled] = await Promise.allSettled([
-      withRetry(() => client.messages.create({
-        model: 'claude-opus-4-8',
-        max_tokens: 4000,
-        system: [{ type: 'text', text: phrasesPrompt, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: `Identify the 8 most structurally important clauses in this passage:\n\n${userMsg}` }],
-      })).then(r => { stage('structure'); return r }),
-      withRetry(() => client.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 2500,
-        system: [{ type: 'text', text: contextPrompt, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: `Provide sermon context analysis for:\n\n${userMsg}` }],
-      })).then(r => { stage('theme'); return r }),
-      withRetry(() => client.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 2500,
-        system: [{ type: 'text', text: enrichPrompt, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: `Identify cultural background and genre for:\n\n${userMsg}` }],
-      })).then(r => { stage('culture'); return r }),
-    ])
-
-    if (phrasesSettled.status === 'rejected') throw phrasesSettled.reason
-    if (contextSettled.status === 'rejected') throw contextSettled.reason
-
-    const phrases = parseJSON(phrasesSettled.value)
-    const context = parseJSON(contextSettled.value)
-    const enrich = enrichSettled.status === 'fulfilled'
-      ? (() => { try { return parseJSON(enrichSettled.value) } catch { return { culturalNotes: [], genre: null } } })()
-      : { culturalNotes: [], genre: null }
-
-    result = {
-      reference,
-      mainTheme: context.mainTheme ?? '',
-      authorIntent: context.authorIntent ?? null,
-      phrases: phrases.phrases ?? [],
-      outline: context.outline ?? [],
-      canonicalContext: context.canonicalContext ?? {},
-      culturalNotes: enrich.culturalNotes ?? [],
-      genre: enrich.genre ?? null,
-      geoReferences: enrich.geoReferences ?? [],
-      questionsToConsider: enrich.questionsToConsider ?? [],
-    }
-  } else {
-    // ── SHORT PASSAGE: 2 parallel calls (core + enrichment) ───────────────────
-    const corePrompt = `You are an expert biblical scholar specializing in grammatical phrasing analysis for sermon preparation.
-
-Do not turn inference into text. If the passage leaves the speaker, throne
-occupant, chronology, symbolic referent, or judgment participants unnamed, keep
-that limit visible. Use "Hades" when the text says Hades, not "hell." Describe a
-book's recipients in their actual mixed conditions rather than reducing them all
-to one pressure. Do not import a preacher's theological profile into the
-passage's meaning.
-
-Return ONLY valid JSON. No markdown. No trailing commas. No extra text before or after the JSON object.
-
-{
-  "reference": "Book Chapter:Verse",
-  "mainTheme": "one sentence capturing the central truth",
-  "authorIntent": {
-    "doing": "what the author is DOING to the reader in one sentence (convince, comfort, warn, exhort...)",
-    "inOrderThat": "the response this text is designed to produce, phrased as: 'in order that ...'"
-  },
-  "phrases": [
-    {
-      "id": "p1",
-      "text": "clause text (max 12 words)",
-      "type": "main|purpose|result|condition|concession|temporal|causal|relative|infinitival|participial|contrast",
-      "level": 0,
-      "parentId": null,
-      "connective": null,
-      "connectiveFunction": null,
-      "role": "subject|predicate|object|modifier",
-      "theologicalNote": "5 words max"
-    }
-  ],
-  "outline": [
-    { "point": "I.", "verses": "vv. 1-3", "label": "Main point (8 words max)", "sub": [{ "point": "A.", "label": "sub-point (6 words max)" }] }
-  ],
-  "canonicalContext": {
-    "bookTheme": "8 words max",
-    "passageRole": "10 words max",
-    "biblicalThemes": ["theme1", "theme2", "theme3"],
-    "canonicalConnections": "12 words max",
-    "keyWords": ["word1", "word2", "word3"]
-  }
-}
-
-STRICT LIMITS: max 16 phrases, 5-word theologicalNotes, max 4 outline points
-with 3 sub-points each. Every top-level outline point must carry the exact verse
-range it covers. The ranges must follow the passage in order and cover every
-supplied verse once, with no gaps or overlap.`
-
-    stage('calls-dispatched')
-    const [coreSettled, enrichSettled] = await Promise.allSettled([
-      withRetry(() => client.messages.create({
-        model: 'claude-opus-4-8',
-        max_tokens: 8000,
-        system: [{ type: 'text', text: corePrompt, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: `Perform a full phrasing analysis:\n\n${userMsg}` }],
-      })).then(r => { stage('structure'); stage('theme'); return r }),
-      withRetry(() => client.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 3000,
-        system: [{ type: 'text', text: enrichPrompt, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: `Identify cultural background and genre for:\n\n${userMsg}` }],
-      })).then(r => { stage('culture'); return r }),
-    ])
-
-    if (coreSettled.status === 'rejected') throw coreSettled.reason
-
-    const core = parseJSON(coreSettled.value)
-    const enrich = enrichSettled.status === 'fulfilled'
-      ? (() => { try { return parseJSON(enrichSettled.value) } catch { return { culturalNotes: [], genre: null } } })()
-      : { culturalNotes: [], genre: null }
-
-    result = { ...core, culturalNotes: enrich.culturalNotes ?? [], genre: enrich.genre ?? null, geoReferences: enrich.geoReferences ?? [], questionsToConsider: enrich.questionsToConsider ?? [] }
-  }
-
-  // The model never controls the canonical reference. The trusted input wins.
-  result.reference = reference
-  result.geoReferences = explicitGeoReferences(result.geoReferences, text)
-
-  // Store raw passage text so the desk can render all-verses mode
-  result.passageText = text
-  result.passageReference = reference
-
-  stage('complete')
+  // reference / geoReferences / passageText and stage('complete') are applied
+  // inside analyzePassage. Do not re-apply them here — a second copy is how the
+  // two drift apart.
 
   // ── Cache and save to history ─────────────────────────────────────────────
   let historyId = null

@@ -18,6 +18,7 @@ const ENGINE = path.join(__dirname, '../../electron/plainread')
 const { plainRead } = require(path.join(ENGINE, 'pipeline'))
 const { withRetry, parseModelJSON, checkGenerationInput } = require(path.join(ENGINE, 'runtime'))
 const { priceCall } = require(path.join(ENGINE, 'usage'))
+const { analyzePassage, analysisCacheKey } = require(path.join(ENGINE, 'analyze'))
 
 /**
  * A cache backed by Postgres, shaped like the one the engine expects.
@@ -127,4 +128,64 @@ async function runPlainRead(db, { analysis, requestedReference, level, accountId
   return doc
 }
 
-module.exports = { runPlainRead, makeRecorder, makeCache, preloadCache, writeCache, studyCost }
+/**
+ * Run the analysis fan-out — the first half of a study.
+ *
+ * Cached in the same content-addressed table as documents and under the engine's
+ * own key function, so the desktop and the server agree on what counts as the
+ * same analysis. The second man to open Romans 8 pays nothing for this half
+ * either.
+ */
+async function runAnalyze(db, { text, reference, accountId, studyId, onStage }) {
+  const key = analysisCacheKey(reference, text)
+
+  const { rows } = await db.query(
+    `SELECT document FROM document_cache WHERE cache_key = $1`, [key])
+  if (rows.length) return { analysis: rows[0].document, cached: true }
+
+  const record = makeRecorder(db, { accountId, studyId, reference })
+  const analysis = await analyzePassage({
+    text,
+    reference,
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    createClient: (k) => new Anthropic.default({ apiKey: k }),
+    retry: withRetry,
+    parse: parseModelJSON,
+    onStage,
+    onUsage: record,
+  })
+
+  await writeCache(db, key, analysis)
+  return { analysis, cached: false }
+}
+
+/**
+ * Has this study already produced a document?
+ *
+ * The guard that lets /v1/read ride the reservation /v1/analyze already made.
+ * A study id only exists because analyze paid for it, and one reservation buys
+ * exactly one document — so a client replaying the same id cannot get a second
+ * one for free.
+ */
+async function studyHasDocument(db, studyId) {
+  const { rows } = await db.query(
+    `SELECT 1 FROM usage_event WHERE study_id = $1 AND label LIKE 'plain-read%' LIMIT 1`,
+    [studyId],
+  )
+  return rows.length > 0
+}
+
+/** Does this study id belong to this caller? Anonymous studies belong to nobody. */
+async function studyBelongsTo(db, studyId, accountId) {
+  if (!studyId || !accountId) return false
+  const { rows } = await db.query(
+    `SELECT 1 FROM usage_event WHERE study_id = $1 AND account_id = $2 LIMIT 1`,
+    [studyId, accountId],
+  )
+  return rows.length > 0
+}
+
+module.exports = {
+  runPlainRead, runAnalyze, makeRecorder, makeCache, preloadCache, writeCache,
+  studyCost, studyHasDocument, studyBelongsTo,
+}

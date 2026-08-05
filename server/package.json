@@ -1,0 +1,19 @@
+{
+  "name": "operator-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Operator API — reading engine, metering, and billing.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node src/test-meter.js && node src/test-entitlement.js && node src/test-routes.js",
+    "migrate": "node src/migrate.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
+    "stripe": "^17.5.0"
+  },
+  "engines": { "node": ">=20" }
+}

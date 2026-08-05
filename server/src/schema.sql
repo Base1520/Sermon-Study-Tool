@@ -96,3 +96,25 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 INSERT INTO settings (key, value) VALUES ('daily_ceiling_usd', '50')
   ON CONFLICT (key) DO NOTHING;
+
+-- ── Shared document cache ───────────────────────────────────────────────────
+-- Content-addressed and NOT keyed to a user, deliberately: the second person to
+-- study a passage gets the first person's document at zero marginal cost. This
+-- is the single largest margin lever in the hosted model.
+CREATE TABLE IF NOT EXISTS document_cache (
+  cache_key  text PRIMARY KEY,
+  document   jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- ── Anonymous installs ──────────────────────────────────────────────────────
+-- The free tier works with no account at all, so the one lifetime study is
+-- tracked against the install's own uuid. Bounded by design: a thousand free
+-- users is a one-time cost, not a recurring one.
+CREATE TABLE IF NOT EXISTS anon_install (
+  install_id   text PRIMARY KEY,
+  studies_used int NOT NULL DEFAULT 0,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);

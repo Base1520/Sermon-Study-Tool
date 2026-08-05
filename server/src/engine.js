@@ -283,13 +283,19 @@ async function releaseStudyForRetry(db, studyId) {
   // again — every attempt spending real Opus tokens and none of them ever
   // costing a study. Three attempts covers every honest failure (a validation
   // retry, a dropped connection, a crash) and closes the loop.
-  await db.query(
+  // 'stranded', NOT 'done'. Marking an exhausted claim 'done' said a document
+  // had been delivered when none had — the user was left with no reading, no
+  // retry and no refund, and the client kept replaying a dead id. A distinct
+  // state lets the route hand the credit back and lets Cole find these rows.
+  const { rows } = await db.query(
     `UPDATE study
-        SET state = CASE WHEN retries >= $2 THEN 'done' ELSE 'analyzed' END,
+        SET state = CASE WHEN retries >= $2 THEN 'stranded' ELSE 'analyzed' END,
             retries = retries + 1,
             updated_at = now()
-      WHERE id = $1 AND state = 'reading'`,
+      WHERE id = $1 AND state = 'reading'
+      RETURNING state`,
     [studyId, MAX_RETRIES_PER_STUDY])
+  return rows[0]?.state ?? null
 }
 
 module.exports = {

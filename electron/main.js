@@ -58,9 +58,19 @@ const rememberStudy = (reference, studyId) => {
 const recallStudy = (reference) => {
   const entry = store?.get(STUDY_ID_KEY, {})?.[studyKey(reference)]
   if (!entry) return null
-  // A claim the server has long since closed is worse than none: sending it
-  // just fails the ride and takes a fresh study anyway. A day is generous.
-  if (Date.now() - (entry.at ?? 0) > 24 * 60 * 60 * 1000) return null
+  /**
+   * NO CLIENT-SIDE EXPIRY.
+   *
+   * A 24-hour cutoff here re-created the exact double-charge it was added to
+   * prevent: the SERVER never expires a claim, so a study analysed yesterday and
+   * read today would have had its perfectly valid id withheld and been charged a
+   * second time. Whether a claim is still rideable is the server's decision —
+   * claimStudyForReading is a conditional UPDATE that simply fails if it is not,
+   * and a failed ride costs a study anyway. Sending a stale id is free; refusing
+   * to send a good one is not.
+   *
+   * `at` is still recorded, and is what the eviction above sorts on.
+   */
   return entry.studyId
 }
 
@@ -564,6 +574,14 @@ ipcMain.handle('hosted-checkout', async (_, { plan, email }) => {
  * browser's return. "Not yet" is a normal answer, not an error — the webhook
  * and the customer's browser race each other.
  */
+/** Stripe's billing page. Opened in the real browser, never inside the app. */
+ipcMain.handle('hosted-portal', async () => {
+  if (!hosted.hostedBaseUrl()) throw new Error('This build is not connected to the server.')
+  const url = await hosted.portal(store)
+  await shell.openExternal(url)
+  return { ok: true, url }
+})
+
 /** Buy more studies. One-off, never a stored intent. */
 ipcMain.handle('hosted-topup', async () => {
   if (!hosted.hostedBaseUrl()) throw new Error('This build is not connected to the server.')
@@ -955,7 +973,7 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
     const cleanAnalysis = forGeneration(analysis)
     const localKey = cacheKeyFor(cleanAnalysis, level)
     const cachedDoc = store?.get(localKey, null)
-    if (cachedDoc && !force) {
+    if (cachedDoc && cachedDoc.verification?.status === 'ok' && !force) {
       __done('served from local cache')
       return cachedDoc
     }
@@ -967,6 +985,11 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
         reference: requestedReference ?? analysis?.reference,
         level,
         studyId: priorStudyId,
+        // NOT aborted when the window closes. The server finishes a study it
+        // has started — that is rule 4 of meter.js — and the document is cached
+        // on arrival, so closing the app mid-reading now costs nothing and the
+        // finished reading is waiting when he comes back. Dropping the request
+        // instead would have burned the claim and lost the document.
         onSection: (key, value) => {
           try {
             if (!event.sender || event.sender.isDestroyed()) return
@@ -986,9 +1009,19 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
       // The claim is spent. Holding the id would make a re-read of the same
       // passage try to ride a study the server has already closed.
       forgetStudy(requestedReference ?? analysis?.reference)
-      // Written under the key the read above looks for, so the next open of this
-      // study costs nothing. Same contract as the local path's own cache.
-      try { if (store && doc) store.set(localKey, doc) } catch {}
+      /**
+       * ONLY A VERIFIED DOCUMENT MAY BE CACHED.
+       *
+       * pipeline.js's single cache-write is guarded by
+       * verification.status === 'ok', and that guard is the entire reason a
+       * cache HIT can skip re-checking: a hit is already verified as a property
+       * of the cache, not as a hope. Writing an unchecked document here would
+       * break that invariant permanently for that passage — the doctrinal fence
+       * would be defeated once and then served from disk forever.
+       */
+      try {
+        if (store && doc && doc.verification?.status === 'ok') store.set(localKey, doc)
+      } catch {}
       __done('hosted done')
       return doc
     } catch (e) {

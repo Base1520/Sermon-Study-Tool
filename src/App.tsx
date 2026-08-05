@@ -287,7 +287,15 @@ export default function App() {
          leaves finished blocks on the page; they are still true, and taking
          them off a man who is reading them to show him a box is worse than
          leaving them with the failure stated above them. */
-      .catch((e: any) => { if (!cancelled) setPlainError(friendlyApiError(e)) })
+      .catch((e: any) => {
+        if (cancelled) return
+        /* A 402 on THIS half is the same offer as on the analyze half, and must
+           open the same paywall. Round 1 taught only handleAnalyze to decode it,
+           so a reader who hit the wall here got a red box with no way to buy. */
+        const offer = offerFromError(e)
+        if (offer) { setUpgradeOffer(offer); return }
+        setPlainError(friendlyApiError(e))
+      })
       .finally(() => { if (!cancelled) setPlainLoading(false) })
     return () => {
       cancelled = true

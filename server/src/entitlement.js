@@ -91,6 +91,10 @@ function entitlementFor(account) {
   return {
     plan: planKey,
     label: plan.label,
+    // Carried so callers can tell "never subscribed" from "card just failed".
+    // Without it the past_due branch in upgradePrompt could never match, and a
+    // lapsed subscriber was shown free-trial copy for a plan he pays for.
+    status: account?.status ?? 'none',
     paying,
     library: true,                         // always, for everyone, forever
     allowance: paying ? plan.studiesPerMonth : 0,
@@ -113,6 +117,26 @@ function entitlementFor(account) {
  *     usage-priced products.
  */
 function upgradePrompt(ent, { used = 0 } = {}) {
+  /**
+   * A LAPSED CARD IS NOT A FREE TRIAL ENDING.
+   *
+   * past_due sets paying=false, so a subscriber whose card merely expired fell
+   * into the branch below and was told "that was your free study" — about a
+   * subscription he has been paying for — and offered buttons that would have
+   * started a SECOND subscription alongside the broken one. What he needs is his
+   * billing page, not a sales pitch.
+   */
+  if (ent.status === 'past_due') {
+    return {
+      code: 'PAYMENT_FAILED',
+      headline: 'Your last payment did not go through.',
+      body:
+        'Everything you have studied is still here, and your plan is waiting — ' +
+        'we just could not charge the card on file. Updating it puts you straight back.',
+      actions: [{ kind: 'portal', plan: 'portal', label: 'Update payment method' }],
+    }
+  }
+
   if (!ent.paying) {
     return {
       code: 'FREE_STUDY_SPENT',

@@ -239,6 +239,16 @@ async function me(store) {
   }
 }
 
+/** Stripe's own billing page — update a card, cancel, see invoices. */
+async function portal(store) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('portal: OPERATOR_API_URL is not set')
+  const res = await fetch(`${base}/v1/portal`, { method: 'POST', headers: headers(store) })
+  const body = await readJsonOrText(res)
+  if (!res.ok) throw new Error(body?.error || `billing portal unavailable (${res.status})`)
+  return body.url
+}
+
 /** Buy a one-off block of studies. Deliberately separate from checkout(). */
 async function topup(store) {
   const base = hostedBaseUrl()
@@ -336,6 +346,7 @@ module.exports = {
   me,
   checkout,
   topup,
+  portal,
   redeem,
   claim,
   hostedBaseUrl,

@@ -298,12 +298,28 @@ app.post('/v1/read', route(async (req, res) => {
     // A reading that failed must leave the claim rideable again, or a man pays a
     // second study to retry something he never received.
     //
+    // If it has now failed too many times the claim is STRANDED, and the credit
+    // goes back: he asked for a reading, spent a study, and never got one.
+    //
     // BOUNDED, because an UNCONDITIONAL release turns one credit into unlimited
     // generations: disconnect mid-stream, the claim goes back to 'analyzed',
     // ride it again, disconnect again — each attempt spending real Opus tokens
     // and no attempt ever costing a study. releaseStudyForRetry only restores a
     // claim that has not already been retried too many times.
-    await engine.releaseStudyForRetry(db, studyId).catch(() => {})
+    const state = await engine.releaseStudyForRetry(db, studyId).catch(() => null)
+
+    if (state === 'stranded') {
+      if (accountId) {
+        await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
+      } else if (req.identity.installId) {
+        await db.query(
+          `UPDATE anon_install SET studies_used = GREATEST(studies_used - 1, 0), updated_at = now()
+            WHERE install_id = $1`, [req.identity.installId]).catch(() => {})
+      }
+      settled = true
+      return
+    }
+
     // Nothing to give back if this reading was riding a claim it did not make.
     if (settled || !accountId || ridesPriorClaim) return
     settled = true

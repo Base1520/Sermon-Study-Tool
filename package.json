@@ -1,7 +1,7 @@
 {
   "name": "the-operator",
-  "version": "1.3.6",
-  "description": "Study any passage of Scripture in its own context — what the author meant, how you know, and what to do with it.",
+  "version": "1.4.0",
+  "description": "Study any passage of Scripture in its own context \u2014 what the author meant, how you know, and what to do with it.",
   "main": "electron/main.js",
   "featureFlags": {
     "theologyRetrieval": false
@@ -14,7 +14,7 @@
     "build:beta": "VITE_ADMIN=false vite build && electron-builder --mac",
     "build:beta-win": "VITE_ADMIN=false vite build && electron-builder --win --x64",
     "build:mac": "VITE_ADMIN=false vite build && electron-builder --mac --dir",
-    "test:release": "node electron/license/test-license.js && node electron/license/test-gate.js && node electron/plainread/test-usage.js && node electron/plainread/test-translations.js && node electron/plainread/test-secret-paths.js && node electron/plainread/test-situation.js && node electron/plainread/test-outline.js && node electron/plainread/test-levels.js && node electron/plainread/test-voice.js && node electron/plainread/test-doctrine.js && node electron/plainread/test-plainread.js && node electron/plainread/test-ask.js && node electron/groupguide/test-groupguide.js && tsc --noEmit",
+    "test:release": "node electron/license/test-license.js && node electron/license/test-gate.js && node electron/plainread/test-usage.js && node electron/plainread/test-translations.js && node electron/plainread/test-secret-paths.js && node electron/plainread/test-situation.js && node electron/plainread/test-outline.js && node electron/plainread/test-levels.js && node electron/plainread/test-voice.js && node electron/plainread/test-doctrine.js && node electron/plainread/test-plainread.js && node electron/plainread/test-ask.js && node electron/groupguide/test-groupguide.js && node electron/plainread/test-analyze.js && node electron/hosted/test-client.js && node electron/hosted/test-offer.js && node server/src/test-meter.js && node server/src/test-entitlement.js && node server/src/test-routes.js && node server/src/test-ridealong.js && node server/src/test-token-shape.js && tsc --noEmit",
     "eval:commentary": "node scripts/evaluate-commentary-retrieval.js",
     "publish": "VITE_ADMIN=false vite build && electron-builder --publish always",
     "vite": "vite --port ${PORT:-5173}",
@@ -31,7 +31,10 @@
       "dist/**/*",
       "electron/**/*",
       "node_modules/**/*",
-      "package.json"
+      "package.json",
+      "!electron/**/test-*.js",
+      "!electron/embedded-key.example.js",
+      "!**/*.map"
     ],
     "extraResources": [
       {
@@ -68,7 +71,10 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "The Operator records your rehearsal so it can play it back and review your delivery. Recordings stay on this Mac."
+      }
     },
     "publish": {
       "provider": "github",

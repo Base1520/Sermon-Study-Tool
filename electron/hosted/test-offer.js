@@ -92,11 +92,12 @@ function offerFromError(e) {
     ok('...which they did NOT before the strip',
        cacheKeyFor(withHistory) !== cacheKeyFor(otherUser))
     ok('a stripped analysis matches a clean one',
-       cacheKeyFor(forGeneration(withHistory)) === cacheKeyFor(analysis))
+       cacheKeyFor(forGeneration(withHistory)) === cacheKeyFor(forGeneration(analysis)))
 
     ok('every non-content key is covered', NON_CONTENT_KEYS.includes('historyId'))
     const messy = { ...analysis, historyId: 'a', studyId: 'b', savedAt: 'c', annotations: {} }
-    ok('all of them are stripped together', cacheKeyFor(forGeneration(messy)) === cacheKeyFor(analysis))
+    ok('all of them are stripped together',
+       cacheKeyFor(forGeneration(messy)) === cacheKeyFor(forGeneration(analysis)))
 
     // Non-destructive: the caller's object must be left alone.
     const original = { ...analysis, historyId: 'keep-me' }
@@ -105,7 +106,28 @@ function offerFromError(e) {
 
     // A genuinely different passage must still key differently.
     ok('different readings still differ',
-       cacheKeyFor(analysis) !== cacheKeyFor({ ...analysis, mainTheme: 'something else' }))
+       cacheKeyFor(forGeneration(analysis)) !==
+       cacheKeyFor(forGeneration({ ...analysis, mainTheme: 'something else' })))
+  }
+
+  console.log('\nKEY ORDER MUST NOT CHANGE THE CACHE KEY')
+  {
+    // THE jsonb TRAP. JSON.stringify preserves INSERTION order; Postgres jsonb
+    // rewrites object keys into its own. So an analysis round-tripped through
+    // the shared cache came back reordered, hashed differently, and missed —
+    // the second reader of every passage paid full price anyway, which is the
+    // exact failure forGeneration was added to prevent.
+    const sent     = { reference: 'John 3:16', mainTheme: 'love', phrases: [{ id: 'p1' }], genre: { genre: 'Gospel' } }
+    const returned = { genre: { genre: 'Gospel' }, phrases: [{ id: 'p1' }], reference: 'John 3:16', mainTheme: 'love' }
+
+    ok('raw stringify DID differ on key order',
+       JSON.stringify(sent) !== JSON.stringify(returned))
+    ok('canonicalised, the two are the same key',
+       cacheKeyFor(forGeneration(sent)) === cacheKeyFor(forGeneration(returned)))
+    ok('the reading itself survives canonicalisation',
+       forGeneration(returned).mainTheme === 'love' && forGeneration(returned).reference === 'John 3:16')
+    ok('a non-object is passed through untouched',
+       forGeneration(null) === null && forGeneration('x') === 'x')
   }
 
   console.log(`\n${pass} passed, ${fail} failed`)

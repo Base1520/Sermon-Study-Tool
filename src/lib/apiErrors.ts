@@ -36,11 +36,37 @@ function innerMessage(raw: string): string {
   return raw.replace(/^Error invoking remote method '[^']*':\s*/, '').trim()
 }
 
+import { OFFER_TAG } from './hostedError'
+
 export function friendlyApiError(err: unknown): FriendlyError {
-  const raw =
+  const rawWithTag =
     typeof err === 'string' ? err
       : (err as any)?.message ? String((err as any).message)
         : String(err ?? '')
+
+  /**
+   * A TAGGED OFFER MUST NEVER BE PRINTED AT A HUMAN.
+   *
+   * The server's 402 payload travels inside the error message (see
+   * hostedError.ts — Electron destroys custom Error properties across IPC). Only
+   * one catch site was taught to decode it, so a paywall arriving on the READING
+   * path was handed straight to this function and rendered verbatim: a pastor
+   * looking at `__OPERATOR_OFFER__{"code":"FREE_STUDY_SPENT",...}` in the reader.
+   *
+   * Cutting the tag off HERE, rather than only fixing the catch sites, is what
+   * makes it impossible to reintroduce: any catch anywhere, written by anyone,
+   * degrades to the offer's own headline instead of leaking JSON.
+   */
+  const tagAt = rawWithTag.indexOf(OFFER_TAG)
+  let raw = rawWithTag
+  if (tagAt !== -1) {
+    try {
+      const offer = JSON.parse(rawWithTag.slice(tagAt + OFFER_TAG.length))
+      raw = offer?.headline || offer?.message || offer?.body || 'This part needs a subscription.'
+    } catch {
+      raw = rawWithTag.slice(0, tagAt).trim() || 'This part needs a subscription.'
+    }
+  }
 
   const msg = innerMessage(raw)
   const hay = `${raw} ${msg}`.toLowerCase()

@@ -19,11 +19,34 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
    * valid — a missing code is a locked door, a leaked one is a bill.
    */
   const raw = process.env.OPERATOR_COMP_CODES || ''
-  const CODES = raw.split(',').map(s => s.trim()).filter(Boolean).map((entry) => {
+  const CODES = []
+  for (const entry of raw.split(',').map(x => x.trim()).filter(Boolean)) {
     const [code, label, maxUses] = entry.split(':')
-    return [code.trim().toUpperCase(), 'comp', (label || '').trim() || null,
-            maxUses && maxUses.trim() ? Number(maxUses) : null]
-  }).filter(([code]) => code)
+    const clean = (code || '').trim().toUpperCase()
+    if (!clean) continue
+
+    // A TYPO MUST NOT TAKE THE API OFFLINE. migrate runs as Railway's
+    // preDeployCommand, so anything that throws here blocks the deploy and
+    // leaves the previous container serving — or, on a cold start, nothing at
+    // all. A malformed entry is skipped and logged; the rest still seed.
+    let limit = null
+    if (maxUses !== undefined && String(maxUses).trim() !== '') {
+      const n = Number(maxUses)
+      if (!Number.isInteger(n) || n <= 0) {
+        console.error(`[codes] ignoring ${clean}: use count "${maxUses}" is not a positive integer`)
+        continue
+      }
+      limit = n
+    } else if (maxUses === undefined) {
+      // A MISSING FIELD IS NOT PERMISSION TO BE UNLIMITED. "CODE:Label" with no
+      // third field used to mint an unlimited code silently — the same footgun
+      // that leaked three unlimited codes into a public repo. Unlimited must be
+      // written out as an explicit empty third field: "CODE:Label:".
+      console.error(`[codes] ignoring ${clean}: no use count. Write "${clean}:Label:" for unlimited.`)
+      continue
+    }
+    CODES.push([clean, 'comp', (label || '').trim() || null, limit])
+  }
 
   for (const [code, plan, label, usesMax] of CODES) {
     await db.query(

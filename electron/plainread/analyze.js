@@ -416,15 +416,27 @@ async function analyzePassage({
 const NON_CONTENT_KEYS = ['historyId', 'studyId', '__studyId', 'savedAt', 'annotations']
 
 function forGeneration(analysis) {
-  if (!analysis || typeof analysis !== 'object') return analysis
-  let stripped = null
-  for (const k of NON_CONTENT_KEYS) {
-    if (k in analysis) {
-      stripped = stripped || { ...analysis }
-      delete stripped[k]
-    }
+  if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis)) return analysis
+
+  /**
+   * KEYS ARE SORTED, and that is load-bearing, not tidiness.
+   *
+   * The document cache key is an md5 of JSON.stringify(analysis), and
+   * JSON.stringify preserves INSERTION ORDER. Postgres jsonb does not: it
+   * rewrites object keys into its own order on storage. So an analysis served
+   * from the shared cache comes back with its keys in a different order than the
+   * one the first reader sent, hashes to a different key, and misses — meaning
+   * the second reader of every passage still paid full price, which is exactly
+   * the failure this function was added to fix.
+   *
+   * Sorting makes the key depend on the CONTENT and nothing else.
+   */
+  const drop = new Set(NON_CONTENT_KEYS)
+  const out = {}
+  for (const k of Object.keys(analysis).sort()) {
+    if (!drop.has(k)) out[k] = analysis[k]
   }
-  return stripped || analysis
+  return out
 }
 
 module.exports = {

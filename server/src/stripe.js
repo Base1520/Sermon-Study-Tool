@@ -159,6 +159,21 @@ function mount(app, db) {
     // Reuse the account's customer if it has one, so a second subscription can
     // never be created alongside the first.
     let customerId = req.identity.account?.stripeCustomerId
+
+    // Reuse the customer this install already has, even when it holds no device
+    // token yet. Without this, a second click on Subscribe created a second
+    // Stripe customer — two live subscriptions for one man, and a claim lookup
+    // that could no longer find the one he paid for.
+    if (!customerId && req.identity.installId) {
+      const { rows: prior } = await db.query(
+        `SELECT stripe_customer_id FROM account
+          WHERE install_id = $1 AND stripe_customer_id IS NOT NULL
+          ORDER BY (status = 'active') DESC, created_at DESC LIMIT 1`,
+        [req.identity.installId],
+      )
+      customerId = prior[0]?.stripe_customer_id ?? null
+    }
+
     if (!customerId) {
       const customer = await stripe.customers.create({
         email: email || req.identity.account?.email || undefined,
@@ -238,9 +253,24 @@ function mount(app, db) {
     const installId = req.identity.installId
     if (!installId) return res.status(400).json({ error: 'x-install-id header required' })
 
+    /**
+     * THE PAID ROW WINS, NOT THE NEWEST ONE.
+     *
+     * ORDER BY created_at DESC permanently orphaned real money: a buyer whose
+     * first claim timed out clicked subscribe again, /v1/checkout minted a
+     * SECOND customer and a second account against the same install, and this
+     * query then resolved to the new empty one — so syncCustomer found no
+     * subscription and returned 409 forever while the paid subscription sat
+     * there unreachable. Every retry appended another empty row, so it could
+     * never self-heal.
+     */
     const { rows } = await db.query(
       `SELECT id, email, stripe_customer_id, plan, status
-         FROM account WHERE install_id = $1 ORDER BY created_at DESC LIMIT 1`,
+         FROM account WHERE install_id = $1
+        ORDER BY (status = 'active') DESC,
+                 (stripe_subscription_id IS NOT NULL) DESC,
+                 created_at DESC
+        LIMIT 1`,
       [installId],
     )
     const account = rows[0]

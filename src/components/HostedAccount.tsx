@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { BASE, FONT } from '../theme'
 
 /**
@@ -45,6 +45,33 @@ export function HostedAccount({ offer, onClose, onChanged }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  /* Shown when a checkout poll gave up. The purchase is almost certainly fine —
+     Stripe just took longer than the app waited — so this is a nudge, not an
+     error. */
+  const [needsClaim, setNeedsClaim] = useState(false)
+
+  const checkPurchase = useCallback(async () => {
+    setBusy(true); setError(null)
+    try {
+      const res = await api().hostedClaim()
+      if (res?.ok) {
+        setNeedsClaim(false)
+        setNote('Subscription active. Thank you.')
+        await refreshRef.current?.()
+        onChangedRef.current?.()
+      } else {
+        setError(res?.message || 'No completed purchase found yet. Give it a moment and try again.')
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Could not check that purchase.')
+    } finally { setBusy(false) }
+  }, [])
+
+  // Refs so checkPurchase can be declared before refresh without a stale
+  // closure or a dependency cycle.
+  const refreshRef = useRef<null | (() => Promise<void>)>(null)
+  const onChangedRef = useRef(onChanged)
+  useEffect(() => { onChangedRef.current = onChanged }, [onChanged])
 
   const refresh = useCallback(async () => {
     try {
@@ -54,6 +81,7 @@ export function HostedAccount({ offer, onClose, onChanged }: {
       if (state) setMe(state)
     } catch { /* offline is not an entitlement change */ }
   }, [])
+  useEffect(() => { refreshRef.current = refresh }, [refresh])
 
   useEffect(() => {
     let alive = true
@@ -62,11 +90,33 @@ export function HostedAccount({ offer, onClose, onChanged }: {
         const on = await api()?.hostedEnabled?.()
         if (!alive) return
         setEnabled(Boolean(on))
-        if (on) await refresh()
+        if (!on) return
+        const state = await api()?.hostedMe?.()
+        if (!alive) return
+        if (state) setMe(state)
+
+        /**
+         * COLLECT A PURCHASE THIS APP NEVER SAW COMPLETE.
+         *
+         * The only caller of claim() used to be a 2-minute poll inside
+         * subscribe(). A first-time buyer entering card details and a 3DS code
+         * routinely runs past that, and quitting the app during checkout killed
+         * the poll outright — so the money moved and the app stayed anonymous
+         * forever, with no way back to it. Asking once on mount whenever we look
+         * anonymous means a restart is now the fix rather than the trap.
+         */
+        if (!state || state.anonymous) {
+          const claimed = await api()?.hostedClaim?.()
+          if (alive && claimed?.ok) {
+            setNote('Subscription found — thank you.')
+            await refresh()
+            onChanged?.()
+          }
+        }
       } catch { if (alive) setEnabled(false) }
     })()
     return () => { alive = false }
-  }, [refresh])
+  }, [refresh, onChanged])
 
   const redeem = useCallback(async () => {
     const trimmed = code.trim()
@@ -88,9 +138,14 @@ export function HostedAccount({ offer, onClose, onChanged }: {
     if (busy) return
     setBusy(true); setError(null)
     try {
-      // 'topup' is a one-off purchase, not a plan change. Routing it through
-      // the subscription checkout would try to start a second subscription.
-      if (plan === 'topup') { await api().hostedTopup() } else { await api().hostedCheckout({ plan }) }
+      // Three different destinations wear the same button. 'topup' is a one-off
+      // purchase; 'portal' is Stripe's billing page for a card that failed;
+      // anything else starts a subscription. Sending the first two through
+      // checkout would try to start a SECOND subscription for a man who already
+      // has one.
+      if (plan === 'topup') { await api().hostedTopup() }
+      else if (plan === 'portal') { await api().hostedPortal() }
+      else { await api().hostedCheckout({ plan }) }
       setNote('Checkout opened in your browser. Come back when you are done — this will pick it up.')
       // The app never sees the browser's return, so it asks the server instead.
       // "Not yet" is a normal answer here; the webhook and the customer's
@@ -107,7 +162,11 @@ export function HostedAccount({ offer, onClose, onChanged }: {
             onChanged?.()
           }
         } catch { /* keep waiting */ }
-        if (tries > 40) { clearInterval(poll); setNote(null) }
+        // Do NOT clear the message on giving up. Silently removing the only
+        // line on screen left a man who had just paid $30 looking at nothing,
+        // with no indication anything was wrong or what to do. The manual check
+        // below is the way out.
+        if (tries > 40) { clearInterval(poll); setNote(null); setNeedsClaim(true) }
       }, 3000)
     } catch (e: any) {
       setError(e?.message || 'Checkout could not be opened.')
@@ -229,6 +288,25 @@ export function HostedAccount({ offer, onClose, onChanged }: {
           </button>
         </div>
       </div>
+
+      {needsClaim && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ font: `400 12px/1.5 ${FONT.serif}`, color: BASE.boneMid, marginBottom: 8 }}>
+            Finished paying? Stripe sometimes takes a moment longer than the app waits.
+          </div>
+          <button
+            onClick={checkPurchase}
+            disabled={busy}
+            style={{
+              font: `600 11px ${FONT.mono}`, letterSpacing: '0.06em',
+              color: BASE.bg, background: BASE.gold, border: 'none', borderRadius: 3,
+              padding: '9px 14px', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1,
+            }}
+          >
+            {busy ? 'CHECKING…' : 'CHECK MY PURCHASE'}
+          </button>
+        </div>
+      )}
 
       {error && (
         <div style={{ font: `400 12px ${FONT.mono}`, color: BASE.red, marginTop: 12 }}>{error}</div>

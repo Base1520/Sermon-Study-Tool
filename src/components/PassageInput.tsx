@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { BASE, FONT } from '../theme'
 import { formatReference } from '../lib/reference'
+import { TRANSLATIONS } from '../lib/translations'
 
 interface Props {
   onAnalyze: (text: string, reference: string) => void
@@ -12,13 +13,6 @@ interface Props {
   mode?: 'plain' | 'pulpit'
 }
 
-const TRANSLATIONS = [
-  { id: 'esv', label: 'ESV', requiresKey: true  },
-  { id: 'kjv', label: 'KJV', requiresKey: false },
-  { id: 'nasb',label: 'ASV', requiresKey: false },
-  { id: 'ylt', label: 'YLT', requiresKey: false },
-  { id: 'dby', label: 'DBY', requiresKey: false },
-]
 
 const EXAMPLES = [
   { ref: 'Ephesians 2:8-10' },

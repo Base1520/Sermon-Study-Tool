@@ -1,12 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
+import { TRANSLATIONS } from '../lib/translations'
 
-const TRANSLATIONS = [
-  { id: 'esv', label: 'ESV', requiresKey: true  },
-  { id: 'kjv', label: 'KJV', requiresKey: false },
-  { id: 'ylt', label: 'YLT', requiresKey: false },
-  { id: 'asv', label: 'ASV', requiresKey: false },
-  { id: 'dby', label: 'DBY', requiresKey: false },
-]
 
 const GOLD    = '#D8B33F'
 const KHAKI   = '#B8B49D'

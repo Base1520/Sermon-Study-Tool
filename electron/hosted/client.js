@@ -304,6 +304,39 @@ async function ask(store, { doc, analysis, question, history, vaultNotes }) {
 }
 
 /**
+ * Submit a beta report.
+ *
+ * Deliberately not blocked by auth — see the route. A man reporting that the app
+ * is broken must not be stopped by the part of it that is broken.
+ */
+async function sendFeedback(store, { name, category, body, version, platform }) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('feedback: OPERATOR_API_URL is not set')
+  const res = await fetch(`${base}/v1/feedback`, {
+    method: 'POST',
+    headers: headers(store),
+    body: JSON.stringify({ name, category, body, version, platform }),
+  })
+  const out = await readJsonOrText(res)
+  if (!res.ok) throw new Error(out?.error || `could not submit (${res.status})`)
+  return out
+}
+
+/** The feed of reports, for Cole's build. Never throws — an unreachable feed
+ *  is an empty list, not an error box. */
+async function listFeedback(store, limit = 50) {
+  const base = hostedBaseUrl()
+  if (!base) return []
+  try {
+    const res = await fetch(`${base}/v1/feedback?limit=${limit}`, { headers: headers(store) })
+    if (!res.ok) return []
+    return (await res.json()).feedback ?? []
+  } catch {
+    return []
+  }
+}
+
+/**
  * Redeem a comp code. Stores the device token, so the app is a subscriber from
  * the next request onward.
  */

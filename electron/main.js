@@ -156,10 +156,26 @@ function saveSecrets(values = {}) {
   return secretStatus()
 }
 
+/**
+ * The key this build should use, or '' if there is none. Never throws.
+ *
+ * The user's OWN key always wins. Someone who took the trouble to paste one gets
+ * their own billing and their own rate limits, not the shared beta pool.
+ *
+ * USE THIS, NOT readSecret(), ANYWHERE A KEY IS ACTUALLY SPENT. readSecret is
+ * raw storage access and has no embedded-key fallback. Two handlers called it
+ * directly and, on a beta build, degraded to their no-key branch on every
+ * request — one of them the eisegesis watchdog, whose no-key branch returns an
+ * empty flag list, which the UI renders as CLEAN. A check that never ran looked
+ * exactly like a check that passed. test-secret-paths.js now fails the build if
+ * a new readSecret call site appears outside this block.
+ */
+function resolveSecret(name) {
+  return readSecret(name) || embeddedSecrets[name] || ''
+}
+
 function requireSecret(name, label) {
-  // The user's OWN key always wins. Someone who took the trouble to paste one
-  // gets their own billing and their own rate limits, not the shared beta pool.
-  const value = readSecret(name) || embeddedSecrets[name] || ''
+  const value = resolveSecret(name)
   if (!value) throw new Error(`${label} API key required — add it in Settings.`)
   return value
 }
@@ -1942,7 +1958,10 @@ ipcMain.handle('fetch-commentary', async (_, { reference, passageText, mainTheme
     excerpt: result.content,
     provenance: 'SOURCE TEXT',
   }))
-  const apiKey = readSecret('ANTHROPIC_KEY')
+  // resolveSecret, NOT readSecret — readSecret has no embedded-key fallback, so
+  // on a beta build this returned '' and told the user to add a key he does not
+  // need and would gain nothing from.
+  const apiKey = resolveSecret('ANTHROPIC_KEY')
   if (!apiKey) {
     return {
       status: 'grounded',
@@ -2011,7 +2030,13 @@ ${sources.map(source => [
 // ── Eisegesis / Doctrine Check ────────────────────────────────────────────────
 ipcMain.handle('eisegesis-check', async (_, { manuscriptText, passageContext }) => {
   if (!manuscriptText || manuscriptText.trim().length < 60) return { flags: [] }
-  const apiKey = readSecret('ANTHROPIC_KEY')
+  // resolveSecret, NOT readSecret. This bypassed the embedded-key fallback, so
+  // on a beta build it returned { flags: [] } on EVERY check, for EVERY user,
+  // forever — and an empty flag list renders as CLEAN. The watchdog would have
+  // reported a clean manuscript while never having run, which is worse than a
+  // visible failure: a silent no-op that looks like good news is how a wrong
+  // reading reaches a pulpit.
+  const apiKey = resolveSecret('ANTHROPIC_KEY')
   if (!apiKey) return { flags: [], error: 'No API key' }
 
   try {

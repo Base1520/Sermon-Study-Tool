@@ -12,3 +12,6 @@ resources/theology-retrieval/library.sqlite3
 .operator-license-key
 .operator-license-key.pub
 *-license-key
+
+# Beta build key — generated at build time, NEVER committed (this repo is public)
+electron/embedded-key.js

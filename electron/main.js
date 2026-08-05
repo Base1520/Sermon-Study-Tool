@@ -76,8 +76,48 @@ let store
 const SECRET_STORE_KEY = 'encrypted-api-secrets'
 const SECRET_NAMES = ['ANTHROPIC_KEY', 'ESV_KEY', 'OPENAI_KEY']
 
+/**
+ * Keys baked into a beta build, if any.
+ *
+ * Absent in the repo and in every normal build — the require throws and this
+ * stays empty, so the app asks for a key exactly as it always has. Present only
+ * in a build produced by scripts/build-beta.sh, which writes the file from an
+ * environment variable and deletes it afterwards.
+ *
+ * WHY: seven men asked for this tool, were given free keys, and two downloaded
+ * it. Zero studies ran. The app was never the obstacle — the four-step key setup
+ * was. A beta build that opens and works removes the whole wall.
+ *
+ * This value lives in the MAIN process only. It is never sent to the renderer,
+ * never written to the settings store, and never logged.
+ */
+let embeddedSecrets = {}
+try {
+  embeddedSecrets = require('./embedded-key')
+  if (embeddedSecrets?.ANTHROPIC_KEY) console.log('[keys] beta build — an embedded key is available')
+} catch { /* normal build: no embedded key, and that is the default */ }
+
+/** True when this build can work without the user supplying anything. */
+function hasEmbeddedSecret(name) {
+  return typeof embeddedSecrets?.[name] === 'string' && embeddedSecrets[name].length > 0
+}
+
+
+/**
+ * What the renderer uses to decide whether to demand a key on first launch.
+ *
+ * A beta build counts as "has a key" so the setup wall never appears — that is
+ * the entire point. `embedded` is reported separately so the UI can be honest
+ * about whose key is being spent without ever seeing the key itself.
+ */
 function secretStatus() {
-  return Object.fromEntries(SECRET_NAMES.map((name) => [name, Boolean(readSecret(name))]))
+  const status = Object.fromEntries(
+    SECRET_NAMES.map((name) => [name, Boolean(readSecret(name)) || hasEmbeddedSecret(name)]),
+  )
+  status.embedded = Object.fromEntries(
+    SECRET_NAMES.map((name) => [name, hasEmbeddedSecret(name) && !readSecret(name)]),
+  )
+  return status
 }
 
 function readSecret(name) {
@@ -117,7 +157,9 @@ function saveSecrets(values = {}) {
 }
 
 function requireSecret(name, label) {
-  const value = readSecret(name)
+  // The user's OWN key always wins. Someone who took the trouble to paste one
+  // gets their own billing and their own rate limits, not the shared beta pool.
+  const value = readSecret(name) || embeddedSecrets[name] || ''
   if (!value) throw new Error(`${label} API key required — add it in Settings.`)
   return value
 }

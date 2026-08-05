@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { BASE } from '../theme'
 import { friendlyApiError, type FriendlyError } from '../lib/apiErrors'
+import { HostedAccount } from './HostedAccount'
 
 interface Props {
   onSave: (anthropicKey: string, esvKey?: string) => Promise<void>
@@ -32,6 +33,18 @@ const ZOOMS = [
 ]
 
 export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExistingEsvKey = false }: Props) {
+  /* On a hosted build the Anthropic key is not the reader's problem — it lives
+     on the server. Showing a key form there would rebuild the exact setup wall
+     the server exists to remove, so the account panel takes its place. The ESV
+     key stays available below either way: that one is genuinely the reader's,
+     tied to his own Crossway terms. */
+  const [hostedBuild, setHostedBuild] = useState<boolean | null>(null)
+  useEffect(() => {
+    ;(window as any).electronAPI?.hostedEnabled?.()
+      .then((on: boolean) => setHostedBuild(Boolean(on)))
+      .catch(() => setHostedBuild(false))
+  }, [])
+
   const [zoom, setZoom] = useState(1)
   useEffect(() => {
     ;(window as any).electronAPI.getUiZoom?.().then((z: number) => setZoom(z ?? 1)).catch(() => {})
@@ -138,17 +151,25 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
         }} />
 
         <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.steel, letterSpacing: '0.14em', marginBottom: 8 }}>
-          API KEYS
+          {hostedBuild ? 'ACCOUNT' : 'API KEYS'}
         </div>
         <h2 style={{ fontFamily: 'Crimson Pro, serif', fontSize: 24, color: BASE.bone, marginBottom: 6, fontWeight: 400 }}>
-          Connect Your APIs
+          {hostedBuild ? 'Your Access' : 'Connect Your APIs'}
         </h2>
         <p style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.steel, lineHeight: 1.6, marginBottom: 24 }}>
-          Keys stay on this Mac and are sent only to the services you connect.
+          {hostedBuild
+            ? 'No API key needed. Studies run on our servers — enter an access code or subscribe.'
+            : 'Keys stay on this Mac and are sent only to the services you connect.'}
         </p>
 
-        {/* Anthropic key */}
-        <div style={{ marginBottom: 20 }}>
+        {hostedBuild && (
+          <div style={{ marginBottom: 24 }}>
+            <HostedAccount />
+          </div>
+        )}
+
+        {/* Anthropic key — hidden on a hosted build; the server holds it. */}
+        <div style={{ marginBottom: 20, display: hostedBuild ? 'none' : undefined }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.gold, letterSpacing: '0.12em', opacity: 0.9 }}>
               ANTHROPIC — required for new studies

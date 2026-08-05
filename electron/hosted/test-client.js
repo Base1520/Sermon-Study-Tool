@@ -62,17 +62,34 @@ const withEnv = async (url, fn) => {
 }
 
 ;(async () => {
-  console.log('\nHOSTED MODE IS OFF UNLESS IT IS TURNED ON')
+  console.log('\nA PACKAGED BUILD IS HOSTED BY DEFAULT')
   {
+    const { DEFAULT_API_URL } = require('./endpoint')
+
+    // UNSET is the case that matters most: a double-clicked .app inherits no
+    // shell environment, so this is what every downloader gets. If it resolved
+    // to null the app would demand an Anthropic key — the exact wall the server
+    // exists to remove — and only on someone else's machine.
     await withEnv(null, async () => {
-      ok('no URL means no hosted base', client.hostedBaseUrl() === null)
+      ok('an unset variable falls back to the packaged endpoint',
+         client.hostedBaseUrl() === DEFAULT_API_URL.replace(/\/+$/, ''), String(client.hostedBaseUrl()))
+      ok('the packaged endpoint is https', /^https:\/\//.test(DEFAULT_API_URL))
+    })
+
+    // EXPLICITLY EMPTY is a real answer, not a missing one: hosting off, back to
+    // the local-key path. That distinction is the whole reason hostedBaseUrl
+    // checks for `undefined` rather than falsiness.
+    await withEnv('', async () => {
+      ok('an explicitly empty value turns hosting OFF', client.hostedBaseUrl() === null)
       let threw = false
       try { await client.analyze(fakeStore(), { text: 't', reference: 'r' }) } catch { threw = true }
       ok('and analyze refuses rather than guessing a host', threw)
       ok('me() returns null instead of erroring', (await client.me(fakeStore())) === null)
     })
+
     await withEnv('https://api.example.com/', async () => {
-      ok('a trailing slash is normalised away', client.hostedBaseUrl() === 'https://api.example.com')
+      ok('an override wins over the packaged default', client.hostedBaseUrl() === 'https://api.example.com')
+      ok('and a trailing slash is normalised away', !client.hostedBaseUrl().endsWith('/'))
     })
   }
 

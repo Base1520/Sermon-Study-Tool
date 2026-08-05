@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useEffect, useRef, lazy, Suspense } fro
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels'
 import { motion, AnimatePresence } from 'motion/react'
 import { friendlyApiError, type FriendlyError } from './lib/apiErrors'
+import { HostedAccount, type UpgradeOffer } from './components/HostedAccount'
 import { PassageInput } from './components/PassageInput'
 import { Desk } from './components/Desk'
 import { CanonicalStrip } from './components/CanonicalStrip'
@@ -222,6 +223,10 @@ export default function App() {
   const [plainPartial, setPlainPartial] = useState<Partial<PlainReadDoc> | null>(null)
   const [plainLoading, setPlainLoading] = useState(false)
   const [plainError, setPlainError]     = useState<FriendlyError | null>(null)
+  /* The server's refusal, held whole. A 402 is an OFFER — it carries a headline,
+     a reassurance that finished work stays, and real plan buttons. Flattening it
+     into the generic error string would turn a paywall into a bug report. */
+  const [upgradeOffer, setUpgradeOffer] = useState<UpgradeOffer | null>(null)
   // What the reader actually typed, kept so the widening notice can be honest
   // about a single verse having been opened out to its paragraph.
   const [requestedRef, setRequestedRef] = useState<string | null>(null)
@@ -514,6 +519,16 @@ export default function App() {
       // or re-opened the study from History first, which is why it survived.
       setCurrentHistoryId(result?.historyId ?? null)
     } catch (e: any) {
+      /* UPGRADE_REQUIRED and SERVICE_PAUSED are not failures — they are the
+         server telling the reader what it costs to continue. Show the offer,
+         not a red error box. */
+      if (e?.upgrade) {
+        setUpgradeOffer(e.upgrade)
+        setPendingPassage(null)
+        setAnalysisStreamId(null)
+        setLoading(false)
+        return
+      }
       const friendly = friendlyApiError(e)
       setError(`${friendly.headline}. ${friendly.detail}`)
       /* The reader view is hidden while that error is up — but the error is
@@ -1144,6 +1159,20 @@ export default function App() {
           setWordStudyLoading(false)
         }}
       />
+
+      {upgradeOffer && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9000,
+          background: 'rgba(16,18,15,0.88)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+        }}>
+          <HostedAccount
+            offer={upgradeOffer}
+            onClose={() => setUpgradeOffer(null)}
+            onChanged={() => setUpgradeOffer(null)}
+          />
+        </div>
+      )}
 
       {showKeyModal && (
         <ApiKeyModal onSave={handleSaveKey} onClose={() => setShowKeyModal(false)} hasExistingKey={Boolean(apiKey)} hasExistingEsvKey={Boolean(esvKey)}

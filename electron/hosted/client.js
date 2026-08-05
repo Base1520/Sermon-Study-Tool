@@ -23,6 +23,8 @@
 
 const crypto = require('crypto')
 
+const { DEFAULT_API_URL } = require('./endpoint')
+
 /** How long to wait on the analysis before giving up. The fan-out runs ~40s. */
 const ANALYZE_TIMEOUT_MS = 180_000
 /**
@@ -78,9 +80,18 @@ function headers(store, extra = {}) {
   return h
 }
 
-/** Is the app pointed at a server at all? Unset means "behave as you always have". */
+/**
+ * Which server this build talks to, or null for the local-key path.
+ *
+ * An explicitly EMPTY OPERATOR_API_URL is a real answer, not a missing one: it
+ * means "turn hosting off", the escape hatch for someone with his own key when
+ * the server is down. `undefined` means nothing was said, so the packaged
+ * default applies. Distinguishing those two is the whole reason this is not a
+ * one-line `||`.
+ */
 function hostedBaseUrl() {
-  const raw = (process.env.OPERATOR_API_URL || '').trim()
+  const override = process.env.OPERATOR_API_URL
+  const raw = (override === undefined ? DEFAULT_API_URL : override).trim()
   return raw ? raw.replace(/\/+$/, '') : null
 }
 

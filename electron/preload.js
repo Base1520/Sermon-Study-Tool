@@ -43,6 +43,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Licensing. The renderer reads status to decide what to SHOW; it never
   // decides what may RUN — every paid capability is gated in main.
   licenseStatus: () => ipcRenderer.invoke('license-status'),
+
+  // ── Hosted account ────────────────────────────────────────────────────────
+  // Present on every build; hostedEnabled() is false on a local-key build and
+  // the renderer hides the whole surface.
+  hostedEnabled: () => ipcRenderer.invoke('hosted-enabled'),
+  hostedMe: () => ipcRenderer.invoke('hosted-me'),
+  hostedRedeem: (code) => ipcRenderer.invoke('hosted-redeem', code),
+  hostedCheckout: (payload) => ipcRenderer.invoke('hosted-checkout', payload),
+  hostedClaim: () => ipcRenderer.invoke('hosted-claim'),
   licenseSet: (licenseString) => ipcRenderer.invoke('license-set', licenseString),
   licenseCatalog: () => ipcRenderer.invoke('license-catalog'),
   saveApiKeys: (keys) => ipcRenderer.invoke('save-api-keys', keys),

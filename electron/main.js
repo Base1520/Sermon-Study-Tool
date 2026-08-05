@@ -16,6 +16,47 @@ const { createRecorder, summarize } = require('./plainread/usage')
 // run the identical calls. This file keeps only what is genuinely the desktop's:
 // the electron-store cache, the history dedupe, the gate and the secret.
 const { analyzePassage, analysisCacheKey, explicitGeoReferences } = require('./plainread/analyze')
+// The hosted path. Inert unless OPERATOR_API_URL is set — see hosted/client.js.
+const hosted = require('./hosted/client')
+
+/**
+ * studyId carried from the analysis to the reading, keyed by reference.
+ *
+ * The two halves of a study are two separate IPC calls, and the server needs the
+ * id from the first to know the second is riding the same claim rather than
+ * buying a new one. It is held here instead of being attached to the analysis
+ * object on purpose: the analysis is hashed to build the document cache key, so
+ * smuggling a unique id inside it would make every key unique and switch the
+ * shared cache off entirely — the exact margin lever this work just repaired.
+ */
+const hostedStudyIds = new Map()
+const rememberStudy = (reference, studyId) => {
+  if (!reference || !studyId) return
+  hostedStudyIds.set(String(reference).trim().toLowerCase(), studyId)
+  // Bounded. A long session must not accumulate ids forever.
+  if (hostedStudyIds.size > 50) {
+    hostedStudyIds.delete(hostedStudyIds.keys().next().value)
+  }
+}
+const recallStudy = (reference) =>
+  hostedStudyIds.get(String(reference ?? '').trim().toLowerCase()) ?? null
+
+/**
+ * Turn a server refusal into something the renderer can render.
+ *
+ * A 402 is an OFFER — the server sends the headline, the reassurance and the
+ * plan buttons. Rethrowing it as a bare Error would collapse all of that into
+ * "request failed", which is how a paywall becomes a bug report.
+ */
+function asRendererError(e) {
+  if (e instanceof hosted.HostedRefusal) {
+    const err = new Error(e.payload?.headline || e.message)
+    err.code = e.code
+    err.upgrade = e.payload
+    return err
+  }
+  return e
+}
 const licenseStore = require('./license/store')
 const { initLicenseStore, touchClock } = licenseStore
 const { FEATURES } = require('./license/features')
@@ -391,6 +432,49 @@ ipcMain.handle('cost-summary', () => {
 // gating is presentation only — every capability that actually calls a model is
 // gated here in main by requireFeature(), after that handler's cache return.
 
+// ── Hosted account surface ──────────────────────────────────────────────────
+// Everything the renderer needs to show who this install is, take a comp code,
+// start a subscription, and collect one after the browser comes back.
+
+/** Is this a hosted build at all? The renderer hides the whole surface if not. */
+ipcMain.handle('hosted-enabled', () => Boolean(hosted.hostedBaseUrl()))
+
+/** Entitlement, straight from the server. null when offline — never a downgrade. */
+ipcMain.handle('hosted-me', async () => {
+  if (!hosted.hostedBaseUrl()) return null
+  return hosted.me(store)
+})
+
+/** Redeem a comp code. Stores the device token; the app is a subscriber after. */
+ipcMain.handle('hosted-redeem', async (_, code) => {
+  if (!hosted.hostedBaseUrl()) throw new Error('This build is not connected to the server.')
+  try {
+    return { ok: true, ...(await hosted.redeem(store, code)) }
+  } catch (e) {
+    return { ok: false, message: e.message }
+  }
+})
+
+/** Open Stripe checkout in the real browser. Never inside the app. */
+ipcMain.handle('hosted-checkout', async (_, { plan, email }) => {
+  if (!hosted.hostedBaseUrl()) throw new Error('This build is not connected to the server.')
+  const url = await hosted.checkout(store, { plan, email })
+  await shell.openExternal(url)
+  return { ok: true, url }
+})
+
+/**
+ * Collect a subscription just paid for.
+ *
+ * Polled by the renderer after checkout opens, because the app never sees the
+ * browser's return. "Not yet" is a normal answer, not an error — the webhook
+ * and the customer's browser race each other.
+ */
+ipcMain.handle('hosted-claim', async () => {
+  if (!hosted.hostedBaseUrl()) return { ok: false }
+  return hosted.claim(store)
+})
+
 ipcMain.handle('license-status', () => licenseStore.entitlements())
 
 ipcMain.handle('license-set', (_, licenseString) => licenseStore.setLicense(null, licenseString))
@@ -562,6 +646,47 @@ ipcMain.handle('analyze-passage', async (event, { text, reference, streamId }) =
     }
   }
 
+  // ── HOSTED ────────────────────────────────────────────────────────────────
+  // The whole point of the server: no key on this machine, no setup, no wall.
+  // The local branch below is untouched and still runs when OPERATOR_API_URL is
+  // unset, so an existing user with his own key notices nothing.
+  if (hosted.hostedBaseUrl()) {
+    stage('calls-dispatched')
+    let remote
+    try {
+      remote = await hosted.analyze(store, { text, reference })
+    } catch (e) {
+      throw asRendererError(e)
+    }
+    stage('structure'); stage('theme'); stage('culture'); stage('complete')
+
+    const hostedResult = remote.analysis
+    rememberStudy(reference, remote.studyId)
+
+    // Cached and put in history exactly like a local run, so History, the desk
+    // and session-load-latest behave identically on both paths.
+    let hostedHistoryId = null
+    if (store) {
+      store.set(cacheKey, hostedResult)
+      const history = store.get('history', [])
+      const matches = history.filter(e => e.analysis?.reference === hostedResult.reference)
+      const existing = matches.find(e => e.draft || e.scholarMessages?.length ||
+        (e.annotations && Object.keys(e.annotations).length)) || matches[0]
+      if (existing) {
+        hostedHistoryId = existing.id
+        store.set('history', [
+          { ...existing, analysis: hostedResult },
+          ...history.filter(e => e.id !== existing.id),
+        ])
+      } else {
+        const entry = { id: Date.now().toString(), savedAt: new Date().toISOString(), analysis: hostedResult, annotations: {} }
+        hostedHistoryId = entry.id
+        store.set('history', [entry, ...history].slice(0, 100))
+      }
+    }
+    return hostedHistoryId ? { ...hostedResult, historyId: hostedHistoryId } : hostedResult
+  }
+
   requireFeature('gen.study')
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
 
@@ -711,6 +836,45 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
   // that is the only figure worth watching for a regression. If this creeps
   // back toward the total, streaming has quietly broken.
   let __firstSection = 0
+
+  // ── HOSTED ────────────────────────────────────────────────────────────────
+  // Same streaming contract as the local path: onSection(key, value) forwarded
+  // to the same renderer event, so the desk cannot tell the two apart.
+  if (hosted.hostedBaseUrl()) {
+    const priorStudyId = recallStudy(requestedReference ?? analysis?.reference)
+    try {
+      const doc = await hosted.plainRead(store, {
+        analysis,
+        reference: requestedReference ?? analysis?.reference,
+        level,
+        studyId: priorStudyId,
+        onSection: (key, value) => {
+          try {
+            if (!event.sender || event.sender.isDestroyed()) return
+            if (!__firstSection && key !== '__reset__') {
+              __firstSection = Date.now()
+              console.log(`[plain-read] FIRST SECTION '${key}' in ${((__firstSection - __t0) / 1000).toFixed(1)}s (hosted)`)
+            }
+            event.sender.send('plain-read-section', {
+              requestId: requestId ?? null,
+              requestedReference: requestedReference ?? null,
+              key,
+              value,
+            })
+          } catch {}
+        },
+      })
+      // The claim is spent. Holding the id would make a re-read of the same
+      // passage try to ride a study the server has already closed.
+      hostedStudyIds.delete(String(requestedReference ?? analysis?.reference ?? '').trim().toLowerCase())
+      __done('hosted done')
+      return doc
+    } catch (e) {
+      __done('hosted failed')
+      throw asRendererError(e)
+    }
+  }
+
   try {
   return await plainRead({
     analysis,

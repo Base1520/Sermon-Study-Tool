@@ -639,6 +639,65 @@ app.get('/v1/feedback', route(async (req, res) => {
   res.json({ feedback: rows })
 }))
 
+// ── The corpus: what users' money has actually built ────────────────────────
+/**
+ * What the cache knows, in a form the vault can act on.
+ *
+ * THE POINT. Every study a user pays for leaves a content-addressed document
+ * behind, and the next person to open that passage gets it free. That is the
+ * asset compounding. This endpoint is how the Foundry learns what is in it and,
+ * more importantly, WHAT PEOPLE ACTUALLY STUDY — which is information Cole
+ * cannot get any other way and does not currently have.
+ *
+ * PRIVACY IS THE WHOLE DESIGN CONSTRAINT, not a footnote.
+ * - No install ids, no account ids, no emails.
+ * - No questions. A man's questions about a passage are pastoral material; they
+ *   are the single most sensitive thing this server holds, and they are not
+ *   exported at any aggregation level.
+ * - Only Scripture references and counts leave here. A reference is public;
+ *   who asked about it is not.
+ *
+ * Comp accounts only, same as the feedback feed.
+ */
+app.get('/v1/corpus', route(async (req, res) => {
+  if (req.identity.account?.plan !== 'comp') {
+    return res.status(403).json({ error: 'FORBIDDEN' })
+  }
+
+  const [demand, docs, refusals] = await Promise.all([
+    // WHAT PEOPLE STUDY. Counted from the per-call ledger, which carries a
+    // reference and nothing about who ran it.
+    db.query(
+      `SELECT reference, COUNT(DISTINCT study_id)::int AS studies
+         FROM usage_event
+        WHERE reference IS NOT NULL AND label LIKE 'analyze%'
+        GROUP BY reference
+        ORDER BY studies DESC, reference
+        LIMIT 200`),
+    // WHAT THE CACHE HOLDS. The documents themselves are not returned — only
+    // that they exist, so the vault can see coverage without pulling prose it
+    // has no right to treat as scholarship.
+    db.query(
+      `SELECT COUNT(*)::int AS documents,
+              COUNT(*) FILTER (WHERE cache_key LIKE 'analysis-cache%')::int AS analyses,
+              MIN(created_at) AS first_at,
+              MAX(updated_at) AS last_at
+         FROM document_cache`),
+    // WHERE IT FAILED OR REFUSED. The most useful signal of all, and the one a
+    // success-only view hides.
+    db.query(
+      `SELECT state, COUNT(*)::int AS n FROM study GROUP BY state`),
+  ])
+
+  res.json({
+    generatedAt: new Date().toISOString(),
+    demand: demand.rows,
+    cache: docs.rows[0],
+    studyStates: Object.fromEntries(refusals.rows.map((r) => [r.state, r.n])),
+    note: 'References and counts only. No install ids, no accounts, no questions.',
+  })
+}))
+
 // ── Redeem an access code ───────────────────────────────────────────────────
 /**
  * Comped access, no card, no Stripe.

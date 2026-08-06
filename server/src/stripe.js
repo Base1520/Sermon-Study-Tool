@@ -197,6 +197,35 @@ function mount(app, db) {
       )
     }
 
+    /**
+     * A MAN WHO ALREADY SUBSCRIBES MUST NOT BE SOLD A SECOND SUBSCRIPTION.
+     *
+     * Round 2 stopped a duplicate CUSTOMER being created. It did not stop a
+     * duplicate SUBSCRIPTION on that customer, which is the thing that actually
+     * bills — and Stripe Checkout in subscription mode does not deduplicate. So
+     * the "Move up" button on the out-of-studies paywall added a $50/mo
+     * subscription ALONGSIDE the live $30/mo one. He pays $80/mo, syncCustomer
+     * reads subscriptions.list({limit:1}) and writes down exactly one, so
+     * nothing in the app or the database ever shows the duplicate. He finds it
+     * on a card statement.
+     *
+     * The same click happens on the retry path: after a claim poll times out,
+     * the plan buttons are still live and still say he is not paying.
+     *
+     * A plan CHANGE belongs in Stripe's own portal, which handles proration and
+     * cannot produce two subscriptions.
+     */
+    const existing = await stripe.subscriptions.list({
+      customer: customerId, status: 'active', limit: 1,
+    })
+    if (existing.data.length > 0) {
+      const portal = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: process.env.PUBLIC_URL,
+      })
+      return res.json({ url: portal.url, changedPlan: true })
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: customerId,

@@ -77,6 +77,25 @@ export function friendlyApiError(err: unknown): FriendlyError {
   // generic matchers below, because "LICENSE_REQUIRED" would otherwise never be
   // reached on a string that happens to contain the word billing.
 
+  /**
+   * A tool that has not moved to the server yet.
+   *
+   * main.js throws this with a NEEDS_OWN_KEY code from requireSecret on a hosted
+   * build. Without a branch here it fell through to the generic "add your key in
+   * Settings" advice — and on a hosted build Settings has no key field, because
+   * the whole point is that the reader never needs one. That is a dead end: the
+   * app telling a man to do something the app does not let him do.
+   */
+  if (hay.includes('needs_own_key') || hay.includes('not on our servers yet')) {
+    return {
+      headline: 'This tool is not on our servers yet',
+      detail:
+        'Studying a passage, reading it and asking about it all work without a key — ' +
+        'those run on our servers. This particular tool still calls Anthropic directly, ' +
+        'so it needs your own key. It is on the list to move.',
+    }
+  }
+
   if (hay.includes('license_required')) {
     return {
       headline: 'This part is in the full version',

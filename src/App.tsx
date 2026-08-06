@@ -293,7 +293,15 @@ export default function App() {
            open the same paywall. Round 1 taught only handleAnalyze to decode it,
            so a reader who hit the wall here got a red box with no way to buy. */
         const offer = offerFromError(e)
-        if (offer) { setUpgradeOffer(offer); return }
+        if (offer) {
+          /* The run is over. Without clearing these the reader kept showing
+             "WRITING THE READING" forever behind the dismissed paywall — a
+             progress bar for work that was refused before it started. */
+          setUpgradeOffer(offer)
+          setPlainLoading(false)
+          setPlainPartial(null)
+          return
+        }
         setPlainError(friendlyApiError(e))
       })
       .finally(() => { if (!cancelled) setPlainLoading(false) })

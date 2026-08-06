@@ -217,6 +217,27 @@ async function askCountToday(db, { accountId, installId }) {
 }
 
 /**
+ * Is this exact reading already written?
+ *
+ * Checked BEFORE anyone is charged. The route used to claim a study first and
+ * only look in the cache deep inside generation, which meant a document that
+ * costs nothing to serve was still billed — every time. It is the difference
+ * between "re-opening a study is free" and a free user losing his one credit to
+ * a document already sitting in the database.
+ */
+async function cachedDocument(db, analysis, level) {
+  try {
+    const key = cacheKeyFor(forGeneration(analysis), level)
+    const { rows } = await db.query(
+      `SELECT document FROM document_cache WHERE cache_key = $1`, [key])
+    return rows[0]?.document ?? null
+  } catch {
+    // A cache lookup must never be the thing that fails a reading.
+    return null
+  }
+}
+
+/**
  * Write the claim, the moment it is charged for.
  *
  * MUST NOT depend on model usage. It used to: ownership was inferred from
@@ -301,5 +322,5 @@ async function releaseStudyForRetry(db, studyId) {
 module.exports = {
   runPlainRead, runAnalyze, makeRecorder, makeCache, preloadCache, writeCache,
   studyCost, openStudy, claimStudyForReading, finishStudy, releaseStudyForRetry,
-  runAsk, askCountToday, MAX_RETRIES_PER_STUDY,
+  runAsk, askCountToday, MAX_RETRIES_PER_STUDY, cachedDocument,
 }

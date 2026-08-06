@@ -432,11 +432,29 @@ function forGeneration(analysis) {
    * Sorting makes the key depend on the CONTENT and nothing else.
    */
   const drop = new Set(NON_CONTENT_KEYS)
-  const out = {}
-  for (const k of Object.keys(analysis).sort()) {
-    if (!drop.has(k)) out[k] = analysis[k]
+
+  /**
+   * DEEP, not one level.
+   *
+   * jsonb reorders keys at EVERY depth, and an analysis is mostly nested —
+   * canonicalContext, authorIntent, genre, and an array of phrase objects. A
+   * top-level sort left all of those free to come back in a different order, so
+   * the cache key still changed on a round trip and the shared cache still
+   * missed for the second reader of every passage. Arrays keep their order:
+   * that is content, not layout.
+   */
+  const canon = (value, isRoot) => {
+    if (Array.isArray(value)) return value.map((v) => canon(v, false))
+    if (!value || typeof value !== 'object') return value
+    const out = {}
+    for (const k of Object.keys(value).sort()) {
+      if (isRoot && drop.has(k)) continue
+      out[k] = canon(value[k], false)
+    }
+    return out
   }
-  return out
+
+  return canon(analysis, true)
 }
 
 module.exports = {

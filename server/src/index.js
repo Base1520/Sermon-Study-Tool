@@ -261,6 +261,28 @@ app.post('/v1/read', route(async (req, res) => {
   const accountId = req.identity.account?.id ?? null
   const { periodStart, periodEnd } = period()
 
+  /**
+   * ALREADY WRITTEN? THEN IT IS FREE.
+   *
+   * Checked before any claim, because serving a cached document costs nothing
+   * and charging for nothing is indefensible. This one lookup closes four
+   * separate ways a person was billed twice for one reading:
+   *   - quitting mid-stream (the server finishes and caches it; his machine
+   *     never received it, so he came back and was charged again for a document
+   *     that already existed)
+   *   - re-opening a saved study whose local copy was missing
+   *   - a document whose claim check reported 'failed', which the desktop
+   *     refuses to cache — so it was re-bought on every single launch
+   *   - the second reader of any passage someone else has already studied
+   */
+  const alreadyWritten = await engine.cachedDocument(db, analysis, level)
+  if (alreadyWritten) {
+    res.setHeader('Content-Type', 'application/x-ndjson')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.write(JSON.stringify({ type: 'done', document: alreadyWritten, cached: true }) + '\n')
+    return res.end()
+  }
+
   // ONE STUDY, NOT TWO. A reading is the second half of work /v1/analyze already
   // charged for, so a client that passes back the studyId it was given rides
   // that same reservation. The id cannot be forged into free work: it only
@@ -399,8 +421,13 @@ app.post('/v1/read', route(async (req, res) => {
  *     the reader already has a reading
  */
 const MAX_ASKS_PER_DAY = 100
-/** Generous for a real reading (~20KB), far below what could outrun the cap. */
-const MAX_ASK_CHARS = 200_000
+/**
+ * A real reading is ~20KB. 200K was set "generously" and that was the wrong
+ * instinct on a route that runs an Opus call 100 times a day per install id:
+ * generosity there is measured in dollars of somebody else's money. 60K still
+ * clears the largest genuine document with room to spare.
+ */
+const MAX_ASK_CHARS = 60_000
 
 app.post('/v1/ask', route(async (req, res) => {
   const { doc, analysis, question, history, vaultNotes } = req.body || {}
@@ -492,8 +519,18 @@ app.post('/v1/feedback', route(async (req, res) => {
   res.json({ ok: true, id: rows[0].id, createdAt: rows[0].created_at })
 }))
 
-/** The feed, newest first. Read-only; decisions stay Cole's to make in SQL. */
+/**
+ * The feed, newest first.
+ *
+ * NOT PUBLIC. Every row is a named beta tester's free-text report about a
+ * pastor's Bible-study habits, and it was readable by anyone who guessed the
+ * URL. Reading it requires a comp account — which in practice means Cole, Rikki
+ * or a beta code holder, since comp is not for sale.
+ */
 app.get('/v1/feedback', route(async (req, res) => {
+  if (req.identity.account?.plan !== 'comp') {
+    return res.status(403).json({ error: 'FORBIDDEN' })
+  }
   const limit = Math.min(Number(req.query.limit) || 50, 200)
   const { rows } = await db.query(
     `SELECT id, created_at, name, category, body, version, platform, decision

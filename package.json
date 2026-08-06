@@ -74,7 +74,8 @@
       ],
       "extendInfo": {
         "NSMicrophoneUsageDescription": "The Operator records your rehearsal so it can play it back and review your delivery. Recordings stay on this Mac."
-      }
+      },
+      "notarize": true
     },
     "publish": {
       "provider": "github",

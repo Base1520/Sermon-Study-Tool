@@ -1,3 +1,4 @@
+import { friendlyApiErrorText } from '../lib/apiErrors'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { BASE } from '../theme'
 import { VerseHover } from './VerseHover'
@@ -79,7 +80,7 @@ export function CrossRefArcs({ reference, mainTheme, biblicalThemes, apiKey, onL
     ;(window as any).electronAPI.getCrossRefs({
       reference, mainTheme: mainTheme ?? '', biblicalThemes: biblicalThemes ?? [], apiKey,
     }).then((r: XRef[]) => { if (alive) { setRefs(Array.isArray(r) ? r : []); setLoading(false) } })
-      .catch((e: any) => { if (alive) { setError(e?.message ?? 'Failed to find connections'); setLoading(false) } })
+      .catch((e: any) => { if (alive) { setError(friendlyApiErrorText(e))   /* not the raw IPC string */; setLoading(false) } })
     return () => { alive = false }
   }, [reference])
 

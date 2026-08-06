@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { BASE, FONT } from '../theme'
 import { formatReference } from '../lib/reference'
+import { friendlyApiErrorText } from '../lib/apiErrors'
 import { TRANSLATIONS } from '../lib/translations'
 
 interface Props {
@@ -70,7 +71,9 @@ export function PassageInput({ onAnalyze, loading, prefillRef, onPrefillUsed, on
       setFetchedFor(normalizeReference(reference))
       return result
     } catch (e: any) {
-      setFetchError(e?.message ?? 'Could not fetch passage')
+      /* Never the raw IPC string. Offline, this printed an Electron internals
+         message at a pastor on the very first step of the app. */
+      setFetchError(friendlyApiErrorText(e))
       return null
     } finally { setFetching(false) }
   }

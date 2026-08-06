@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS settings (
 INSERT INTO settings (key, value) VALUES ('daily_ceiling_usd', '50')
   ON CONFLICT (key) DO NOTHING;
 
+-- The synthetic account that holds the FREE tier's in-flight reservations.
+-- usage_period.account_id has a foreign key, so the row has to exist; free work
+-- belongs to no real account but its money still has to be visible to the brake
+-- while it is being spent.
+INSERT INTO account (id, email, plan, status)
+     VALUES ('00000000-0000-0000-0000-000000000001', 'anon-ledger@internal.invalid', 'free', 'none')
+ON CONFLICT (id) DO NOTHING;
+
 -- ── Shared document cache ───────────────────────────────────────────────────
 -- Content-addressed and NOT keyed to a user, deliberately: the second person to
 -- study a passage gets the first person's document at zero marginal cost. This
@@ -207,6 +215,10 @@ CREATE TABLE IF NOT EXISTS study (
 -- How many times this claim has been handed back after a failed reading. An
 -- unbounded retry is an unbounded spend on one credit — see releaseStudyForRetry.
 ALTER TABLE study ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
+-- A stranded study is refunded ONCE. Without this an anonymous caller could
+-- strand on purpose, get the lifetime credit back and repeat — free studies with
+-- extra steps, each one spending real Opus tokens.
+ALTER TABLE study ADD COLUMN IF NOT EXISTS refunded_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS study_account_idx ON study(account_id, created_at);
 CREATE INDEX IF NOT EXISTS study_install_idx ON study(install_id, created_at);

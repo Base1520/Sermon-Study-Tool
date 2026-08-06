@@ -3,6 +3,7 @@ import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'reac
 import { motion, AnimatePresence } from 'motion/react'
 import { friendlyApiError, type FriendlyError } from './lib/apiErrors'
 import { HostedAccount } from './components/HostedAccount'
+import { BetaFeedback } from './components/BetaFeedback'
 import { offerFromError, type UpgradeOffer } from './lib/hostedError'
 import { PassageInput } from './components/PassageInput'
 import { Desk } from './components/Desk'
@@ -254,9 +255,21 @@ export default function App() {
   // reopening a saved study is served from cache, so it costs nothing.
   const [showStudySearch, setShowStudySearch] = useState(false)
   const [demoMode, setDemoMode] = useState(false)
+  /* Opened from Help → Send Feedback (Cmd+Shift+F). The panel existed and was
+     reachable from nowhere, so no tester could file a report. */
+  const [showFeedback, setShowFeedback] = useState(false)
+  useEffect(() => {
+    const off = (window as any).electronAPI?.onOpenFeedback?.(() => setShowFeedback(true))
+    return () => { if (typeof off === 'function') off() }
+  }, [])
+  /* True only for the analysis restored at launch. Cleared the moment the reader
+     is opened deliberately, so a restored study still reads normally once the
+     man asks for it — it just never asks for itself. */
+  const restoredOnLaunch = useRef(false)
 
   useEffect(() => {
     if (!plainMode || !analysis || demoMode) return
+    if (restoredOnLaunch.current) { restoredOnLaunch.current = false; return }
     if (!apiKey) {
       setPlainError({
         headline: 'No API key yet',
@@ -466,10 +479,37 @@ export default function App() {
     }
   }, [apiKey, plainMode])
 
+  /* COLLECT A PURCHASE AT LAUNCH.
+     HostedAccount asks on mount, but it only mounts inside Settings or behind a
+     paywall — so a man who paid, quit, and reopened had to go looking through a
+     settings panel to get what he had already bought. Asking here means simply
+     restarting the app is the fix. Silent by design: "no purchase found" is the
+     normal answer for everyone who has not bought anything. */
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (!api?.hostedClaim) return
+    api.hostedEnabled?.().then((on: boolean) => {
+      if (!on) return
+      api.hostedMe?.().then((state: any) => {
+        if (state && !state.anonymous) return   // already carrying a token
+        api.hostedClaim().catch(() => {})
+      }).catch(() => {})
+    }).catch(() => {})
+  }, [])
+
   // Restore last session on launch
   useEffect(() => {
     ;(window as any).electronAPI.sessionLoadLatest().then((entry: HistoryEntry | null) => {
       if (!entry) return
+      /* OPENING THE APP MUST NOT SPEND A STUDY.
+         The reader effect below runs whenever `analysis` changes, and this
+         restores last session's analysis on launch — so merely opening the app
+         re-ran the reading. If that document was not cached (a verify pass that
+         timed out is never cached anywhere), it was BOUGHT AGAIN, every launch,
+         before the user had clicked a thing. On a free install that is the one
+         lifetime credit gone at startup. The restore is allowed to render what
+         is already on disk; generating new work needs a deliberate press. */
+      restoredOnLaunch.current = true
       setAnalysis(entry.analysis)
       setAnnotations(entry.annotations ?? {})
       setCurrentHistoryId(entry.id)
@@ -1177,6 +1217,13 @@ export default function App() {
           setWordStudyLoading(false)
         }}
       />
+
+      {showFeedback && (
+        <BetaFeedback
+          onClose={() => setShowFeedback(false)}
+          isAdmin={Boolean((import.meta as any).env?.VITE_ADMIN === 'true')}
+        />
+      )}
 
       {upgradeOffer && (
         <div style={{

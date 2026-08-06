@@ -68,6 +68,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   calendarGet: () => ipcRenderer.invoke('calendar-get'),
   calendarSet: (date, entry) => ipcRenderer.invoke('calendar-set', { date, entry }),
   platform: process.platform,
+  onOpenFeedback: (cb) => {
+    const handler = () => cb()
+    ipcRenderer.on('open-feedback', handler)
+    return () => ipcRenderer.removeListener('open-feedback', handler)
+  },
   onAnalysisProgress: (cb) => {
     const handler = (_, data) => cb(data)
     ipcRenderer.on('analysis-progress', handler)

@@ -343,6 +343,24 @@ function buildMenu() {
     },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        {
+          /* THE ONLY WAY IN. BetaFeedback.tsx was built, styled and wired to a
+             backend, and referenced from nowhere in the entire renderer — so no
+             tester could ever file a report, and the reports Cole was waiting on
+             had no route to him. A menu item costs no screen space and is where
+             a Mac user looks for exactly this. */
+          label: 'Send Feedback…',
+          accelerator: 'CmdOrCtrl+Shift+F',
+          click: () => {
+            const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0]
+            win?.webContents.send('open-feedback')
+          },
+        },
+      ],
+    },
   ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }

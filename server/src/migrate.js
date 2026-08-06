@@ -72,5 +72,29 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
       WHERE code = ANY($1) AND revoked_at IS NULL`, [BURNED])
   if (rowCount) console.log(`revoked ${rowCount} leaked comp code(s)`)
 
+  /**
+   * REVOKING A CODE DOES NOT UNDO WHAT IT ALREADY MINTED.
+   *
+   * The three leaked codes were live in a public repo. Anyone who redeemed one
+   * got a real account and a real device token, and revoking the code leaves
+   * both working forever — the token is what authenticates, not the code. So the
+   * accounts are downgraded and their tokens revoked too.
+   *
+   * Scoped strictly to accounts created BY those codes, via access_code_use.
+   */
+  const { rows: burnedAccounts } = await db.query(
+    `SELECT DISTINCT account_id FROM access_code_use
+      WHERE code = ANY($1) AND account_id IS NOT NULL`, [BURNED])
+  if (burnedAccounts.length) {
+    const ids = burnedAccounts.map((r) => r.account_id)
+    await db.query(
+      `UPDATE device SET revoked_at = now()
+        WHERE account_id = ANY($1) AND revoked_at IS NULL`, [ids])
+    await db.query(
+      `UPDATE account SET plan = 'free', status = 'none'
+        WHERE id = ANY($1) AND plan = 'comp'`, [ids])
+    console.log(`revoked ${ids.length} account(s) minted from leaked codes`)
+  }
+
   await db.end()
 })().catch((e) => { console.error(e.message); process.exit(1) })

@@ -20,6 +20,7 @@ const auth = require('./auth')
 const { entitlementFor, upgradePrompt, PLANS } = require('./entitlement')
 const meter = require('./meter')
 const engine = require('./engine')
+const { checkGenerationInput } = require('../../electron/plainread/runtime')
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL })
 
@@ -154,6 +155,25 @@ async function claimStudy(req, { ent, accountId, periodStart, periodEnd }) {
     if (rows.length === 0) {
       return { status: 402, body: { error: 'UPGRADE_REQUIRED', ...upgradePrompt(ent) } }
     }
+
+    /**
+     * A FREE STUDY IN FLIGHT IS STILL MONEY IN FLIGHT.
+     *
+     * anon_install has no money columns, so a free study held no reservation and
+     * the ceiling's in-flight number saw NOTHING of it. Every anonymous study
+     * running right now — the one tier anyone can open with a fresh uuid, and
+     * therefore the only one that can actually run away — was invisible to the
+     * brake until its cost reconciled minutes later. Booked against a reserved
+     * account row so committedSpend() counts it while it is happening.
+     */
+    await db.query(
+      `INSERT INTO usage_period (account_id, period_start, period_end, studies_used, reserved_usd)
+            VALUES ($1, $2, $3, 0, $4)
+       ON CONFLICT (account_id, period_start) DO UPDATE
+              SET reserved_usd = usage_period.reserved_usd + $4,
+                  updated_at   = now()`,
+      [ANON_LEDGER_ACCOUNT, periodStart, periodEnd, meter.STUDY_RESERVE_USD],
+    ).catch(() => {})   // accounting must never refuse a study
     return null
   }
 
@@ -169,6 +189,15 @@ async function claimStudy(req, { ent, accountId, periodStart, periodEnd }) {
   return null
 }
 
+/**
+ * One synthetic account row that carries the free tier's in-flight money.
+ *
+ * A fixed uuid rather than a real account: it exists only so usage_period has
+ * somewhere to hold reservations for work that belongs to no account, which is
+ * the only way the ceiling can see a free-tier burst while it is happening.
+ */
+const ANON_LEDGER_ACCOUNT = '00000000-0000-0000-0000-000000000001'
+
 const newStudyId = () =>
   `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
 
@@ -183,6 +212,24 @@ app.post('/v1/analyze', route(async (req, res) => {
   const { text, reference } = req.body || {}
   if (!text || !reference) {
     return res.status(400).json({ error: 'text and reference are required' })
+  }
+
+  /**
+   * SIZE IS CHECKED BEFORE ANYTHING IS CLAIMED OR WRITTEN.
+   *
+   * It used to be checked inside the engine, AFTER claimStudy took the credit
+   * and openStudy wrote the row. So an oversized paste cost a study, refunded it
+   * — and left behind a study row, which is what /v1/ask uses to decide whether
+   * a caller has ever run one. A free, token-free 413 therefore unlocked the ask
+   * endpoint permanently for any install id that could send a big string.
+   */
+  try {
+    checkGenerationInput({ text, reference })
+  } catch (e) {
+    return res.status(413).json({
+      error: 'INPUT_TOO_LARGE',
+      message: e?.message || 'That passage is too long to study in one go.',
+    })
   }
 
   const ent = entitlementFor(req.identity.account)
@@ -331,12 +378,37 @@ app.post('/v1/read', route(async (req, res) => {
     const state = await engine.releaseStudyForRetry(db, studyId).catch(() => null)
 
     if (state === 'stranded') {
-      if (accountId) {
-        await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
-      } else if (req.identity.installId) {
-        await db.query(
-          `UPDATE anon_install SET studies_used = GREATEST(studies_used - 1, 0), updated_at = now()
-            WHERE install_id = $1`, [req.identity.installId]).catch(() => {})
+      /**
+       * THE REFUND IS BOOKED ON THE STUDY, so it can only ever happen once.
+       *
+       * Two ways the naive version leaked. First, releaseStudy() subtracts a
+       * $0.75 hold as well as the study — but a RIDE-ALONG holds no reservation,
+       * because /v1/analyze already settled it, so releasing here silently ate
+       * some other request's in-flight money and made the ceiling read low.
+       * Second, an anonymous caller could strand a study on purpose and get his
+       * lifetime credit back, over and over, spending real Opus tokens on every
+       * attempt — free studies with extra steps.
+       *
+       * The conditional UPDATE is the guard: a study can be marked refunded
+       * exactly once, and only the caller that wins it gives anything back.
+       */
+      const { rows: refundable } = await db.query(
+        `UPDATE study SET refunded_at = now()
+          WHERE id = $1 AND refunded_at IS NULL RETURNING id`, [studyId]).catch(() => ({ rows: [] }))
+
+      if (refundable.length) {
+        if (accountId) {
+          // studies_used only. The hold is either already settled (ride-along)
+          // or released by the sweep; subtracting it here would double-release.
+          await db.query(
+            `UPDATE usage_period SET studies_used = GREATEST(studies_used - 1, 0), updated_at = now()
+              WHERE account_id = $1 AND period_start = $2`,
+            [accountId, periodStart]).catch(() => {})
+        } else if (req.identity.installId) {
+          await db.query(
+            `UPDATE anon_install SET studies_used = GREATEST(studies_used - 1, 0), updated_at = now()
+              WHERE install_id = $1`, [req.identity.installId]).catch(() => {})
+        }
       }
       settled = true
       return

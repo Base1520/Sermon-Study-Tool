@@ -175,6 +175,12 @@ export function HostedAccount({ offer, onClose, onChanged }: {
 
   // A local-key build has no account surface at all.
   if (enabled === false) return null
+  /* `null` means "not asked yet" — render nothing for that instant. It used to
+     also swallow the OFFLINE case, because a failed hostedEnabled() set enabled
+     to false: a man with no wifi lost the access-code field and the plan buttons
+     entirely, which is exactly when he most needs to type a code. hostedEnabled
+     is a local answer and cannot fail for network reasons, so this is now only
+     the pre-answer instant. */
   if (enabled === null) return null
 
   const label = (s: string) => (
@@ -183,7 +189,13 @@ export function HostedAccount({ offer, onClose, onChanged }: {
     </div>
   )
 
-  const headline = offer?.headline || (
+  /* An outage is NOT a sales opportunity. SERVICE_PAUSED arrives on the same
+     402/503 path as a real paywall, and rendering it under "One free study, on
+     the house" with live Subscribe buttons meant a man could pay $30 during an
+     outage and still get nothing — having been sold to by an error message. */
+  const paused = offer?.error === 'SERVICE_PAUSED' || offer?.code === 'SERVICE_PAUSED'
+
+  const headline = (paused ? (offer?.headline || 'The Operator is paused for a moment') : offer?.headline) || (
     me?.paying ? `${me.label} — ${me.remaining} of ${me.allowance} studies left this month`
     : me?.anonymous ? 'One free study, on the house'
     : 'Your account'
@@ -227,7 +239,7 @@ export function HostedAccount({ offer, onClose, onChanged }: {
       )}
 
       {/* ── Plans ─────────────────────────────────────────────────────────── */}
-      {(offer?.actions?.length || (me && !me.paying)) && (
+      {!paused && (offer?.actions?.length || (me && !me.paying)) && (
         <div style={{ marginBottom: 18 }}>
           {label('SUBSCRIBE')}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

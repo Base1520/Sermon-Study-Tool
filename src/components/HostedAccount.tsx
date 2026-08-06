@@ -135,6 +135,36 @@ export function HostedAccount({ offer, onClose, onChanged }: {
     } finally { setBusy(false) }
   }, [code, busy, refresh, onChanged])
 
+  /**
+   * A church asking for seats.
+   *
+   * Deliberately an EMAIL, not a checkout. Per-seat Stripe billing is not built,
+   * and taking a card for seats that cannot yet be provisioned would be the
+   * worst thing on this screen. Fulfilment is real though — a multi-use access
+   * code gives every man on staff his own account and his own allowance, which
+   * is the whole point of not sharing a login.
+   *
+   * The body is pre-written because "email us" with a blank compose window is
+   * where most enquiries die: the man does not know what to say, so he closes it.
+   */
+  const churchEnquiry = useCallback(async () => {
+    try {
+      await api().openEnquiry({
+        subject: 'The Operator — licence for our church',
+        body:
+          'Hi Cole,\n\n' +
+          'We would like to use The Operator across our team.\n\n' +
+          'Church / organisation:\n' +
+          'How many people would use it:\n' +
+          'Roughly how many passages each of us studies in a week:\n\n' +
+          'Thanks,\n',
+      })
+      setNote('Opened an email for you — send it and I will get back to you with a code.')
+    } catch {
+      setError('Could not open your mail app. Write to cole@base1520.com and I will sort it out.')
+    }
+  }, [])
+
   const subscribe = useCallback(async (plan: string) => {
     if (busy) return
     setBusy(true); setError(null)
@@ -247,6 +277,7 @@ export function HostedAccount({ offer, onClose, onChanged }: {
             currentPlan={me.plan}
             busy={busy}
             onChoose={subscribe}
+            onChurch={churchEnquiry}
           />
         </div>
       )}

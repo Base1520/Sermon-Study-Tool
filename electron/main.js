@@ -2439,6 +2439,26 @@ const EXTERNAL_HOSTS = new Set([
   'www.esv.org',
 ])
 
+/**
+ * Open a pre-written email. Separate from open-external on purpose.
+ *
+ * That handler requires https and an allowlisted host, which is exactly right
+ * for a link to somebody else's website — and exactly wrong for mailto:, which
+ * has no host to allowlist. Rather than loosen a security check to fit one
+ * feature, this composes the address itself: the renderer supplies only a
+ * subject and a body, never the recipient, so no call site can turn this into a
+ * way to mail an arbitrary stranger from the user's own mail client.
+ */
+const CHURCH_ENQUIRY_TO = 'cole@base1520.com'
+
+ipcMain.handle('open-enquiry', async (_, { subject, body } = {}) => {
+  const url = `mailto:${CHURCH_ENQUIRY_TO}`
+    + `?subject=${encodeURIComponent(String(subject ?? '').slice(0, 200))}`
+    + `&body=${encodeURIComponent(String(body ?? '').slice(0, 2000))}`
+  await shell.openExternal(url)
+  return { ok: true, to: CHURCH_ENQUIRY_TO }
+})
+
 ipcMain.handle('open-external', async (_, url) => {
   let parsed
   try { parsed = new URL(String(url ?? '')) } catch { throw new Error('That external link is not valid.') }

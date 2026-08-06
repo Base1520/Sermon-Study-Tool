@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   seriesSynthesize: (payload) => ipcRenderer.invoke('series-synthesize', payload),
   scanAssetImages: () => ipcRenderer.invoke('scan-asset-images'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  openEnquiry: (payload) => ipcRenderer.invoke('open-enquiry', payload),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   testAnthropicKey: (apiKey) => ipcRenderer.invoke('test-anthropic-key', apiKey),
   secretStatus: () => ipcRenderer.invoke('secret-status'),

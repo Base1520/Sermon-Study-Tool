@@ -30,18 +30,33 @@ interface Props {
   /** Shown above the cards when the server sent a refusal with its own words. */
   headline?: string
   body?: string
+  /** Opens the church/team enquiry. Omitted, that row is not rendered. */
+  onChurch?: () => void
 }
 
 const ORDER = ['starter', 'standard', 'heavy']
 
-/** Why each tier exists, in the terms a preacher actually thinks in. */
+/**
+ * Why each tier exists — described in the volume it ACTUALLY buys.
+ *
+ * The first version said Starter was "one sermon a week" on a card that also
+ * said 40 studies a month. Those two lines contradicted each other on the same
+ * card: 40 a month is nine or ten a week, not one. A man reading it either
+ * thinks the number is wrong or the sentence is, and either way he stops
+ * trusting the page he is being asked to buy from.
+ *
+ * And "a staff sharing one login" was worse than sloppy — it invited a church to
+ * put six people on one subscription instead of buying six, which cannibalises
+ * the exact revenue a church SHOULD be paying and quietly makes seat-sharing the
+ * recommended path. Churches get their own option below.
+ */
 const FOR_WHOM: Record<string, string> = {
-  starter: 'One sermon a week, with room to chase a tangent.',
-  standard: 'Weekly preaching plus a class, a study, or a series you are working ahead on.',
-  heavy: 'A teaching pastor, a staff sharing one login, or a writing project.',
+  starter: 'Sunday, plus the passages around it. About nine or ten a week.',
+  standard: 'Preaching and teaching in the same week — a series, a class, a study you are working ahead on.',
+  heavy: 'Daily study, or a writing project. Ten a day, every day, without watching the number.',
 }
 
-export function Pricing({ plans, currentPlan, busy, onChoose, headline, body }: Props) {
+export function Pricing({ plans, currentPlan, busy, onChoose, headline, body, onChurch }: Props) {
   const tiers = ORDER.map((key) => plans[key]).filter(Boolean)
   if (!tiers.length) return null
 
@@ -184,8 +199,52 @@ export function Pricing({ plans, currentPlan, busy, onChoose, headline, body }: 
         font: `400 11px/1.6 ${FONT.mono}`, color: BASE.steel,
         textAlign: 'center', marginTop: 14,
       }}>
-        Cancel any time, from inside the app. Everything you have already studied stays yours.
+        One person per subscription. Cancel any time, from inside the app —
+        everything you have already studied stays yours.
       </div>
+
+      {/* ── Churches and teams ────────────────────────────────────────────────
+          A separate path ON PURPOSE. The alternative is a staff quietly sharing
+          one login, which is what the old copy actually recommended: it costs a
+          church nothing extra and costs this product every seat but one.
+          Deliberately NOT a self-serve checkout — per-seat Stripe billing is not
+          built, and a button that takes money for something that does not exist
+          yet is the worst thing on this screen. Cole issues a code; every man
+          redeems it on his own machine and gets his own account and his own
+          allowance. */}
+      {onChurch && (
+        <button
+          onClick={onChurch}
+          disabled={busy}
+          style={{
+            width: '100%', marginTop: 14, textAlign: 'left',
+            display: 'flex', alignItems: 'center', gap: 14,
+            background: BASE.bg, border: `1px dashed ${BASE.border}`,
+            borderRadius: 6, padding: '16px 18px',
+            cursor: busy ? 'default' : 'pointer',
+          }}
+          onMouseEnter={(e) => { if (!busy) e.currentTarget.style.borderColor = BASE.borderGold }}
+          onMouseLeave={(e) => { e.currentTarget.style.borderColor = BASE.border }}
+        >
+          <div style={{ flex: 1 }}>
+            <div style={{ font: `700 9px ${FONT.mono}`, letterSpacing: '0.16em', color: BASE.gold, marginBottom: 6 }}>
+              FOR A CHURCH OR A TEAM
+            </div>
+            <div style={{ font: `400 12.5px/1.55 ${FONT.serif}`, color: BASE.boneMid }}>
+              Every person on your staff gets their own account and their own studies —
+              one code, one invoice, no shared logins. Priced per seat, and it gets
+              cheaper the more of you there are.
+            </div>
+          </div>
+          <div style={{
+            font: `700 10px ${FONT.mono}`, letterSpacing: '0.1em', whiteSpace: 'nowrap',
+            color: BASE.bone, background: BASE.green,
+            border: `1px solid ${BASE.borderGold}`, borderRadius: 4, padding: '11px 14px',
+          }}>
+            GET A QUOTE
+          </div>
+        </button>
+      )}
     </div>
   )
 }

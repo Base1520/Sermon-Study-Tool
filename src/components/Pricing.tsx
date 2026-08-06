@@ -207,11 +207,19 @@ export function Pricing({ plans, currentPlan, busy, onChoose, headline, body, on
           A separate path ON PURPOSE. The alternative is a staff quietly sharing
           one login, which is what the old copy actually recommended: it costs a
           church nothing extra and costs this product every seat but one.
-          Deliberately NOT a self-serve checkout — per-seat Stripe billing is not
-          built, and a button that takes money for something that does not exist
-          yet is the worst thing on this screen. Cole issues a code; every man
-          redeems it on his own machine and gets his own account and his own
-          allowance. */}
+          NO PRICE IS PRINTED HERE, and that is Cole's call, not an omission.
+          Every church is a different shape — three staff who each preach, or
+          thirty who mostly do not — so the price is set per organisation after a
+          conversation, not read off a card. An earlier draft said "priced per
+          seat, and it gets cheaper the more of you there are", which quietly
+          committed him to a volume discount he had never agreed to. A number on
+          a pricing screen is a promise.
+
+          Deliberately NOT a self-serve checkout either — per-seat Stripe billing
+          is not built, and a button that takes money for something that cannot
+          be provisioned is the worst thing on this screen. Fulfilment is real:
+          Cole issues one code, every man redeems it on his own machine and gets
+          his own account and his own allowance. */}
       {onChurch && (
         <button
           onClick={onChurch}
@@ -232,8 +240,8 @@ export function Pricing({ plans, currentPlan, busy, onChoose, headline, body, on
             </div>
             <div style={{ font: `400 12.5px/1.55 ${FONT.serif}`, color: BASE.boneMid }}>
               Every person on your staff gets their own account and their own studies —
-              one code, one invoice, no shared logins. Priced per seat, and it gets
-              cheaper the more of you there are.
+              one code, one invoice, no shared logins. Tell us how your team works and
+              we will price it for your church.
             </div>
           </div>
           <div style={{

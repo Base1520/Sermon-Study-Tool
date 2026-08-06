@@ -151,12 +151,16 @@ export function HostedAccount({ offer, onClose, onChanged }: {
     try {
       await api().openEnquiry({
         subject: 'The Operator — licence for our church',
+        // The questions Cole actually needs answered to quote a church, in the
+        // order he would ask them. A blank compose window is where an enquiry
+        // dies — the man does not know what to say, so he closes it.
         body:
           'Hi Cole,\n\n' +
           'We would like to use The Operator across our team.\n\n' +
           'Church / organisation:\n' +
-          'How many people would use it:\n' +
-          'Roughly how many passages each of us studies in a week:\n\n' +
+          'Who would use it (roles, not just a number):\n' +
+          'How many of them preach or teach weekly:\n' +
+          'What we are hoping it does for us:\n\n' +
           'Thanks,\n',
       })
       setNote('Opened an email for you — send it and I will get back to you with a code.')

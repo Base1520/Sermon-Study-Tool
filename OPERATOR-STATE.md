@@ -1,6 +1,18 @@
 # The Operator — where this stands
 
-_Session ended 2026-08-05 on a usage limit. This is the resume point._
+**SHIPPED 2026-08-06 — v1.4.0 is live, signed and notarized.**
+
+Download: https://github.com/Base1520/Sermon-Study-Tool/releases/tag/v1.4.0
+- Apple Silicon: `The-Operator-1.4.0-arm64.dmg`
+- Intel: `The-Operator-1.4.0.dmg`
+
+Verified as an anonymous downloader (HTTP 206 on all assets), and both
+architectures pass `spctl -a -t install` as **Notarized Developer ID** — no
+"Apple cannot check this app" wall.
+
+Asset names are hyphenated to match `latest-mac.yml` exactly. That mismatch is
+what silently broke the 1.3.5 update channel: the updater announced an update
+and then 404'd on the download.
 
 ## What works, proven against the live server
 

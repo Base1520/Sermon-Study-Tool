@@ -472,6 +472,35 @@ app.post('/v1/read', route(async (req, res) => {
     res.end()
   } catch (e) {
     clearInterval(beat)
+
+    /**
+     * DID IT ACTUALLY FAIL?
+     *
+     * The pipeline retries a document that fails validation, and only the LAST
+     * attempt's error propagates. A run can therefore write a good document to
+     * the shared cache and still throw — which is what a live test just did on
+     * Romans 12:2: 40 sections streamed, a validation error surfaced, and the
+     * very next request returned a complete 22,749-character document instantly
+     * from cache. The work had succeeded; the reader was told it had not.
+     *
+     * So before reporting a failure, look for the thing the failure would have
+     * produced. Costs one indexed lookup on a path that is already over.
+     */
+    const salvaged = await engine.cachedDocument(db, analysis, level).catch(() => null)
+    if (salvaged) {
+      if (accountId) {
+        settled = true
+        const actualUsd = (await engine.studyCost(db, studyId).catch(() => 0)) - spentBefore
+        await (ridesPriorClaim
+          ? meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd })
+          : meter.settleStudy(db, { accountId, periodStart, actualUsd })
+        ).catch(() => {})
+      }
+      await engine.finishStudy(db, studyId).catch(() => {})
+      send({ type: 'done', document: salvaged, studyId, salvaged: true })
+      return res.end()
+    }
+
     await release()   // a study that never ran must not eat the allowance
     const code = e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'GENERATION_FAILED'
     send({ type: 'error', code, message: e?.message || 'The reading could not be completed.' })

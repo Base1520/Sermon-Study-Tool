@@ -39,10 +39,38 @@ body {
   color: #e8e6f0;
   font-family: 'Inter', system-ui, sans-serif;
   overflow: hidden;
+  /*
+   * TEXT IS SELECTABLE BY DEFAULT.
+   *
+   * It used to be `none` here, with exactly three opt-ins in the whole app — two
+   * of which were input fields. So a pastor could not select or copy the reading,
+   * the analysis, the outline, the cultural notes: none of the output the tool
+   * exists to produce. Clint Riggin's beta feedback was precisely this — he
+   * wanted to lift text into his own documents and could not.
+   *
+   * `none` was there to stop a desktop app feeling like a web page — stray
+   * highlights on buttons and labels while dragging. That is a real but small
+   * annoyance; not being able to copy your own study is a blocker. The default
+   * is inverted, and the chrome opts out below instead.
+   */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/*
+ * The chrome. Buttons, HUD labels and drag surfaces stay unselectable so
+ * dragging still feels native and a double-click does not highlight a label.
+ * Anything that is CONTENT is deliberately absent from this list.
+ */
+button,
+[role="button"],
+.hud-label,
+.no-select {
   user-select: none;
   -webkit-user-select: none;
 }
 
+/* Kept so existing call sites keep working; now a no-op reinforcement. */
 .selectable { user-select: text; -webkit-user-select: text; }
 
 ::-webkit-scrollbar { width: 4px; }

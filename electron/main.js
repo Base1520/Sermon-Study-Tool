@@ -384,6 +384,51 @@ function createWindow() {
     const z = store?.get('ui-zoom', 1) ?? 1
     if (z !== 1) win.webContents.setZoomFactor(z)
   })
+
+  /**
+   * RIGHT-CLICK TO COPY.
+   *
+   * Electron gives a BrowserWindow no context menu at all — right-clicking a
+   * selection does nothing, forever, with no error. Combined with the app-wide
+   * `user-select: none` that used to be in index.css, a pastor could neither
+   * highlight the output nor copy it. That was Clint Riggin's beta feedback: he
+   * wanted to lift the reading into his own documents and had no way to.
+   *
+   * Built from what is actually under the cursor, so the menu never offers an
+   * action that would do nothing. Cmd+C already worked through the app menu's
+   * Edit role; this is the gesture people actually reach for.
+   */
+  win.webContents.on('context-menu', (_event, params) => {
+    const items = []
+    const selection = (params.selectionText || '').trim()
+
+    if (params.isEditable) {
+      items.push(
+        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' },
+        { type: 'separator' }, { role: 'selectAll' },
+      )
+    } else if (selection) {
+      items.push({ role: 'copy', label: 'Copy' })
+      // Straight to a definition without leaving the app — the macOS gesture a
+      // reader already expects on a word they do not know.
+      if (process.platform === 'darwin' && selection.length < 40) {
+        items.push({ role: 'showDefinitionForSelection', label: `Look Up "${selection.slice(0, 24)}"` })
+      }
+      items.push({ type: 'separator' }, { role: 'selectAll', label: 'Select All' })
+    } else {
+      items.push({ role: 'selectAll', label: 'Select All' })
+    }
+
+    if (isDev) {
+      items.push({ type: 'separator' }, {
+        label: 'Inspect Element',
+        click: () => win.webContents.inspectElement(params.x, params.y),
+      })
+    }
+
+    Menu.buildFromTemplate(items).popup({ window: win })
+  })
 }
 
 app.whenReady().then(async () => {

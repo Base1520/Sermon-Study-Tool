@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { BASE, FONT } from '../theme'
+import { Pricing } from './Pricing'
 
 /**
  * HostedAccount — what this install is entitled to, and how to change it.
@@ -239,16 +240,24 @@ export function HostedAccount({ offer, onClose, onChanged }: {
       )}
 
       {/* ── Plans ─────────────────────────────────────────────────────────── */}
-      {!paused && (offer?.actions?.length || (me && !me.paying)) && (
-        <div style={{ marginBottom: 18 }}>
-          {label('SUBSCRIBE')}
+      {!paused && (me && !me.paying) && me.plans && (
+        <div style={{ marginBottom: 22 }}>
+          <Pricing
+            plans={me.plans}
+            currentPlan={me.plan}
+            busy={busy}
+            onChoose={subscribe}
+          />
+        </div>
+      )}
+
+      {/* A paying man who ran out gets his top-up and his upgrade, nothing else —
+          he does not need the whole sales grid again. */}
+      {!paused && offer?.actions?.length && me?.paying && (
+        <div style={{ marginBottom: 20 }}>
+          {label('YOUR OPTIONS')}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {(offer?.actions?.length
-              ? offer.actions.filter(a => a.plan)
-              : Object.entries(me?.plans ?? {})
-                  .filter(([k]) => k !== 'free' && k !== 'comp')
-                  .map(([k, v]) => ({ plan: k, label: `${v.label} — $${v.priceUsd}/mo · ${v.studiesPerMonth} studies` }))
-            ).map((a: any) => (
+            {offer.actions.filter((a) => a.plan).map((a: any) => (
               <button
                 key={a.plan}
                 disabled={busy}

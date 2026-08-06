@@ -2422,9 +2422,27 @@ function scanFolder(folderPath) {
   return result
 }
 
+/**
+ * Open a link in the real browser — allowlisted, never arbitrary.
+ *
+ * STILL AN ALLOWLIST. The renderer can ask for any string, so this is the only
+ * thing standing between a compromised or careless call site and
+ * shell.openExternal() on a hostile URL. Each host is here because a specific
+ * button needs it, and adding one is a deliberate act.
+ */
+const EXTERNAL_HOSTS = new Set([
+  'www.canva.com',
+  // Where a reader gets his OWN free ESV key. The settings panel walks him
+  // through it, and a link that silently throws is worse than no link — he
+  // would conclude the app is broken rather than that the link is blocked.
+  'api.esv.org',
+  'www.esv.org',
+])
+
 ipcMain.handle('open-external', async (_, url) => {
-  const parsed = new URL(String(url ?? ''))
-  if (parsed.protocol !== 'https:' || parsed.hostname !== 'www.canva.com') {
+  let parsed
+  try { parsed = new URL(String(url ?? '')) } catch { throw new Error('That external link is not valid.') }
+  if (parsed.protocol !== 'https:' || !EXTERNAL_HOSTS.has(parsed.hostname)) {
     throw new Error('That external link is not allowed.')
   }
   await shell.openExternal(parsed.toString())

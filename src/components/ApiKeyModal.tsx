@@ -182,8 +182,13 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
           </div>
         )}
 
-        {/* Anthropic key — hidden on a hosted build; the server holds it. */}
-        <div style={{ marginBottom: 20, display: hostedBuild ? 'none' : undefined }}>
+        {/* ANTHROPIC KEY — REMOVED ENTIRELY ON A HOSTED BUILD.
+            Not hidden with CSS: not rendered at all. The server holds the key,
+            and a field asking a pastor for one is the exact wall the server was
+            built to remove. It still renders on a local-key build, which is the
+            escape hatch for someone running with OPERATOR_API_URL=''. */}
+        {!hostedBuild && (
+          <div style={{ marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.gold, letterSpacing: '0.12em', opacity: 0.9 }}>
               ANTHROPIC — required for new studies
@@ -249,20 +254,64 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
               )}
             </div>
           )}
-        </div>
+          </div>
+        )}
 
         {/* ESV key */}
         <div style={{ marginBottom: 24 }}>
           <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.khaki, letterSpacing: '0.12em', marginBottom: 6, opacity: 0.9 }}>
-            ESV API KEY <span style={{ color: BASE.steel, fontWeight: 400 }}>(optional — unlocks ESV translation)</span>
+            ESV TRANSLATION <span style={{ color: BASE.steel, fontWeight: 400 }}>(optional — your own free key)</span>
           </div>
+
+          <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12.5, color: BASE.steel, lineHeight: 1.6, marginBottom: 10 }}>
+            The ESV needs a key from Crossway, and it has to be <em>yours</em> — we cannot
+            ship one with the app. It takes about two minutes:
+            <ol style={{ margin: '8px 0 0', paddingLeft: 18, lineHeight: 1.7 }}>
+              <li>
+                Go to{' '}
+                <a
+                  href="https://api.esv.org/account/create-application/"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    ;(window as any).electronAPI?.openExternal?.('https://api.esv.org/account/create-application/')
+                  }}
+                  style={{ color: BASE.gold, textDecoration: 'none', borderBottom: `1px solid ${BASE.borderGold}` }}
+                >api.esv.org</a>{' '}
+                and create a free account.
+              </li>
+              <li>Create an application — any name will do.</li>
+              <li>Copy the API key it gives you and paste it below.</li>
+            </ol>
+          </div>
+
+          {/* THE LIMIT, SAID OUT LOUD.
+              Crossway's free API key requires a NON-COMMERCIAL site, and defines
+              commercial as "primarily designed to motivate visitors to buy
+              something, to pay for a service, or to give a donation." That is a
+              different clause from the one that cleared the book, and it is why
+              the ESV cannot simply be bundled into a paid product. Read at
+              primary on api.esv.org, 2026-08-05. A man pasting his own key here
+              deserves to know what it does and does not cover. */}
+          <div style={{
+            fontFamily: 'Crimson Pro, serif', fontSize: 12, lineHeight: 1.6,
+            color: BASE.khaki, background: `${BASE.olive}22`,
+            border: `1px solid ${BASE.borderDim}`, borderRadius: 8,
+            padding: '10px 13px', marginBottom: 10,
+          }}>
+            <strong style={{ color: BASE.boneMid }}>Why it is your key and not ours.</strong>{' '}
+            Crossway's free ESV key is licensed for non-commercial use, so we cannot
+            include the ESV in a paid app until they license it to us — that conversation
+            is open. Your own key is fine for your own study.
+          </div>
+
           <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel, lineHeight: 1.5, marginBottom: 8 }}>
-            Free key at <strong style={{ color: BASE.boneMid }}>api.esv.org</strong>. Without it, KJV/ASV/YLT still work with no key required.
+            Skip it entirely if you like — KJV, ASV, YLT and Darby need no key at all.
           </div>
+
           <input
             type="password" value={esvKey}
             onChange={e => setEsvKey(e.target.value.trim())}
-            placeholder={hasExistingEsvKey ? 'Protected ESV key saved — paste to replace it' : 'Leave blank to use KJV / ASV / YLT instead'}
+            placeholder={hasExistingEsvKey ? 'ESV key saved — paste to replace it' : 'Paste your ESV key (optional)'}
             autoComplete="off" spellCheck={false}
             style={{ ...fieldStyle, fontFamily: esvKey ? 'JetBrains Mono' : 'Crimson Pro, serif' }}
             onFocus={e => (e.target.style.borderColor = `${BASE.khaki}66`)}

@@ -1,0 +1,231 @@
+name: Windows release
+
+# Builds, signs and attaches the WINDOWS half of a release on a real Windows
+# runner. The Mac half is still built and notarised locally by scripts/release.sh
+# (Developer ID and notarisation credentials live on Cole's Mac and stay there).
+#
+# WHY THIS EXISTS: electron-builder cannot produce a Windows installer on macOS
+# without wine, and Homebrew's wine-stable is deprecated and disabled 2026-09-01.
+# Building on windows-2025 removes the developer machine as a single point of
+# failure entirely.
+#
+# OWNERSHIP IS SPLIT AND MUST STAY SPLIT:
+#   this workflow owns  The-Operator-windows.exe, .exe.blockmap, latest.yml
+#   scripts/release.sh  owns the .dmg aliases, the versioned mac .zips, latest-mac.yml
+#
+# The release is created as a DRAFT here. It only becomes public when
+# scripts/release.sh attaches the notarised Mac half and flips it, so a release
+# can never go out with one platform missing or with two different versions on it.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build, e.g. v1.4.2'
+        required: true
+        type: string
+
+# Minimum needed: create the draft release for this tag and upload assets to it.
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # The subject CN Azure Trusted Signing stamps on the certificate. Azure uses the
+  # VALIDATED LEGAL ENTITY NAME, which may differ from the publisherName string in
+  # package.json. If the first signed build trips the signature gate, read the
+  # subject the step prints and correct THIS line. Do not weaken the gate.
+  EXPECTED_SIGNER_CN: 'Base1520 LLC'
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Resolve tag and version
+        id: rel
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::Tag must look like v1.2.3 (got '$TAG')"; exit 1 ;;
+          esac
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tagged source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.rel.outputs.tag }}
+          persist-credentials: false
+
+      - name: Preflight — this checkout must be able to build
+        shell: bash
+        run: |
+          set -uo pipefail
+          fail=0
+
+          # THE big one. If package.json says 1.4.2 and the tag says 1.4.1, the
+          # Mac and Windows halves of one release are different builds.
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "${{ steps.rel.outputs.version }}" ]; then
+            echo "::error::Tag ${{ steps.rel.outputs.tag }} does not match package.json version $PKG_VERSION."
+            fail=1
+          fi
+
+          # postinstall runs this file. If it was never git-added, `npm ci` dies
+          # with MODULE_NOT_FOUND four minutes from now instead of five seconds.
+          POSTINSTALL=$(node -p "require('./package.json').scripts.postinstall || ''")
+          if [ -n "$POSTINSTALL" ] && [ ! -f scripts/patch-native-purchases.cjs ]; then
+            echo "::error::postinstall runs scripts/patch-native-purchases.cjs, which is not in this commit. git add it and re-tag."
+            fail=1
+          fi
+
+          # The commentary corpus is gitignored, so CI cannot ship it. Tolerable
+          # only while the feature is off.
+          RETRIEVAL=$(node -p "(require('./package.json').featureFlags||{}).theologyRetrieval === true")
+          if [ ! -f resources/theology-retrieval/library.sqlite3 ]; then
+            if [ "$RETRIEVAL" = "true" ]; then
+              echo "::error::featureFlags.theologyRetrieval is true but the commentary corpus is gitignored and absent. Windows would ship a dead feature."
+              fail=1
+            else
+              echo "::warning::Commentary corpus absent from CI — Windows ships without library.sqlite3. theologyRetrieval is false, so nothing user-visible depends on it."
+            fi
+          fi
+
+          exit $fail
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build the renderer
+        # package.json's build:beta-win is "VITE_ADMIN=false vite build && ...".
+        # npm's script-shell is unset, so on Windows npm runs scripts through
+        # cmd.exe, which cannot parse VAR=value command. The assignment has to
+        # live in this env block, not in the npm script.
+        run: npx vite build
+        env:
+          VITE_ADMIN: 'false'
+
+      - name: Package and sign the installer
+        # --publish never is load-bearing. On a tag push electron-builder flips
+        # itself to implicit "onTag" publishing and would upload raw versioned
+        # filenames next to the aliases staged below. The update manifest is
+        # still written either way.
+        run: npx electron-builder --win --x64 --publish never
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Verify the installer is really signed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.rel.outputs.version }}'
+          $exe = "dist-electron\The Operator Setup $version.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Installer not found at $exe" }
+
+          $sig = Get-AuthenticodeSignature -LiteralPath $exe
+          Write-Host "status : $($sig.Status)"
+          Write-Host "subject: $($sig.SignerCertificate.Subject)"
+
+          if ($sig.Status -ne 'Valid') { throw "Authenticode status is $($sig.Status), expected Valid." }
+          $expected = "CN=$env:EXPECTED_SIGNER_CN"
+          if ($sig.SignerCertificate.Subject -notlike "*$expected*") {
+            throw "Signed by an unexpected identity. Expected the subject to contain '$expected'. Fix EXPECTED_SIGNER_CN in this workflow if Azure validated a different legal name."
+          }
+
+      - name: Stage the assets under their stable names
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.rel.outputs.version }}'
+          $stage   = 'dist-electron\rel-win'
+          $alias   = 'The-Operator-windows.exe'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $exe = "dist-electron\The Operator Setup $version.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Installer not found at $exe" }
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $stage $alias) -Force
+
+          $blockmap = "$exe.blockmap"
+          if (Test-Path -LiteralPath $blockmap) {
+            Copy-Item -LiteralPath $blockmap -Destination (Join-Path $stage "$alias.blockmap") -Force
+          } else {
+            Write-Host "::warning::No .blockmap produced; updates will pull the full installer."
+          }
+
+          # THE MANIFEST. electron-builder writes its space-free "safe" name
+          # (The-Operator-Setup-1.4.2.exe) into latest.yml, but the published asset
+          # carries the version-free alias. electron-updater requests the filename
+          # in the manifest VERBATIM, so an unrewritten manifest 404s and the
+          # updater gives up silently — that is exactly how Windows users were
+          # stranded from 1.4.0 onward.
+          $src = 'dist-electron\latest.yml'
+          if (-not (Test-Path -LiteralPath $src)) {
+            throw 'electron-builder did not write dist-electron/latest.yml — Windows auto-update would ship broken.'
+          }
+          $yml = Get-Content -LiteralPath $src -Raw
+          $yml = [regex]::Replace($yml, 'The-Operator-Setup-[0-9.]+\.exe', $alias)
+          Set-Content -LiteralPath (Join-Path $stage 'latest.yml') -Value $yml -NoNewline -Encoding utf8
+
+          $out = Get-Content -LiteralPath (Join-Path $stage 'latest.yml') -Raw
+          $a = [regex]::Escape($alias)
+          if ($out -notmatch "(?m)^\s*-?\s*url:\s*$a\s*$")  { throw 'latest.yml has no url: line pointing at the alias.' }
+          if ($out -notmatch "(?m)^path:\s*$a\s*$")          { throw 'latest.yml has no path: line pointing at the alias.' }
+          if ($out -match 'The-Operator-Setup-')             { throw 'latest.yml still references a versioned installer.' }
+          if ($out -notmatch "(?m)^version:\s*$([regex]::Escape($version))\s*$") { throw "latest.yml version is not $version." }
+
+          Get-ChildItem $stage | Format-Table Name, Length
+
+      - name: Attach the Windows half to the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --draft \
+              --verify-tag \
+              --title "The Operator $VERSION" \
+              --notes "Draft. Windows build attached by CI. The Mac build and the real release notes are added by scripts/release.sh, which is what publishes this."
+          fi
+
+          gh release upload "$TAG" \
+            "dist-electron/rel-win/The-Operator-windows.exe" \
+            "dist-electron/rel-win/latest.yml" \
+            --clobber
+
+          if [ -f "dist-electron/rel-win/The-Operator-windows.exe.blockmap" ]; then
+            gh release upload "$TAG" "dist-electron/rel-win/The-Operator-windows.exe.blockmap" --clobber
+          fi
+
+          gh release view "$TAG" --json isDraft,assets \
+            --jq '"draft=\(.isDraft)  assets=\([.assets[].name] | join(", "))"'
+
+          {
+            echo "### Windows half attached to \`$TAG\`"
+            echo ""
+            echo "Now, on the Mac: run \`scripts/release.sh\` to build and notarise the Mac half,"
+            echo "attach it to this same draft, and publish."
+          } >> "$GITHUB_STEP_SUMMARY"

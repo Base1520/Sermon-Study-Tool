@@ -214,6 +214,22 @@ test('Apple capability requires a positive integer app id', async () => {
   assert.ok(!result.degraded.includes('apple_iap'))
 })
 
+test('account recovery capability rejects malformed and Resend test senders', async () => {
+  const db = { async query() { return { rows: [schemaChecks()] } } }
+  for (const from of ['', 'not-an-email', 'The Operator <access@resend.dev>', 'access@RESEND.DEV']) {
+    const result = await probeReadiness(db, { ...READY_ENV, OPERATOR_AUTH_FROM_EMAIL: from })
+    assert.equal(result.capabilities.account_recovery_email, false, `expected ${from || 'blank'} to be rejected`)
+    assert.ok(result.degraded.includes('account_recovery_email'))
+  }
+
+  const result = await probeReadiness(db, {
+    ...READY_ENV,
+    OPERATOR_AUTH_FROM_EMAIL: 'The Operator <access@base1520.com>',
+  })
+  assert.equal(result.capabilities.account_recovery_email, true)
+  assert.ok(!result.degraded.includes('account_recovery_email'))
+})
+
 test('core readiness is explicit and reports unavailable providers without advertising them', async () => {
   const db = { async query() { return { rows: [schemaChecks()] } } }
   const result = await probeReadiness(db, {

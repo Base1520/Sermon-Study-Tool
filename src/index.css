@@ -45,7 +45,7 @@ body {
    * It used to be `none` here, with exactly three opt-ins in the whole app — two
    * of which were input fields. So a pastor could not select or copy the reading,
    * the analysis, the outline, the cultural notes: none of the output the tool
-   * exists to produce. Clint Riggin's beta feedback was precisely this — he
+   * exists to produce. Beta feedback identified precisely this problem — a user
    * wanted to lift text into his own documents and could not.
    *
    * `none` was there to stop a desktop app feeling like a web page — stray

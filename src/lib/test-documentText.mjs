@@ -1,6 +1,6 @@
 // The serializer that makes a reading pasteable.
 //
-// Clint Riggin's beta feedback was that he could not get the output into his own
+// Beta feedback identified that users could not get the output into their own
 // documents. These assert the two things that would make a "Copy" button a lie:
 // inventing text the model never produced, and dropping text it did.
 //

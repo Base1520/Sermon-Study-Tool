@@ -456,8 +456,8 @@ function createWindow() {
    * Electron gives a BrowserWindow no context menu at all — right-clicking a
    * selection does nothing, forever, with no error. Combined with the app-wide
    * `user-select: none` that used to be in index.css, a pastor could neither
-   * highlight the output nor copy it. That was Clint Riggin's beta feedback: he
-   * wanted to lift the reading into his own documents and had no way to.
+   * highlight the output nor copy it. That came out of beta feedback: someone
+   * wanted to lift the reading into their own documents and had no way to.
    *
    * Built from what is actually under the cursor, so the menu never offers an
    * action that would do nothing. Cmd+C already worked through the app menu's

@@ -13,9 +13,21 @@ V=$(node -p "require('./package.json').version")
 REPO=Base1520/Sermon-Study-Tool
 echo "=== The Operator $V ==="
 
-export APPLE_ID="aperme2@gmail.com"
-export APPLE_TEAM_ID="6UP72M96Q5"
-export APPLE_APP_SPECIFIC_PASSWORD="$(security find-generic-password -s operator-notarize -w)"
+# This repo is PUBLIC. The notarisation password was already a keychain lookup,
+# but the Apple ID was a literal — a personal email is the login identity for the
+# Developer account that signs and submits, so publishing it hands out half of a
+# credential pair and a phishing target. The keychain item already stores the same
+# address as its account attribute, so read both from it and keep neither here.
+NOTARY_KEYCHAIN_ITEM="operator-notarize"
+export APPLE_ID="$(security find-generic-password -s "$NOTARY_KEYCHAIN_ITEM" | awk -F'"' '/"acct"/{print $4}')"
+export APPLE_TEAM_ID="6UP72M96Q5"   # not a secret: shipped inside every signed bundle
+export APPLE_APP_SPECIFIC_PASSWORD="$(security find-generic-password -s "$NOTARY_KEYCHAIN_ITEM" -w)"
+
+if [ -z "$APPLE_ID" ]; then
+  echo "Could not read the Apple ID from keychain item '$NOTARY_KEYCHAIN_ITEM'." >&2
+  echo "Notarisation would fail later with a confusing error, so stopping here." >&2
+  exit 1
+fi
 
 echo "--- tests (the gate) ---"
 bash scripts/test-windows-update-manifest.sh

@@ -48,6 +48,14 @@ function googleCredentialsConfigured(value) {
   }
 }
 
+function authFromEmailConfigured(value) {
+  const clean = String(value || '').trim()
+  const match = clean.match(/^(?:[^<>]+\s+<)?([^\s<>@]+@[^\s<>@]+)\>?$/)
+  if (!match) return false
+  const domain = match[1].split('@')[1].toLowerCase()
+  return domain !== 'resend.dev'
+}
+
 function releaseStage(env = process.env) {
   const stage = String(env.OPERATOR_RELEASE_STAGE || '').trim().toLowerCase()
   return ['core', 'full'].includes(stage) ? stage : null
@@ -73,7 +81,9 @@ function capabilityChecks(env = process.env) {
   const available = (key) => optional[`config_${key.toLowerCase()}`] === true
   const full = releaseStage(env) === 'full'
   return {
-    account_recovery_email: full && available('RESEND_API_KEY') && available('OPERATOR_AUTH_FROM_EMAIL'),
+    account_recovery_email: full &&
+      available('RESEND_API_KEY') &&
+      authFromEmailConfigured(env.OPERATOR_AUTH_FROM_EMAIL),
     marketing_sync: full && available('MAILCHIMP_API_KEY') && available('MAILCHIMP_AUDIENCE_ID'),
     // The sandbox allowlist gates test transactions inside iap.js; production
     // receipt verification does not depend on a reviewer account remaining set.
@@ -179,6 +189,7 @@ module.exports = {
   OPTIONAL_CONFIGURATION,
   releaseStage,
   configurationChecks,
+  authFromEmailConfigured,
   capabilityChecks,
   probeReadiness,
   runtimeIdentity,

@@ -6,6 +6,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "pretest": "node src/test-access-code-policy.js",
     "test": "node src/test-meter.js && node src/test-entitlement.js && node src/test-billing.js && node src/test-billing-period.js && node src/test-routes.js && node src/test-ridealong.js && node src/test-web-purchase.js && node src/test-stripe-web.js && node src/test-stripe-sync.js && node src/test-som-purchase.js && node src/test-stripe-topup.js && node src/test-mobile.js && node src/test-mobile-account.js && node src/test-account-registration.js && node src/test-mobile-registration-routes.js && node src/test-account-recovery.js && node src/test-mailchimp.js && node src/test-iap.js && node src/test-readiness.js && node src/test-quick-study.js && node src/test-guided-study.js && node src/test-sermon-assist.js && node src/test-ai-consent-routes.js && node src/test-commentary.js && node src/test-review-access.js",
     "migrate": "node src/migrate.js"
   },

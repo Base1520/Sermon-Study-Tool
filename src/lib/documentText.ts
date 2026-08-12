@@ -1,7 +1,7 @@
 /**
  * documentText.ts — a reading, as plain text you can paste into a document.
  *
- * WHY THIS EXISTS. Clint Riggin's beta feedback, verbatim: he wanted to copy the
+ * WHY THIS EXISTS. Beta feedback identified the need to copy the
  * output into his own documents and could not. Two things were in the way — the
  * whole app had `user-select: none` (fixed in index.css), and there was no way
  * to take a whole reading at once. Selecting a long document by dragging across

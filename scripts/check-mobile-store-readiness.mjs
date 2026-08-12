@@ -52,6 +52,10 @@ const read = (relative) => {
   return /\.(?:[cm]?[jt]sx?)$/.test(relative) ? stripSourceComments(contents) : contents
 }
 const exists = (relative) => fs.existsSync(path.join(root, relative))
+const xcodeTargetReleaseSettings = (project) => {
+  const match = project.match(/\/\* Release \*\/ = \{[\s\S]*?Pods-App\.release\.xcconfig[\s\S]*?buildSettings = \{([\s\S]*?)\n\s*\};\n\s*name = Release;/)
+  return match?.[1] || ''
+}
 const pass = (message) => passes.push(message)
 const fail = (message) => failures.push(message)
 const warn = (message) => warnings.push(message)
@@ -112,6 +116,7 @@ const metadata = JSON.parse(read('store/metadata.json'))
 const catalog = JSON.parse(read('server/src/iap-products.json'))
 const packageJson = JSON.parse(read('package.json'))
 const pbxproj = read('ios/App/App.xcodeproj/project.pbxproj')
+const xcodeRelease = xcodeTargetReleaseSettings(pbxproj)
 const iosInfoPlist = read('ios/App/App/Info.plist')
 const androidBuild = read('android/app/build.gradle')
 const androidVariables = read('android/variables.gradle')
@@ -158,11 +163,11 @@ check(packageJson.version === metadata.app.version, 'Package and store versions 
 
 check(catalog.bundleId === metadata.app.bundleId, 'Apple catalog bundle ID matches metadata')
 check(catalog.androidPackage === metadata.app.bundleId, 'Android catalog package matches metadata')
-check(pbxproj.includes(`PRODUCT_BUNDLE_IDENTIFIER = ${metadata.app.bundleId};`), 'Xcode bundle ID matches metadata')
+check(xcodeRelease.includes(`PRODUCT_BUNDLE_IDENTIFIER = ${metadata.app.bundleId};`), 'Xcode Release bundle ID matches metadata')
 check(androidBuild.includes(`applicationId "${metadata.app.bundleId}"`), 'Android application ID matches metadata')
-check(pbxproj.includes(`MARKETING_VERSION = ${metadata.app.version};`), 'Xcode marketing version matches metadata')
+check(xcodeRelease.includes(`MARKETING_VERSION = ${metadata.app.version};`), 'Xcode Release marketing version matches metadata')
 check(androidBuild.includes(`versionName "${metadata.app.version}"`), 'Android version name matches metadata')
-check(/CURRENT_PROJECT_VERSION = [1-9][0-9]*;/.test(pbxproj), 'Apple build number is positive')
+check(/CURRENT_PROJECT_VERSION = [1-9][0-9]*;/.test(xcodeRelease), 'Apple Release build number is positive')
 check(/versionCode [1-9][0-9]*/.test(androidBuild), 'Android version code is positive')
 check(/compileSdkVersion = 36/.test(androidVariables), 'Android compiles with API 36')
 check(/targetSdkVersion = 36/.test(androidVariables), 'Android targets API 36')

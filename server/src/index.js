@@ -26,6 +26,7 @@ const {
   annualSavingsUsd,
 } = require('./entitlement')
 const meter = require('./meter')
+const { accessCodeUnavailable, invalidCodeResponse } = require('./access-code-policy')
 const engine = require('./engine')
 const { checkGenerationInput } = require('../../electron/plainread/runtime')
 const { isPurchaseCode, claimPurchasedAccount } = require('./web-purchase')
@@ -1318,10 +1319,7 @@ app.post('/v1/redeem', route(async (req, res) => {
   if (!raw) return res.status(400).json({ error: 'code required' })
   if (!installId) return res.status(400).json({ error: 'x-install-id header required' })
 
-  const refuse = () => res.status(404).json({
-    error: 'INVALID_CODE',
-    message: "That code isn't valid. Check it and try again.",
-  })
+  const refuse = () => res.status(404).json(invalidCodeResponse())
 
   if (isPurchaseCode(raw)) {
     const purchased = await claimPurchasedAccount(db, { code: raw, installId })
@@ -1344,7 +1342,7 @@ app.post('/v1/redeem', route(async (req, res) => {
 
   // One message for "wrong" and "revoked" and "used up", on purpose: a distinct
   // reply for each turns this endpoint into an oracle for guessing codes.
-  if (!code || code.revoked_at) return refuse()
+  if (accessCodeUnavailable(code)) return refuse()
 
   // Already redeemed on this install — hand back a token rather than refusing,
   // so reinstalling the app is not a dead end.
@@ -1355,8 +1353,6 @@ app.post('/v1/redeem', route(async (req, res) => {
   let accountId = prior.rows[0]?.account_id ?? null
 
   if (!accountId) {
-    if (code.uses_max !== null && code.uses_count >= code.uses_max) return refuse()
-
     // Claim a use FIRST, conditionally, so two simultaneous redemptions of a
     // single-use code cannot both succeed.
     const claimed = await db.query(

@@ -367,11 +367,46 @@ function buildMenu() {
 
 function createWindow() {
   const isMac = process.platform === 'darwin'
+  // The packaged renderer can take several seconds to parse on a cold launch.
+  // Showing the main BrowserWindow during that work produces a completely black
+  // window that looks crashed. Keep it hidden until Chromium has painted and
+  // give the user an immediate, deliberately small boot window instead.
+  const splash = new BrowserWindow({
+    width: 420,
+    height: 250,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    frame: false,
+    transparent: false,
+    backgroundColor: '#050505',
+    alwaysOnTop: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  })
+  const splashHtml = `<!doctype html><meta charset="utf-8"><style>
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;background:#050505}
+    body{display:flex;align-items:center;justify-content:center;color:#fff;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    main{display:flex;flex-direction:column;align-items:center;gap:12px}
+    svg{width:52px;height:60px;filter:drop-shadow(0 0 24px #ffffff12)}
+    h1{margin:0;font-size:15px;letter-spacing:.24em}p{margin:0;color:#888a79;font-size:9px;letter-spacing:.2em}
+    i{display:block;width:180px;height:1px;margin-top:8px;overflow:hidden;background:#ffffff1f}i:after{content:"";display:block;width:45%;height:100%;background:#fff;animation:scan 1.25s ease-in-out infinite}
+    @keyframes scan{from{transform:translateX(-110%)}to{transform:translateX(330%)}}
+  </style><main><svg viewBox="0 0 1024 1024" aria-hidden="true"><path fill="#fff" fill-rule="evenodd" d="M250 208h456l68 68v164l-65 65 65 65v161l-68 68H250V443h398c15 0 23-8 23-23v-71c0-15-8-23-23-23H250V208Zm110 355h288c15 0 23 8 23 23v72c0 15-8 23-23 23H383c-15 0-23-8-23-23v-95Z"/></svg><h1>THE OPERATOR</h1><p>INITIALIZING STUDY DESK</p><i></i></main>`
+  splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(splashHtml)}`)
+  splash.once('ready-to-show', () => splash.show())
+
   const win = new BrowserWindow({
     width: 1600,
     height: 1000,
     minWidth: 1200,
     minHeight: 700,
+    show: false,
     backgroundColor: '#0a0a0f',
     // hiddenInset + traffic lights are macOS-only; Windows/Linux get a standard frame
     ...(isMac ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 16 } } : {}),
@@ -401,6 +436,18 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     const z = store?.get('ui-zoom', 1) ?? 1
     if (z !== 1) win.webContents.setZoomFactor(z)
+  })
+
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.show()
+    if (!splash.isDestroyed()) splash.close()
+  })
+  win.webContents.on('did-fail-load', () => {
+    if (!win.isDestroyed()) win.show()
+    if (!splash.isDestroyed()) splash.close()
+  })
+  win.on('closed', () => {
+    if (!splash.isDestroyed()) splash.close()
   })
 
   /**
@@ -670,6 +717,21 @@ ipcMain.handle('hosted-topup', async () => {
 ipcMain.handle('hosted-claim', async () => {
   if (!hosted.hostedBaseUrl()) return { ok: false }
   return hosted.claim(store)
+})
+
+ipcMain.handle('hosted-device-link', async () => {
+  if (!hosted.hostedBaseUrl()) throw new Error('This build is not connected to the server.')
+  return hosted.createDeviceLink(store)
+})
+
+ipcMain.handle('hosted-devices', async () => {
+  if (!hosted.hostedBaseUrl()) return []
+  return hosted.devices(store)
+})
+
+ipcMain.handle('hosted-device-revoke', async (_, deviceId) => {
+  if (!hosted.hostedBaseUrl()) throw new Error('This build is not connected to the server.')
+  return hosted.revokeDevice(store, deviceId)
 })
 
 ipcMain.handle('license-status', () => licenseStore.entitlements())
@@ -1314,7 +1376,15 @@ ipcMain.handle('plain-ask', async (_, { doc, analysis, question, history, vaultN
   // hosted build that must not depend on him owning an API key.
   if (hosted.hostedBaseUrl()) {
     try {
-      return await hosted.ask(store, { doc, analysis, question, history, vaultNotes: notes })
+      const reference = doc?.reference || analysis?.reference || analysis?.passageReference || ''
+      return await hosted.ask(store, {
+        doc,
+        analysis,
+        studyId: recallStudy(reference),
+        question,
+        history,
+        vaultNotes: notes,
+      })
     } catch (e) {
       throw asRendererError(e)
     }

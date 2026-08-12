@@ -81,7 +81,50 @@ const MAX_TOKENS = 6000
 const MIXED_REVELATION_AUDIENCE_REPAIR =
   'John addresses seven churches in different conditions: some are faithful or afflicted, while others are compromised, complacent, or self-deceived.'
 
+// A second-person pronoun can make an otherwise structural heading fail the
+// outline fence even after the model's one correction attempt. Repair only a
+// heading that still names a textual/argumentative feature; a naked slogan such
+// as "You can do all things" must continue to fail closed.
+const OUTLINE_STRUCTURE_ANCHOR =
+  /\b(text|author|writer|speaker|narrator|claim|argument|verse|verses|scene|unit|section|paragraph|contrast|ground|result|purpose|movement|summary|pivot|hinge|appeal|command|question|answer|climax|resolution)\b/i
+
+function repairOutlineSecondPerson(heading) {
+  const raw = String(heading || '')
+  if (!OUTLINE_STRUCTURE_ANCHOR.test(raw)) return null
+
+  const repaired = raw
+    .replace(/\bdid not come from you\b/gi, 'was not self-generated')
+    .replace(/\bdoes not come from you\b/gi, 'is not self-generated')
+    .replace(/\bnot from you\b/gi, 'not self-generated')
+    .replace(/\byour own\b/gi, "the recipients' own")
+    .replace(/\byours\b/gi, "the recipients'")
+    .replace(/\byour\b/gi, "the recipients'")
+    .replace(/\byou\b/gi, 'the recipients')
+
+  return repaired !== raw ? repaired : null
+}
+
 function repairKnownValidationFailure(doc, err) {
+  if (
+    doc &&
+    err?.code === 'HORTATORY_OUTLINE_HEADING' &&
+    typeof err.path === 'string' &&
+    typeof err.sentence === 'string'
+  ) {
+    const parts = err.path.split('.').filter(Boolean)
+    let parent = doc
+    for (const part of parts.slice(0, -1)) {
+      if (!parent || typeof parent !== 'object' || !(part in parent)) return false
+      parent = parent[part]
+    }
+    const key = parts[parts.length - 1]
+    if (!parent || parent[key] !== err.sentence) return false
+    const repaired = repairOutlineSecondPerson(parent[key])
+    if (!repaired) return false
+    parent[key] = repaired
+    return true
+  }
+
   if (
     !doc ||
     err?.code !== 'REVELATION_MIXED_AUDIENCE' ||
@@ -1105,7 +1148,7 @@ async function plainRead({
       if (
         err instanceof PlainReadValidationError &&
         attempt === 1 &&
-        err.code === 'REVELATION_MIXED_AUDIENCE'
+        (err.code === 'REVELATION_MIXED_AUDIENCE' || err.code === 'HORTATORY_OUTLINE_HEADING')
       ) {
         doc = validateWithKnownRepairs(
           parsedDoc,

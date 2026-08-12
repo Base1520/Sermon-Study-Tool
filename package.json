@@ -1,12 +1,13 @@
 {
   "name": "the-operator",
-  "version": "1.4.1",
-  "description": "Study any passage of Scripture in its own context \u2014 what the author meant, how you know, and what to do with it.",
+  "version": "1.4.2",
+  "description": "Study any passage of Scripture in its own context — what the author meant, how you know, and what to do with it.",
   "main": "electron/main.js",
   "featureFlags": {
     "theologyRetrieval": false
   },
   "scripts": {
+    "postinstall": "node scripts/patch-native-purchases.cjs",
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && NODE_ENV=development electron .\"",
     "dev:retrieval": "concurrently \"vite\" \"wait-on http://localhost:5173 && NODE_ENV=development THEOLOGY_RETRIEVAL_ENABLED=true electron .\"",
     "build": "VITE_ADMIN=false vite build && electron-builder",
@@ -14,7 +15,17 @@
     "build:beta": "VITE_ADMIN=false vite build && electron-builder --mac",
     "build:beta-win": "VITE_ADMIN=false vite build && electron-builder --win --x64",
     "build:mac": "VITE_ADMIN=false vite build && electron-builder --mac --dir",
-    "test:release": "node electron/license/test-license.js && node electron/license/test-gate.js && node electron/plainread/test-usage.js && node electron/plainread/test-translations.js && node electron/plainread/test-secret-paths.js && node electron/plainread/test-situation.js && node electron/plainread/test-outline.js && node electron/plainread/test-levels.js && node electron/plainread/test-voice.js && node electron/plainread/test-doctrine.js && node electron/plainread/test-plainread.js && node electron/plainread/test-ask.js && node electron/groupguide/test-groupguide.js && node electron/plainread/test-analyze.js && node electron/hosted/test-client.js && node electron/hosted/test-offer.js && node server/src/test-meter.js && node server/src/test-entitlement.js && node server/src/test-routes.js && node server/src/test-ridealong.js && node server/src/test-token-shape.js && node src/lib/test-documentText.mjs && tsc --noEmit",
+    "dev:mobile": "vite --config vite.mobile.config.ts --host 0.0.0.0",
+    "build:mobile": "vite build --config vite.mobile.config.ts",
+    "mobile:sync": "VITE_OPERATOR_RELEASE_STAGE=full VITE_ESV_MOBILE_LICENSED=false npm run build:mobile && DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer npx cap sync",
+    "mobile:ios": "npm run mobile:sync && DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer npx cap open ios",
+    "mobile:android": "npm run mobile:sync && npx cap open android",
+    "mobile:store:assets": "bash scripts/render-store-assets.sh",
+    "mobile:store:check": "node scripts/check-mobile-store-readiness.mjs",
+    "mobile:store:check:live": "node scripts/check-mobile-store-live.mjs",
+    "mobile:verify:ios": "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -workspace ios/App/App.xcworkspace -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath /private/tmp/operator-ios-pods-derived CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build",
+    "mobile:verify:android": "cd android && JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=/opt/homebrew/share/android-commandlinetools GRADLE_USER_HOME=/private/tmp/operator-gradle ./gradlew --console=plain clean assembleDebug",
+    "test:release": "node scripts/test-native-purchases-patch.cjs && node electron/license/test-license.js && node electron/license/test-gate.js && node electron/plainread/test-usage.js && node electron/plainread/test-translations.js && node electron/plainread/test-secret-paths.js && node electron/plainread/test-situation.js && node electron/plainread/test-outline.js && node electron/plainread/test-levels.js && node electron/plainread/test-voice.js && node electron/plainread/test-doctrine.js && node electron/plainread/test-plainread.js && node electron/plainread/test-ask.js && node electron/groupguide/test-groupguide.js && node electron/plainread/test-analyze.js && node electron/hosted/test-client.js && node electron/hosted/test-offer.js && node server/src/test-meter.js && node server/src/test-entitlement.js && node server/src/test-billing.js && node server/src/test-billing-period.js && node server/src/test-routes.js && node server/src/test-ridealong.js && node server/src/test-token-shape.js && node server/src/test-web-purchase.js && node server/src/test-stripe-web.js && node server/src/test-stripe-sync.js && node server/src/test-som-purchase.js && node server/src/test-mobile.js && node server/src/test-mobile-account.js && node server/src/test-account-registration.js && node server/src/test-mobile-registration-routes.js && node server/src/test-account-recovery.js && node server/src/test-mailchimp.js && node server/src/test-iap.js && node server/src/test-readiness.js && node server/src/test-quick-study.js && node server/src/test-guided-study.js && node server/src/test-sermon-assist.js && node server/src/test-ai-consent-routes.js && node server/src/test-commentary.js && node server/src/test-review-access.js && node src/lib/test-documentText.mjs && tsc --noEmit",
     "eval:commentary": "node scripts/evaluate-commentary-retrieval.js",
     "publish": "VITE_ADMIN=false vite build && electron-builder --publish always",
     "vite": "vite --port ${PORT:-5173}",
@@ -24,6 +35,7 @@
   "build": {
     "appId": "com.base1520.theoperator",
     "productName": "The Operator",
+    "forceCodeSigning": true,
     "directories": {
       "output": "dist-electron"
     },
@@ -91,6 +103,12 @@
       }
     },
     "win": {
+      "azureSignOptions": {
+        "publisherName": "Base1520 LLC",
+        "endpoint": "https://cus.codesigning.azure.net/",
+        "certificateProfileName": "OperatorPublic",
+        "codeSigningAccountName": "base1520operatorsign"
+      },
       "target": [
         {
           "target": "nsis",
@@ -112,6 +130,13 @@
   "license": "ISC",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
+    "@aparajita/capacitor-secure-storage": "^8.0.0",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/browser": "^8.0.4",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.3",
+    "@capgo/native-purchases": "^8.6.5",
     "@supabase/supabase-js": "^2.108.2",
     "@types/leaflet": "^1.9.21",
     "electron-store": "^11.0.2",
@@ -124,6 +149,9 @@
     "react-resizable-panels": "^4.11.2"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
     "@tailwindcss/vite": "^4.3.1",
     "@types/d3": "^7.4.3",
     "@types/react": "^19.2.17",

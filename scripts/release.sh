@@ -18,6 +18,8 @@ export APPLE_TEAM_ID="6UP72M96Q5"
 export APPLE_APP_SPECIFIC_PASSWORD="$(security find-generic-password -s operator-notarize -w)"
 
 echo "--- tests (the gate) ---"
+bash scripts/test-windows-update-manifest.sh
+node server/src/test-stripe-topup.js
 npm run test:release >/tmp/rel-gate.log 2>&1 || { echo "TESTS FAILED — not releasing"; tail -20 /tmp/rel-gate.log; exit 1; }
 echo "    $(grep -cE '^  ok' /tmp/rel-gate.log 2>/dev/null || echo '?') checks passed"
 
@@ -36,6 +38,12 @@ cp "dist-electron/The Operator Setup $V.exe"     "dist-electron/rel/The-Operator
 cp "dist-electron/The Operator-$V-arm64-mac.zip" "dist-electron/rel/The-Operator-$V-arm64-mac.zip"
 cp "dist-electron/The Operator-$V-mac.zip"       "dist-electron/rel/The-Operator-$V-mac.zip"
 cp dist-electron/latest-mac.yml                   dist-electron/rel/
+# WINDOWS UPDATE MANIFEST. Absent from every release since 1.4.0, so electron-updater
+# on Windows found no latest.yml and silently never offered an update — users on 1.3.6
+# were stranded for six days. The exe is renamed above for a stable download URL, so the
+# manifest's url/path must be rewritten to match or it points at a file that is not there.
+bash scripts/rewrite-windows-update-manifest.sh \
+  dist-electron/latest.yml dist-electron/rel/latest.yml
 
 echo "--- gatekeeper ---"
 # spctl writes its verdict to STDERR, so the first version of this piped an
@@ -52,7 +60,7 @@ done
 
 echo "--- publishing v$V ---"
 gh release create "v$V" dist-electron/rel/* --repo "$REPO" --latest \
-  --title "The Operator $V" --notes "Pricing, ESV licensing, and church licences. See the commit log." \
+  --title "The Operator $V" --notes "Specialist agent chats now explain clearly when a tool still needs your own key, instead of showing a raw error. Windows auto-update is restored — this is the first release since 1.4.0 that Windows installs can actually receive." \
   2>/dev/null || gh release upload "v$V" dist-electron/rel/* --repo "$REPO" --clobber
 
 echo "--- verifying the buttons a stranger clicks ---"

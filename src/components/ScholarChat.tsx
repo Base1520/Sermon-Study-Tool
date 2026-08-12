@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import type { PhrasingAnalysis } from '../types/phrasing'
 import { BASE } from '../theme'
+import { friendlyApiErrorText } from '../lib/apiErrors'
 
 interface Message { role: 'user' | 'assistant'; content: string }
 
@@ -268,8 +269,8 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
       const updatedMessages = [...newMessages, { role: 'assistant' as const, content: reply }]
       setMessages(updatedMessages)
       persistChat(updatedMessages)
-    } catch (err: any) {
-      setMessages([...newMessages, { role: 'assistant', content: `Error: ${err?.message ?? 'Something went wrong'}` }])
+    } catch (err: unknown) {
+      setMessages([...newMessages, { role: 'assistant', content: friendlyApiErrorText(err) }])
     } finally {
       unsubscribe?.()
       setLoading(false)

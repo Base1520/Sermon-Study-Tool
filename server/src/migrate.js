@@ -2,6 +2,23 @@
 const fs = require('fs'); const path = require('path'); const { Pool } = require('pg')
 ;(async () => {
   const db = new Pool({ connectionString: process.env.DATABASE_URL })
+  const { rows: existingTables } = await db.query(`SELECT to_regclass('public.account') AS account_table`)
+  if (existingTables[0]?.account_table) {
+    const { rows: duplicates } = await db.query(
+      `SELECT lower(email) AS normalized_email, count(*)::int AS account_count
+         FROM account
+        GROUP BY lower(email)
+       HAVING count(*) > 1
+        ORDER BY count(*) DESC, lower(email)
+        LIMIT 20`,
+    )
+    if (duplicates.length) {
+      const summary = duplicates
+        .map((row) => `${row.normalized_email} (${row.account_count})`)
+        .join(', ')
+      throw new Error(`Case-only duplicate Operator accounts must be reconciled before migration: ${summary}`)
+    }
+  }
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8')
   await db.query(sql)
   console.log('schema applied')
@@ -33,7 +50,7 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
     if (maxUses !== undefined && String(maxUses).trim() !== '') {
       const n = Number(maxUses)
       if (!Number.isInteger(n) || n <= 0) {
-        console.error(`[codes] ignoring ${clean}: use count "${maxUses}" is not a positive integer`)
+        console.error('[codes] ignoring one configured comp code: use count is not a positive integer')
         continue
       }
       limit = n
@@ -42,7 +59,7 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
       // third field used to mint an unlimited code silently — the same footgun
       // that leaked three unlimited codes into a public repo. Unlimited must be
       // written out as an explicit empty third field: "CODE:Label:".
-      console.error(`[codes] ignoring ${clean}: no use count. Write "${clean}:Label:" for unlimited.`)
+      console.error('[codes] ignoring one configured comp code: no use count was provided')
       continue
     }
     CODES.push([clean, 'comp', (label || '').trim() || null, limit])
@@ -56,6 +73,20 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
   console.log(CODES.length
     ? `comp codes seeded (${CODES.length})`
     : 'no comp codes in OPERATOR_COMP_CODES — none seeded')
+
+  const adminEmails = String(process.env.OPERATOR_ADMIN_EMAILS || '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean)
+  if (adminEmails.length) {
+    const { rowCount: adminsGranted } = await db.query(
+      `UPDATE account SET is_admin = true WHERE lower(email) = ANY($1::text[])`,
+      [adminEmails],
+    )
+    console.log(`admin access reconciled (${adminsGranted} account(s))`)
+  } else {
+    console.log('no OPERATOR_ADMIN_EMAILS configured — no admin access granted')
+  }
 
   /**
    * Kill the codes that leaked.

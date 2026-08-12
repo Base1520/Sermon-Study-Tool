@@ -1,9 +1,15 @@
 node_modules/
 dist/
 dist-electron/
+dist-mobile/
 .env
 *.local
 .env.beta
+
+# Android Play upload signing — credentials and private keys must never enter Git
+android/operator-upload.properties
+android/*.jks
+android/*.keystore
 
 # 6.7MB commentary corpus — never let `git add -A` swallow this
 resources/theology-retrieval/library.sqlite3
@@ -15,3 +21,14 @@ resources/theology-retrieval/library.sqlite3
 
 # Beta build key — generated at build time, NEVER committed (this repo is public)
 electron/embedded-key.js
+
+# Internal operational reports — this repo is PUBLIC.
+# These are night-shift memos and ops ledgers written for Cole, not product docs.
+# They carry unit economics, unremediated-defect narratives, single-point-of-failure
+# maps, third-party contacts and personal career intent. They stay on disk; they
+# never become world-readable under the organisation's own account.
+store/overnight-report-*.md
+store/release-ledger.md
+store/external-artifacts.md
+store/console-action-packet.md
+store/topup-refund-remediation.md

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { motion } from 'motion/react'
 import type { PhrasingAnalysis } from '../types/phrasing'
 import { BASE } from '../theme'
+import { friendlyApiErrorText } from '../lib/apiErrors'
 
 export type AgentType = 'exegetical' | 'theological' | 'homiletical'
 
@@ -210,8 +211,8 @@ export function AgentChat({ agentType, analysis, apiKey, onClose, onPushToDraft 
         streamId,
       })
       setMessages([...next, { role: 'assistant', content: reply }])
-    } catch (err: any) {
-      setMessages([...next, { role: 'assistant', content: `Error: ${err?.message ?? 'Something went wrong'}` }])
+    } catch (err: unknown) {
+      setMessages([...next, { role: 'assistant', content: friendlyApiErrorText(err) }])
     } finally {
       unsubscribe?.()
       setLoading(false)

@@ -20,6 +20,28 @@ const { withRetry, parseModelJSON, checkGenerationInput } = require(path.join(EN
 const { priceCall } = require(path.join(ENGINE, 'usage'))
 const { analyzePassage, analysisCacheKey, forGeneration } = require(path.join(ENGINE, 'analyze'))
 const { askAboutPassage } = require(path.join(ENGINE, 'ask'))
+const { lookupPassage } = require(path.join(ENGINE, 'vault'))
+const {
+  generateQuickStudy,
+  quickStudyCacheKey,
+  analysisForQuickStudy,
+  validateQuickStudy,
+} = require('./quick-study')
+const {
+  generateGuidedStudy,
+  guidedStudyGroundingNotes,
+  guidedStudyCacheKey,
+  analysisForGuidedStudy,
+  validateGuidedStudy,
+} = require('./guided-study')
+const { answerSermonAgent } = require('./sermon-assist')
+
+// One Railway process serves production today. Coalesce identical cold misses
+// in-process so ten men opening the same text do not buy ten copies before the
+// shared cache exists. A future multi-instance rollout needs a distributed
+// lease, but should not hold a Postgres connection open during the model call.
+const quickStudyInFlight = new Map()
+const guidedStudyInFlight = new Map()
 
 /**
  * A cache backed by Postgres, shaped like the one the engine expects.
@@ -178,6 +200,129 @@ async function runAnalyze(db, { text, reference, accountId, studyId, installId, 
 }
 
 /**
+ * Run the phone's one-call lookup.
+ *
+ * This is deliberately separate from runAnalyze + runPlainRead. The phone is
+ * for answering a fast question about a passage, not for running the desktop's
+ * full sermon-preparation pipeline behind a smaller screen.
+ */
+async function runQuickStudy(db, { text, reference, translation, accountId, studyId, installId }) {
+  const key = quickStudyCacheKey({ text, reference, translation })
+  const vault = lookupPassage(reference, { maxNotes: 10, maxBookNotes: 4 })
+  const vaultNotes = vault?.notes || []
+  const preloaded = await preloadCache(db, [key])
+  const cached = preloaded.get(key)
+  if (cached?.document) {
+    try {
+      const document = validateQuickStudy(cached.document, {
+        reference,
+        text,
+        translation,
+        vaultNotes,
+      })
+      const analysis = analysisForQuickStudy(document, text)
+      return { document: { ...document, fromCache: true }, analysis, cached: true }
+    } catch {
+      // Old or insufficiently grounded cache entries are regenerated under
+      // the current validator instead of surviving a safety correction.
+    }
+  }
+
+  const running = quickStudyInFlight.get(key)
+  if (running) {
+    const result = await running
+    return { ...result, document: { ...result.document, fromCache: true }, cached: true }
+  }
+
+  const generation = (async () => {
+    const pending = []
+    try {
+      const record = makeRecorder(db, { accountId, studyId, reference, installId }, pending)
+      const document = await generateQuickStudy({
+        text,
+        reference,
+        translation,
+        apiKey: process.env.ANTHROPIC_API_KEY,
+        createClient: (apiKey) => new Anthropic.default({ apiKey }),
+        retry: withRetry,
+        parse: parseModelJSON,
+        onUsage: record,
+      })
+      const analysis = analysisForQuickStudy(document, text)
+      await writeCache(db, key, { document, analysis })
+      return { document, analysis, cached: false }
+    } finally {
+      // A response that fails validation still consumed model tokens. Drain
+      // usage writes before the route totals and refunds anything.
+      await Promise.allSettled(pending)
+    }
+  })()
+
+  quickStudyInFlight.set(key, generation)
+  try {
+    return await generation
+  } finally {
+    if (quickStudyInFlight.get(key) === generation) quickStudyInFlight.delete(key)
+  }
+}
+
+async function runGuidedStudy(db, { text, reference, translation, accountId, studyId, installId }) {
+  const key = guidedStudyCacheKey({ text, reference, translation })
+  const vaultNotes = guidedStudyGroundingNotes(reference)
+  const preloaded = await preloadCache(db, [key])
+  const cached = preloaded.get(key)
+  if (cached?.document) {
+    try {
+      const document = validateGuidedStudy(cached.document, {
+        reference,
+        text,
+        translation,
+        vaultNotes,
+      })
+      const analysis = analysisForGuidedStudy(document, text)
+      return { document: { ...document, fromCache: true }, analysis, cached: true }
+    } catch {
+      // Regenerate documents that predate the current grounding contract.
+    }
+  }
+
+  const running = guidedStudyInFlight.get(key)
+  if (running) {
+    const result = await running
+    return { ...result, document: { ...result.document, fromCache: true }, cached: true }
+  }
+
+  const generation = (async () => {
+    const pending = []
+    try {
+      const record = makeRecorder(db, { accountId, studyId, reference, installId }, pending)
+      const document = await generateGuidedStudy({
+        text,
+        reference,
+        translation,
+        apiKey: process.env.ANTHROPIC_API_KEY,
+        createClient: (apiKey) => new Anthropic.default({ apiKey }),
+        retry: withRetry,
+        parse: parseModelJSON,
+        onUsage: record,
+      })
+      const analysis = analysisForGuidedStudy(document, text)
+      await writeCache(db, key, { document, analysis })
+      return { document, analysis, cached: false }
+    } finally {
+      await Promise.allSettled(pending)
+    }
+  })()
+
+  guidedStudyInFlight.set(key, generation)
+  try {
+    return await generation
+  } finally {
+    if (guidedStudyInFlight.get(key) === generation) guidedStudyInFlight.delete(key)
+  }
+}
+
+/**
  * Answer a question about a reading already delivered.
  *
  * NOT a study, and deliberately not billed as one. The paywall's own words are
@@ -189,11 +334,12 @@ async function runAnalyze(db, { text, reference, accountId, studyId, installId, 
  * else. What bounds it is askCountToday() at the route.
  */
 async function runAsk(db, { doc, analysis, question, history, vaultNotes, accountId, installId }) {
+  const pending = []
   const record = makeRecorder(db, {
     accountId, studyId: `ask-${Date.now().toString(36)}`,
     reference: analysis?.reference, installId,
-  }, [])
-  return askAboutPassage({
+  }, pending)
+  const answer = await askAboutPassage({
     doc, analysis, question, history, vaultNotes,
     apiKey: process.env.ANTHROPIC_API_KEY,
     createClient: (k) => new Anthropic.default({ apiKey: k }),
@@ -201,6 +347,31 @@ async function runAsk(db, { doc, analysis, question, history, vaultNotes, accoun
     parse: parseModelJSON,
     onUsage: record,
   })
+  await Promise.allSettled(pending)
+  return answer
+}
+
+async function runSermonAssist(db, { agent, doc, analysis, question, history, accountId, installId }) {
+  const pending = []
+  const record = makeRecorder(db, {
+    accountId,
+    studyId: `sermon-assist-${Date.now().toString(36)}`,
+    reference: analysis?.reference || doc?.reference,
+    installId,
+  }, pending)
+  const answer = await answerSermonAgent({
+    agent,
+    doc,
+    analysis,
+    question,
+    history,
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    createClient: (key) => new Anthropic.default({ apiKey: key }),
+    retry: withRetry,
+    onUsage: record,
+  })
+  await Promise.allSettled(pending)
+  return answer
 }
 
 /** How many questions this caller has asked in the last day. The bound on asks. */
@@ -255,6 +426,35 @@ async function openStudy(db, { studyId, accountId, installId, reference }) {
   )
 }
 
+async function saveStudyAnalysis(db, { studyId, accountId, installId, analysis }) {
+  const identity = accountId
+    ? { clause: 'account_id = $2', param: accountId }
+    : { clause: 'install_id = $2 AND account_id IS NULL', param: installId }
+  if (!studyId || !identity.param || !analysis) return false
+  const { rowCount } = await db.query(
+    `UPDATE study SET analysis = $3, updated_at = now()
+      WHERE id = $1 AND ${identity.clause}`,
+    [studyId, identity.param, analysis],
+  )
+  return rowCount > 0
+}
+
+async function saveStudyDocument(db, { studyId, accountId, installId, analysis, document, level, passage = null }) {
+  const identity = accountId
+    ? { clause: 'account_id = $2', param: accountId }
+    : { clause: 'install_id = $2 AND account_id IS NULL', param: installId }
+  if (!studyId || !identity.param || !document) return false
+  const { rowCount } = await db.query(
+    `UPDATE study
+        SET analysis = COALESCE($3, analysis), document = $4, level = $5,
+            passage = COALESCE($6, passage),
+            state = 'done', completed_at = COALESCE(completed_at, now()), updated_at = now()
+      WHERE id = $1 AND ${identity.clause}`,
+    [studyId, identity.param, analysis ?? null, document, level ?? null, passage],
+  )
+  return rowCount > 0
+}
+
 /**
  * Try to take this study's ONE document, atomically.
  *
@@ -270,24 +470,90 @@ async function openStudy(db, { studyId, accountId, installId, reference }) {
  */
 async function claimStudyForReading(db, { studyId, accountId, installId }) {
   if (!studyId) return false
+  if (!accountId) {
+    if (!installId) return false
+    const { rows } = await db.query(
+      `UPDATE study
+          SET state = 'reading', updated_at = now()
+        WHERE id = $1 AND install_id = $2 AND account_id IS NULL AND state = 'analyzed'
+        RETURNING id`,
+      [studyId, installId],
+    )
+    return rows.length > 0
+  }
+
+  const client = typeof db.connect === 'function' ? await db.connect() : db
+  const ownsClient = client !== db
+  try {
+    if (ownsClient) await client.query('BEGIN')
+    const available = await client.query(
+      `SELECT id FROM account
+        WHERE id = $1 AND deleting_at IS NULL
+        FOR SHARE`,
+      [accountId],
+    )
+    if (!available.rows.length) {
+      if (ownsClient) await client.query('ROLLBACK')
+      return false
+    }
+    const { rows } = await client.query(
+      `UPDATE study
+          SET state = 'reading', updated_at = now()
+        WHERE id = $1 AND account_id = $2 AND state = 'analyzed'
+        RETURNING id`,
+      [studyId, accountId],
+    )
+    if (ownsClient) await client.query('COMMIT')
+    return rows.length > 0
+  } catch (error) {
+    if (ownsClient) await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    if (ownsClient) client.release()
+  }
+}
+
+async function resetStudyReadingClaim(db, studyId) {
+  if (!studyId) return false
+  const { rowCount } = await db.query(
+    `UPDATE study SET state = 'analyzed', updated_at = now()
+      WHERE id = $1 AND state = 'reading'`,
+    [studyId],
+  )
+  return rowCount > 0
+}
+
+/**
+ * Return the state of a study this caller owns.
+ *
+ * A failed claim does not mean "buy another study." It can mean another request
+ * won the same claim a millisecond earlier, or the document was already
+ * delivered. The reading route checks this before charging anything new.
+ */
+async function ownedStudyState(db, { studyId, accountId, installId }) {
+  if (!studyId) return null
   const identity = accountId
     ? { clause: 'account_id = $2', param: accountId }
     : { clause: 'install_id = $2 AND account_id IS NULL', param: installId }
-  if (!identity.param) return false
+  if (!identity.param) return null
 
   const { rows } = await db.query(
-    `UPDATE study
-        SET state = 'reading', updated_at = now()
-      WHERE id = $1 AND ${identity.clause} AND state = 'analyzed'
-      RETURNING id`,
+    `SELECT state FROM study WHERE id = $1 AND ${identity.clause}`,
     [studyId, identity.param],
   )
-  return rows.length > 0
+  return rows[0]?.state ?? null
 }
 
 /** The document was delivered. The claim is spent. */
-async function finishStudy(db, studyId) {
-  await db.query(`UPDATE study SET state = 'done', updated_at = now() WHERE id = $1`, [studyId])
+async function finishStudy(db, studyId, details = {}) {
+  await db.query(
+    `UPDATE study
+        SET state = 'done', analysis = COALESCE($2, analysis),
+            document = COALESCE($3, document), level = COALESCE($4, level),
+            completed_at = COALESCE(completed_at, now()), updated_at = now()
+      WHERE id = $1`,
+    [studyId, details.analysis ?? null, details.document ?? null, details.level ?? null],
+  )
 }
 
 /**
@@ -320,7 +586,8 @@ async function releaseStudyForRetry(db, studyId) {
 }
 
 module.exports = {
-  runPlainRead, runAnalyze, makeRecorder, makeCache, preloadCache, writeCache,
-  studyCost, openStudy, claimStudyForReading, finishStudy, releaseStudyForRetry,
-  runAsk, askCountToday, MAX_RETRIES_PER_STUDY, cachedDocument,
+  runPlainRead, runAnalyze, runQuickStudy, runGuidedStudy, makeRecorder, makeCache, preloadCache, writeCache,
+  studyCost, openStudy, saveStudyAnalysis, saveStudyDocument,
+  claimStudyForReading, resetStudyReadingClaim, ownedStudyState, finishStudy, releaseStudyForRetry,
+  runAsk, runSermonAssist, askCountToday, MAX_RETRIES_PER_STUDY, cachedDocument,
 }

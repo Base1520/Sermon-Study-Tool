@@ -3,11 +3,50 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file: https://server.arcgisonline.com https://*.tile.opentopomap.org; font-src 'self' data:; connect-src 'self' ws://localhost:5173; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'self' blob:" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file: https://server.arcgisonline.com https://*.tile.opentopomap.org; font-src 'self' data:; connect-src 'self' ws://localhost:5173 https://api-production-15e5e.up.railway.app; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'self' blob:" />
     <title>The Operator — Scripture Study</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="operator-boot" role="status" aria-live="polite">
+        <div class="operator-boot-mark">B</div>
+        <div class="operator-boot-name">THE OPERATOR</div>
+        <div class="operator-boot-status">INITIALIZING STUDY DESK</div>
+        <div class="operator-boot-line"><span></span></div>
+      </div>
+    </div>
+    <style>
+      html, body, #root { width: 100%; height: 100%; margin: 0; }
+      body { background: #070a06; }
+      #operator-boot {
+        width: 100%; height: 100%; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 12px;
+        background:
+          radial-gradient(circle at 50% 45%, rgba(63, 79, 42, .24), transparent 34%),
+          #070a06;
+        color: #d8b33f; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .operator-boot-mark {
+        width: 48px; height: 48px; display: grid; place-items: center;
+        border: 1px solid rgba(216, 179, 63, .55); border-radius: 10px;
+        background: #27351a; font-size: 25px; font-weight: 900;
+        box-shadow: 0 0 28px rgba(216, 179, 63, .12);
+      }
+      .operator-boot-name { font-size: 15px; font-weight: 800; letter-spacing: .24em; }
+      .operator-boot-status { color: #888a79; font-size: 9px; letter-spacing: .2em; }
+      .operator-boot-line {
+        width: 180px; height: 1px; margin-top: 8px; overflow: hidden;
+        background: rgba(184, 180, 157, .14);
+      }
+      .operator-boot-line span {
+        display: block; width: 45%; height: 100%; background: #d8b33f;
+        animation: operator-boot-scan 1.25s ease-in-out infinite;
+      }
+      @keyframes operator-boot-scan {
+        from { transform: translateX(-110%); }
+        to { transform: translateX(330%); }
+      }
+    </style>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

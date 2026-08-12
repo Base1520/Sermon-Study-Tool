@@ -853,7 +853,14 @@ function assertUnitShape(unit, label) {
   if (reason) {
     throw new PlainReadValidationError(
       `${label}.heading exhorts the reader instead of describing the text — ${reason}: "${unit.heading}". ` +
-      'Headings say what the TEXT DOES in that unit.'
+      'Headings say what the TEXT DOES in that unit.',
+      {
+        code: 'HORTATORY_OUTLINE_HEADING',
+        // Machine-readable path uses dot notation so the pipeline can walk an
+        // array index without parsing the human-facing `units[0]` label.
+        path: `${label.replace(/\[(\d+)\]/g, '.$1')}.heading`,
+        sentence: unit.heading,
+      }
     )
   }
 }

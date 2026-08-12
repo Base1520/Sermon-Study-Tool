@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">The Operator</string>
+    <string name="title_activity_main">The Operator</string>
+    <string name="package_name">com.base1520.theoperator</string>
+    <string name="custom_url_scheme">com.base1520.theoperator</string>
+</resources>

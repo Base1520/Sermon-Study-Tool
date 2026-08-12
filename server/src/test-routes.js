@@ -84,7 +84,8 @@ function fakeDb() {
     ok('the install is still identified', anon.installId === 'install-1')
 
     const stale = await auth.identify(db, { authorization: 'Bearer opr_nonsense', installId: 'i2' })
-    ok('an unknown token degrades to anonymous', stale.anonymous && stale.staleToken)
+    ok('an unknown token degrades without trusting its install header',
+       stale.anonymous && stale.staleToken && stale.installId === null)
 
     db._devices.set(auth.hash('opr_good'), {
       device_id: 'd1', revoked_at: null, id: 'acct-1', email: 'a@b.c',
@@ -95,8 +96,28 @@ function fakeDb() {
     ok('a good token resolves the account', !known.anonymous && known.account.plan === 'standard')
 
     db._devices.get(auth.hash('opr_good')).revoked_at = new Date()
-    const revoked = await auth.identify(db, { authorization: 'Bearer opr_good' })
-    ok('a revoked token degrades rather than erroring', revoked.anonymous)
+    const revoked = await auth.identify(db, { authorization: 'Bearer opr_good', installId: 'claimed-install' })
+    ok('a revoked token loses access to its claimed install identity',
+       revoked.anonymous && revoked.installId === null)
+
+    let outageStatus = 0
+    let outageBody = null
+    let outageNext = false
+    await auth.middleware({ query: async () => { throw new Error('database unavailable') } })(
+      {
+        get(name) {
+          if (name === 'authorization') return 'Bearer opr_existing'
+          if (name === 'x-install-id') return 'install-existing'
+          return null
+        },
+      },
+      {
+        status(value) { outageStatus = value; return this },
+        json(value) { outageBody = value; return this },
+      },
+      () => { outageNext = true },
+    )
+    ok('an auth outage never turns a signed-in device into anonymous', outageStatus === 503 && outageBody?.error === 'AUTH_UNAVAILABLE' && !outageNext)
   }
 
   console.log('\nTHE FREE STUDY IS EXACTLY ONE, AND IT IS ATOMIC')

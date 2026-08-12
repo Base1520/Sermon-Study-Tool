@@ -13,14 +13,19 @@ FROM node:20-slim
 
 WORKDIR /app
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sqlite3 \
+ && rm -rf /var/lib/apt/lists/*
+
 # Dependencies first, so a change to source does not re-install them.
 COPY server/package*.json ./server/
-RUN cd server && npm install --omit=dev
+RUN cd server && npm ci --omit=dev
 
 # The server, and the engine it borrows. Both paths are relative to the REPO
 # root, so this image must be built with the repo root as its context.
 COPY server ./server
 COPY electron/plainread ./electron/plainread
+COPY resources/theology-retrieval ./resources/theology-retrieval
 
 # engine.js resolves the engine as path.join(__dirname, '../../electron/plainread'),
 # which from /app/server/src lands on /app/electron/plainread. Keep this WORKDIR

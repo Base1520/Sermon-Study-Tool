@@ -1,186 +1,363 @@
-# The Operator — where this stands
+# The Operator — verified state
 
-**SHIPPED 2026-08-06 — v1.4.0 is live, signed and notarized.**
+**Last reconciled: 2026-08-08**
 
-Download: https://github.com/Base1520/Sermon-Study-Tool/releases/tag/v1.4.0
+## Executive truth
+
+- **Desktop is shipped.** The signed and notarized macOS `v1.4.0` release is
+  live at <https://github.com/Base1520/Sermon-Study-Tool/releases/tag/v1.4.0>.
+- **Mobile staged core is live.** Railway now serves the `1.4.1`
+  `operator-mobile-billing-v4` API in explicit `core` mode, and the matching
+  signed development build with the one-call Quick Study flow is installed and
+  launches on Cole's iPhone.
+- **The tablet build is now a real PLAIN study.** iPad routes to a full Guided
+  Study through all eight COVENANT movements; the final native source is synced
+  and passes the iOS Simulator build. The signed development build was compiled,
+  installed, and launched successfully on Cole's 12.9-inch iPad Pro on
+  2026-08-08 after Developer Mode was enabled.
+- **Core is deliberately link-only.** Passage loading, study, notes, sync,
+  archive, deletion, and desktop-to-phone account linking are enabled. New
+  mobile registration, email recovery, marketing sync, native purchases, and
+  mobile ESV remain disabled and fail closed.
+- **Mobile is not store-releasable yet.** Public legal pages are incomplete;
+  distribution signing, store records, products, provider credentials, and
+  physical-device purchase tests are not proven.
+- **Do not add mobile download buttons yet.** A debug APK or unsigned Apple
+  build is not a release artifact.
+- **The current release source is not reproducible from Git.** Most mobile and
+  billing files are untracked. Commit only after Cole explicitly approves it.
+
+## Desktop release
+
+Download: <https://github.com/Base1520/Sermon-Study-Tool/releases/tag/v1.4.0>
+
 - Apple Silicon: `The-Operator-1.4.0-arm64.dmg`
 - Intel: `The-Operator-1.4.0.dmg`
+- Both architectures were verified as anonymous downloads and passed macOS
+  Gatekeeper as notarized Developer ID builds.
+- Notarization is configured through Developer ID **Base 1520 LLC
+  (6UP72M96Q5)** and keychain item `operator-notarize`.
 
-Verified as an anonymous downloader (HTTP 206 on all assets), and both
-architectures pass `spctl -a -t install` as **Notarized Developer ID** — no
-"Apple cannot check this app" wall.
+## Mobile product built locally
 
-Asset names are hyphenated to match `latest-mac.yml` exactly. That mismatch is
-what silently broke the 1.3.5 update channel: the updater announced an update
-and then 404'd on the download.
+Mobile v1 is intentionally **PLAIN-first**, not a sermon-writing app:
 
-## What works, proven against the live server
+- Three-step branded onboarding and passage/translation selection.
+- One-call Quick Study for meaning, immediate context, text evidence, key
+  terms, whole-Bible placement, application, guardrails, and text questions.
+  The phone does not generate sermon outlines, manuscripts, preaching points,
+  transitions, hooks, or illustrations.
+- Full iPad Guided Study for serious reading rather than sermon writing:
+  canonical passage, main claim, original setting and confidence, natural text
+  divisions, key terms, all eight COVENANT movements, individual/corporate/
+  mission application, interpretive guardrails, answered study questions, and
+  collapsible passage/grounding evidence.
+- Guided Study uses three bounded Haiku calls in parallel, validates the merged
+  document, and permits one bounded retry only when the merged study fails the
+  contract. Historical claims unsupported by the supplied passage/grounding are
+  replaced with an honest uncertainty statement instead of displayed as fact.
+- The server fetches the canonical passage; the client cannot submit alternate
+  text under a trusted reference. Verse numbers, notes, local library, sync,
+  archive, and reopen-finished-study flows remain available.
+- Older completed PLAIN readings still reopen. ASK remains available only for
+  those full documents because the compact Quick Study contract deliberately
+  does not masquerade as the desktop preparation pipeline.
+- Secure device token and install id storage through iOS Keychain and Android
+  Keystore. Personal ESV-key storage exists behind the disabled license gate.
+- Email account registration, three-device management, revocation, sign-out,
+  deletion, and a one-time-code lost-device recovery path.
+- Account recovery codes expire after ten minutes, are attempt- and
+  rate-limited, are stored only as HMAC hashes, and replace the oldest device
+  when an account already has three devices.
+- Linked-account synchronization for completed studies, notes, and archive
+  state.
+- A stable owner-scoped request id makes same-session timeout retries
+  idempotent. A verified retry returned the same study in 224 ms without a
+  second allowance charge.
+- Starting a new text now aborts the active mobile request and ignores any stale
+  result, so a canceled study cannot repopulate the prior passage later.
+- Native Apple and Google subscription purchase, verification, restore, and
+  account-scoped entitlement paths.
+- Apple uses six subscription product ids in one subscription group. Google
+  uses one subscription product with six exact base plans.
+- Google acknowledgement is a durable retrying outbox. Restore failures fail
+  closed. Native store builds do not expose access-code redemption.
 
-- **Server**: `https://api-production-15e5e.up.railway.app` — healthy.
-- **Full study, no user API key**: analyze → read → ask, all on the server's key.
-  Verified live: 39 sections streamed with content, a 20,021-char document,
-  billed **one** study not two.
-- **Comp codes** (rotated — the originals leaked into the public repo and are
-  revoked):
-  - Cole — `OP-NY7S-V4JH-2EUQ`
-  - Rikki — `OP-RU4B-SQGG-2HNR`
-  - Beta (25 uses) — `OP-KUDB-QJ5V-7667`
-  Live-tested: redeem → `plan=comp`, 500 studies/mo, authenticated.
-- **Release gate**: `npm run test:release` — 362 assertions, green.
-- **Packaging**: `npm run build:mac` completes.
+Primary source locations:
 
-## Deploying
+- `src/mobile/`, `mobile/`, `vite.mobile.config.ts`, `capacitor.config.ts`
+- `ios/`, `android/`, `assets/logo.png`
+- `server/src/mobile.js`, `server/src/mobile-account.js`
+- `server/src/account-recovery.js`, `server/src/iap.js`
+- `server/src/readiness.js`, `server/src/schema.sql`
 
-GitHub → Railway auto-deploy is dead (five pushes never triggered). Deploy from
-local instead — Cole is logged into the CLI:
+## Local verification receipts
 
-```
-railway up --service a82ee584-c3ce-49a1-8d72-670c8a659928 --detach
-```
+All of the following passed on 2026-08-08 after the final Guided Study,
+recovery, and native purchase hardening changes:
 
-**The last server change (commit ed493e0) is committed but NOT yet deployed.**
+- `npm run test:release`
+- `npx tsc --noEmit`
+- `npm run mobile:sync` for all six native plugins
+- `npm run mobile:verify:ios` — Debug Simulator build, no signing
+- `npm run mobile:verify:android` — clean Debug APK, 283 Gradle tasks
+- Signed development build installed and launched on Cole's paired physical
+  iPhone
+- `node scripts/test-native-purchases-patch.cjs`
+- Mobile route and capability gates — 26/26 checks
+- `git diff --check`
+- Root and server `npm audit --omit=dev --audit-level=high` — zero
+  vulnerabilities
+- Account recovery adversarial suite — 11/11
+- Readiness contract suite — 6/6
+- Native IAP suite — 18/18
+- Stripe synchronization suite — 8/8
+- Quick Study contract and adversarial guardrails — 15/15
+- Guided Study contract and adversarial guardrails — 36/36
+- Final iPad source synced to iOS and Android with all six Capacitor plugins;
+  final iOS Simulator Debug build passed; signed development build installed
+  and launched on the physical 12.9-inch iPad Pro
+- Live uncached KJV Quick Study — HTTP 200 in 11.048 seconds; 3 text evidence
+  blocks, 1 key term, verified source anchors, no sermon drift, and no
+  relativized “what does it mean to you?” language
+- Same-request production retry — HTTP 200 in 224 ms, same study id, and no
+  additional allowance charge
+- Live uncached KJV Psalm 23 Guided Study — HTTP 200 in 12.615 seconds; 4
+  natural text units, 2 key terms, all 8 COVENANT movements, 3 answered
+  questions, poetry-aware reading rules, restrained Psalm 23:6 afterlife claim,
+  YHWH retained as the psalm's shepherd, no sermon drift, and no relativized
+  meaning language
+- Same-request Guided Study reopen — HTTP 200 in 404 ms; fresh-request shared
+  cache reopen — HTTP 200 in 1.002 seconds with `fromCache: true`, proving the
+  normalized evidence remains valid instead of silently regenerating
+- Philippians 2:5–11 adversarial production study passed checks for separate
+  verse 5, Isaiah 45:23, disputed lexical restraint, full Christology,
+  Father/Son distinction, universal-salvation restraint, epistolary genre,
+  individual/corporate/mission application, abuse-boundary protection, source
+  evidence, no sermon drift, and fixed meaning
 
-## NEXT STEP
+Identifiers currently agree:
 
-1. `railway up …` (above), wait for `/v1/redeem` to answer.
-2. Work the remaining findings below.
-3. `npm run test:release`, then `npm run publish` to build + notarise + release.
-4. Send Cole and Rikki the DMG link and their codes.
+- Bundle/application id: `com.base1520.theoperator`
+- Version: `1.4.1`
+- Apple build: `1`
+- Android version code: `1`
+- Apple team: `6UP72M96Q5`
 
-Notarisation is already configured: Developer ID *Base 1520 LLC (6UP72M96Q5)*,
-keychain item `operator-notarize`.
+The Android debug APK is at
+`android/app/build/outputs/apk/debug/app-debug.apk`. It must **not** be uploaded
+to Google Play.
 
-## Three audit rounds — what was found
+## Production truth
 
-103 confirmed defects across three rounds, each attacked by independent
-verifiers. The ones that mattered most:
+Current API: <https://api-production-15e5e.up.railway.app>
 
-- The app was **dead on arrival** — the renderer gated every study on a local
-  API key a hosted build never has, so all the hosted code was unreachable.
-- **Nobody could have paid** — Electron strips custom Error properties across
-  IPC, so every paywall rendered as a red error box with no buttons.
-- **A paid subscription could be lost forever** — and retrying made it permanent.
-- **The upgrade button double-billed** — $80/mo, invisible in the app.
-- **Stripe webhooks could never verify** — a failed card stayed `active` and kept
-  spending.
-- **Comp codes were committed to a public repo**, two of them unlimited-use.
+- `/health` returns HTTP 200 with version `1.4.1`, schema
+  `operator-mobile-billing-v4`, `releaseStage: core`, `ok: true`, and no
+  missing core contract.
+- `/v1/passage` serves public-domain translations; a live KJV probe returned
+  John 3:16 with verse data.
+- `/v1/quick-study` refetches canonical Scripture, performs one metered Haiku
+  lookup, validates exact passage/vault source references, saves the compact
+  result, and returns it with the passage in one response. A new completed
+  lookup consumes one study; reopening or retrying the same request does not.
+- `/v1/guided-study` refetches canonical Scripture, builds the full tablet study
+  in three parallel bounded Haiku calls, validates every required section and
+  source reference, coalesces identical cold requests, caches by passage,
+  translation, grounding, prompt, validator, and model, and performs at most
+  one bounded safety retry. Prompt version is `16`; validator version is `14`.
+- `/v1/device-links` and `/v1/device-links/redeem` are live and enforce account
+  authentication, one-time use, expiry, and the device cap.
+- `/v1/mobile/register` returns `503 REGISTRATION_DISABLED`; core cannot create
+  an unverified account that has no recovery path.
+- `/v1/mobile/recovery/*` returns `503 RECOVERY_DISABLED`.
+- `/v1/iap/catalog` returns `enabled: false`, both providers false, and no
+  products. The client also rechecks live server capability immediately before
+  any native purchase call, so a full-built client cannot charge against core.
+- Mobile ESV returns `403 ESV_LICENSE_REQUIRED`, including when a personal key
+  is supplied.
+- Capacitor CORS was verified live with HTTP 204 and
+  `Access-Control-Allow-Origin: capacitor://localhost`.
+- Railway project: `operator-api`; service: `api`.
+- Current production deployment:
+  `303db964-726f-41fb-967b-9c842bc5faf1`, created 2026-08-08 local time.
+- Railway predeploy is `npm run migrate`; health check is `/health`.
 
-## Still open (from round 3)
+Cold-generation coalescing currently lives in process memory and production is
+one Railway replica. Before increasing the replica count, replace that lock
+with a distributed generation lease so two instances cannot buy the same cold
+cache fill.
 
-### [MEDIUM] src/App.tsx:258
-**Opening the app silently spends a study — the reader auto-runs on launch and any local-cache miss goes to the paid server**
+Cole explicitly approved this staged-core production deployment on 2026-08-08.
+The core secrets, public URLs/origins, Stripe web configuration, and release
+stage are configured in Railway. Values remain only in the secure provider.
 
-This effect fires on every change of `analysis`, and App.tsx:463 restores the last history entry on launch — so simply opening the app re-runs the last reading with no user action. main.js:990 will only serve the local copy when verification.status === 'ok'. A verify call that 529s or times out leaves the document marked 'failed' (pipeline.js:1202), which is refused by BOTH cache writes (main.js:1037 and pipeline.js:1249), so that passage is never cached anywhere. Result: every launch re-charges. On a subscription that is one of 40 studies burned per app launch, forever, for that passage; on a free install it is the one lifetime credit spent before the user has clicked anything, and the next
+The following full-release provider configuration is still absent or unproven:
 
-_Fix:_ Do not generate on launch: make the restored-session path render only what is cached and require an explicit press to spend a study (pass a flag from sessionLoadLatest, or gate the effect on a cache probe). Independently, cache the document locally regardless of verification status and re-verify on read, or record the failed-verify key so a re-open is at least free. If the key change stands, migra
+- `RESEND_API_KEY`
+- `OPERATOR_AUTH_FROM_EMAIL`
+- `MAILCHIMP_API_KEY`
+- `MAILCHIMP_AUDIENCE_ID`
+- `APPLE_APP_ID`
+- `IAP_SANDBOX_ACCOUNT_EMAILS`
+- `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`
+- `GOOGLE_RTDN_AUDIENCE`
+- `GOOGLE_RTDN_SERVICE_ACCOUNT_EMAIL`
 
-### [MEDIUM] src/components/HostedAccount.tsx:230
-**A globally paused service is rendered as a sales paywall — a man can pay $30 during an outage and still get nothing**
+Do not enable `full`, set provider values, rotate credentials, or submit a
+store build without Cole's explicit approval. Never copy secret values into
+this file or Git.
 
-When committed spend passes 150% of the ceiling, claimStudy returns 503 SERVICE_PAUSED (index.js:120). client.js:131 throws that as a HostedRefusal, main.js tags it, and App.tsx:295 shows it in the HostedAccount overlay. That payload carries no `headline` and no `actions`, so line 186 falls back to the anonymous default and the panel is titled "One free study, on the house" while the body says the service is paused; and this line's `(me && !me.paying)` branch fills the panel with live Starter/Standard/Heavy buttons. An anonymous user therefore sees a subscribe offer at the exact moment nothing can run. He buys Starter, claims his token, presses SEND IT, and gets 503 again — blockEverything s
+## Existing connection evidence
 
-_Fix:_ Branch on offer.code: for SERVICE_PAUSED (and any offer with no actions) suppress the plan buttons and the anonymous headline fallback, and show the server's message alone. Give SERVICE_PAUSED and FREE_TIER_PAUSED explicit headlines server-side so the panel never has to guess.
+- The installed Mailchimp connector is authenticated and can read the existing
+  Base1520 audience. That proves the account exists; it does not expose a
+  server-side API credential that Railway can use.
+- The WordPress connector can identify `www.base1520.com`, but reports the
+  Jetpack site as disconnected. Site-scoped publishing tools therefore cannot
+  update the legal pages until Jetpack is reconnected or the separate secure
+  WordPress REST connector is used.
+- Xcode knows the paid **Base 1520 LLC** team `6UP72M96Q5`. Automatic signing
+  created a development provisioning profile and successfully installed The
+  Operator on Cole's iPhone. An App Store distribution identity/profile is
+  still not proven.
+- No Android `.jks`/`.keystore` or Google Play service-account credential was
+  found in the normal project, document, desktop, or local gcloud locations.
 
-### [MEDIUM] server/src/migrate.js:69
-**Revoking the leaked comp codes does not revoke the accounts and device tokens already minted from them**
+## Public legal and licensing state
 
-OPERATOR-COLE / OPERATOR-RIKKI / OPERATOR-BETA were committed to a public repo and two were unlimited-use. This UPDATE sets revoked_at on the CODE, which only blocks future redemptions. Anyone who redeemed one before the revoke already holds an account row (plan='comp', status='active', 500 studies/month) and a device token whose hash is in `device` — auth.identify (auth.js:50) never consults access_code, so that token keeps working forever. One stranger who read the repo is a standing 500-study-per-month draw on Cole's Anthropic key, invisible in Stripe and unaffected by this migration.
+- <https://www.base1520.com/operator/terms/> is live but currently contains
+  generic Terms rather than the Operator-specific staged terms.
+- <https://www.base1520.com/operator/account-deletion/> currently returns 404.
+- <https://www.base1520.com/privacy-policy/> is live but does not yet contain
+  the staged Operator/Resend recovery disclosure.
+- Local staged sources are
+  `website/operator-terms.html` and
+  `website/operator-privacy-addendum.html`.
 
-_Fix:_ In the same statement block, revoke downstream: UPDATE device SET revoked_at=now() WHERE account_id IN (SELECT account_id FROM access_code_use WHERE code = ANY(BURNED)), and set those accounts to plan='free', status='canceled'. Then check whether any rows exist before shipping.
+### ESV is contained until licensed
 
-### [MEDIUM] src/components/CrossRefArcs.tsx:82
-**The LINKS tile prints the raw Electron IPC error string at the user**
+Crossway's current official API terms permit API use in a mobile app only when
+all general conditions are met. Those conditions require noncommercial use,
+define a noncommercial site as charging for access to no part of the site, and
+state that a commercial organization needs a formal license. The Operator is a
+paid product. Having each customer bring a personal ESV API key does **not**
+turn the Operator into a noncommercial app.
 
-On a hosted build the LINKS tile is listed because `apiKey` is truthy (PlainRead.tsx:794) — secretStatus() deliberately reports ANTHROPIC_KEY=true on a hosted build (main.js:232-238), so the gate that was meant to hide key-dependent tools is permanently open on the only build real users download. Clicking LINKS calls get-cross-refs, which hits requireSecret at main.js:1617 and throws NEEDS_OWN_KEY. The catch does `setError(e?.message ?? ...)` with no friendlyApiError, so the panel renders, centred, in 8px mono: "⚠ Error invoking remote method 'get-cross-refs': Error: This tool is not on our servers yet — it still needs your own Anthropic key. Studying a passage, reading it, and asking about 
+The store build now omits the ESV picker and key controls by default, and the
+server rejects ESV mobile requests unless the explicit
+`ESV_MOBILE_LICENSED=true` gate is set. A personal API key cannot bypass that
+gate. Public-domain translations remain available, so ESV licensing no longer
+blocks the initial store release.
 
-_Fix:_ Route through friendlyApiError like every other surface, and gate the tile on a real hosted/own-key flag rather than on `apiKey`, which is a lie by construction on a hosted build.
+Before ESV can be offered in the paid mobile release, Base 1520 needs written
+permission or a commercial mobile-app license from Crossway:
 
-### [MEDIUM] server/src/index.js:324
-**After a stranded reading, the free user's one lifetime credit is consumed permanently on the very next attempt with no refund**
+- API conditions: <https://api.esv.org/>
+- Crossway permissions: <https://www.crossway.org/permissions/>
 
-Anonymous user, one lifetime study. /v1/analyze spends it and returns studyId S. /v1/read rides S and fails four times (engine.js:290-297), so the claim goes 'stranded' and index.js:315-317 correctly refunds the anon credit. The client never calls forgetStudy on failure, so recallStudy still returns S. He presses TRY AGAIN. claimStudyForReading(S) now fails because state is 'stranded', so index.js:284 takes a fresh claim and anon_install.studies_used goes back to 1. That generation fails too. release() runs, releaseStudyForRetry returns 'analyzed' (not 'stranded'), and line 324's `!accountId` short-circuits before any refund — the anon branch only exists inside the stranded block. The credit
+Do not enable either the server or client ESV gate until permission is
+documented and its exact attribution/display requirements are implemented.
+Attribution alone does not cure commercial use.
 
-_Fix:_ Move the anonymous refund out of the stranded-only block: whenever the reading failed and the claim was NOT a ride-along, hand back the anon credit the same way the account reservation is handed back. Alternatively return the fresh studyId in the error frame so the client can ride it.
+## External release blockers
 
-### [MEDIUM] src/components/HostedAccount.tsx:186
-**A paused service is announced under the headline "One free study, on the house" with subscribe buttons**
+1. Full-release email, marketing, and store-provider credentials are absent.
+2. Operator-specific Terms, privacy language, and account-deletion page are not
+   live.
+3. iPhone development signing and installation work, but an App Store
+   distribution identity/profile is still absent.
+4. Android upload properties/keystore are absent; release builds fail closed by
+   design.
+5. App Store Connect and Play Console may already exist for Base 1520/Everfit,
+   but Operator app records, subscriptions/base plans, notifications, and
+   sandbox testers are not yet proven.
+6. Store listing copy, screenshots, privacy/data-safety answers, age/content
+   declarations, review notes, and support URLs are not finalized.
+7. Signed purchase, upgrade, restore, recovery, and deletion tests have not run
+   on physical iPhone and Android release candidates.
+8. Release-critical source remains untracked and therefore cannot be rebuilt
+   reliably from the remote repository.
+9. The current development build is installed and launches on the physical
+   iPad; the complete Guided Study interaction still needs an on-device human
+   walkthrough, and a signed store release candidate remains unproven.
 
-When the global ceiling trips (meter.js:257 blockEverything), claimStudy returns the SERVICE_PAUSED body at index.js:121-124 — it carries `message` but no `headline` and no `actions`. hostedError decodes it fine, so App shows the HostedAccount overlay. Line 186 falls back to `me?.anonymous ? 'One free study, on the house'`, and because `me && !me.paying` the SUBSCRIBE block at line 230 also renders with real Starter/Standard buttons. So at the exact moment the server will run nothing for anybody, an anonymous user is told he has a free study waiting and is invited to pay $30/mo for a service that is switched off. If he buys, Stripe takes the money and his first study still refuses.
+## Smallest safe cutover
 
-_Fix:_ Give SERVICE_PAUSED a headline in entitlement/index.js, and in HostedAccount suppress the plan buttons whenever the offer's code is SERVICE_PAUSED or FREE_TIER_PAUSED — the fallback headline must never apply to an offer that carried its own refusal.
+The sequence matters. Do not skip forward because a screen looks finished.
 
-### [MEDIUM] server/src/index.js:200
-**A free, token-free 413 permanently unlocks /v1/ask for any install id, and the credit is refunded too**
+1. **Freeze source:** review the dirty tree, exclude local artifacts/secrets,
+   and commit the release source after Cole approves the commit.
+2. **Publish legal pages:** make Operator Terms, privacy disclosure, and public
+   account deletion live and verify their final URLs.
+3. **Hold the ESV gate closed:** ship public-domain translations only unless
+   Crossway grants written commercial permission.
+4. **Promote backend deliberately:** add Resend/Mailchimp/store credentials,
+   verify each provider operationally, then change both server and client from
+   `core` to `full`; never let an unlabeled deployment fall through.
+5. **Re-probe backend:** require the readiness/capability matrix and the mounted
+   route matrix before building a store candidate.
+6. **Configure stores:** create Operator app records and exact Apple products /
+   Google base plans, enable provider notifications, and create sandbox users.
+7. **Sign builds:** install the Apple distribution/profile assets and create or
+   recover the Android upload key; archive signed release candidates.
+8. **Device test:** run the full free, paid, upgrade, restore, recovery,
+   deletion, offline, and failed-payment matrix on physical devices.
+9. **Prepare listings:** capture screenshots from the signed candidate, finish
+   store disclosures/copy/review notes, and stage — but do not submit.
+10. **Cole release approval:** submit only after Cole approves the receipts and
+    final release candidate.
 
-engine.openStudy writes the `study` row BEFORE the try block, and the anonymous catch at line 227-229 refunds the credit unconditionally with no retry counter. POST /v1/analyze with reference='John 3:16' and text of 12,001 characters: claimStudy takes the lifetime credit, openStudy writes a study row carrying this install_id, then runAnalyze -> analyzePassage -> checkGenerationInput throws InputTooLarge (electron/plainread/runtime.js:106, LIMITS.passageChars=12000) before a single token is spent, the catch hands the credit back, and 413 is returned. Net cost to the caller: nothing. Net result: this install_id now satisfies the anonymous ask gate at line 425-427 (`SELECT 1 FROM study WHERE in
+## Future polish — Scripture coordinates
 
-_Fix:_ Run checkGenerationInput({text, reference}) at the route, before claimStudy and openStudy — /v1/read already validates its input size before claiming. Alternatively DELETE the study row in the analyze catch when nothing was spent.
+After release-critical work is finished, add an optional Base 1520 coordinate
+label beside the ordinary Bible reference. Number books within each testament,
+then format the book, chapter, verse range, and testament as
+`BB.CC.VV[-VV] T`:
 
-### [MEDIUM] server/src/meter.js:224
-**The global ceiling is blind to every in-flight FREE study — no anonymous work ever holds a reservation**
+- `04.03.16-18 N` = John 3:16–18 (the fourth New Testament book).
+- `04.03.16-18 O` = Numbers 3:16–18 (the fourth Old Testament book).
 
-claimStudy's anonymous branch (index.js:141-158) writes only anon_install; it never creates a usage_period row, so no reserved_usd is ever held for free work. committedSpend takes its entire in-flight component from `SELECT SUM(reserved_usd) FROM usage_period`, so N concurrent anonymous studies contribute exactly $0 to `committed` for the ~163 seconds each one runs, and only become visible once their usage_event rows land at the end. This violates meter.js's own Rule 3 ('IN-FLIGHT WORK IS COMMITTED MONEY ... a ceiling that sums only COMPLETED spend reads zero for everything currently running — which is precisely when a burst is happening') on the one tier that requires no account at all. Lau
+This is a secondary brand detail, never a replacement for the familiar
+reference. Accessibility labels, exports, sharing, search, and first-use help
+must still say the ordinary book name so the coordinate never creates friction.
 
-_Fix:_ Hold a reservation for anonymous work too — either write a usage_period-shaped row keyed on install_id, or add an in_flight table that both claimStudy branches insert into and both settle paths delete from, and sum that in committedSpend.
+## Historical audit note
 
-### [MEDIUM] src/components/HostedAccount.tsx:109
-**Offline, the whole account panel disappears — no access-code field, no plan buttons**
+The older three-round desktop/backend audit found 103 defects. Its raw finding
+list previously lived in this file, but it described pre-fix line numbers and
+was no longer a trustworthy governing checklist. Current obligations are the
+verified blockers and cutover sequence above; old findings must be revalidated
+against current source before being resurfaced.
 
-On mount, `hostedMe()` returns null when offline (client.js `me()` catches and returns null on purpose), so `!state` is true and line 109 calls `hostedClaim()`. Unlike `me()`, `claim()` (electron/hosted/client.js:365) has no try/catch around its `fetch`, and `ipcMain.handle('hosted-claim')` (main.js:607) does not wrap it either — so with no network the bare `fetch` rejects with TypeError, the rejection crosses IPC, and the outer `catch { if (alive) setEnabled(false) }` on line 116 fires. `enabled === false` makes the component return null (line 177). On a hosted build the Anthropic key field is `display:none` (ApiKeyModal.tsx:186) and HostedAccount is the only thing in its place, so a tester
+## 2026-08-09 — Mobile store hardening, second adversarial pass
 
-_Fix:_ Wrap the claim call in its own try/catch so a network failure cannot reach the `setEnabled(false)` handler, or make `claim()` degrade like `me()` does — return `{ ok: false }` on a fetch rejection instead of throwing. Reserve `setEnabled(false)` for the one thing it actually means: `hostedEnabled()` returning false.
+### Changed
 
-### [LOW] src/components/HostedAccount.tsx:108
-**claim() on mount never runs at launch — HostedAccount is only mounted inside Settings or the paywall**
+- `src/mobile/MobileApp.tsx`, `src/mobile/TabletSermonDesk.tsx`, `src/mobile/tabletDeskModel.ts`, and `src/mobile/mobile.css`: preserve account-local work after revocation/sign-out, clear the active reading surface, expose two-way workspace-conflict resolution, enforce visible note/desk limits, and make archive reversible.
+- `server/src/auth.js` and `server/src/index.js`: stale bearers no longer inherit a caller-controlled install ID; anonymous study ownership requires `account_id IS NULL`; generated routes require a verified account in the full store stage.
+- `server/src/account-recovery.js`, `server/src/account-registration.js`, `server/src/mobile-account.js`, `server/src/schema.sql`, and `server/src/readiness.js`: recovery enumeration is rate-limited uniformly, registration artifacts are account-bound/deletable, and readiness now requires schema `operator-account-bound-auth-v7`.
+- Mobile/server regression tests and `scripts/check-mobile-store-readiness.mjs`: encode the new data-loss, privacy, ownership, recovery, and native-purchase invariants.
+- `src/mobile/MobileApp.tsx` and `src/mobile/store.ts`: new mobile subscribers choose and purchase inside the native app; the app calls StoreKit/Google Play directly, binds the receipt to the verified Operator account, and never redirects a new iPhone/iPad subscriber to website checkout.
 
-The round-2 fix is written so "a restart is now the fix rather than the trap," but this component is rendered in exactly two places: the upgrade overlay (App.tsx:1179) and the settings modal (ApiKeyModal.tsx:181). On a hosted build secretStatus() reports ANTHROPIC_KEY true (main.js:232), so showKeyModal is false on launch and neither one mounts. A buyer who quits the app during checkout — the precise case the commit message names — reopens to an app that is still anonymous and never asks. He only recovers by hitting the paywall again (which does mount the overlay and does claim), i.e. after wasting another study attempt; and if his free lifetime study is still unspent, that attempt is charge
+### Verified
 
-_Fix:_ Call hostedClaim() once at app start when hostedEnabled() and hostedMe() reports anonymous — a small effect in App.tsx, independent of any panel being open. Also give the effect stable deps: `onChanged` is an inline arrow from App, so this effect currently re-runs (and re-claims) on every parent render.
+- `npm run test:release` passes with TypeScript exit 0.
+- Full-stage, no-ESV assets resynced successfully to iOS and Android.
+- iOS simulator compile and Android debug compile pass; packaged release-copy audit passes.
+- Static readiness reports `149 passed · 1 warning · 1 failed`; the remaining failure is the intentional hold for visibly broken tablet screenshots.
+- The full-stage native bundle was resynced after the in-app purchase copy/guard changes; iOS simulator and Android debug builds both pass, and the packaged assets contain the native subscription path and Apple's Face ID/side-button explanation.
+- A development-signed `1.4.1` build was installed and launched on Cole's connected iPhone 14 Pro Max and 12.9-inch iPad Pro on 2026-08-09; both processes remained running and Cole confirmed the app was working on both. The complete registration, purchase, study, microphone, export, offline, and deletion smoke matrix is still open.
+- Live readiness remains `22 passed · 1 warning · 14 failed`; production is still the old core backend and the legal pages are incomplete.
 
-### [LOW] src/components/PassageInput.tsx:73
-**A mistyped reference shows the raw Electron IPC string on the first step of the walk**
+### Remaining risks
 
-handleFetch's catch does `setFetchError(e?.message ?? 'Could not fetch passage')` and the value is rendered verbatim in a red box in the sidebar (PassageInput.tsx:231-241). Type anything bible-api.com cannot parse — "Jn 3:16", "2Cor 5", "Romans 8:1-4a" — and main.js:1751 throws, producing: "⚠ Error invoking remote method 'fetch-bible': Error: Bible API error: 404 Not Found". Select ESV with no ESV key and it reads "⚠ Error invoking remote method 'fetch-bible': Error: ESV API key required — add it in Settings." This is the very first thing a beta tester does. The same untreated `e?.message` is rendered per-column by the VERSIONS tile (ParallelPanel.tsx:61), which is on the reader rail.
+- No Apple Distribution identity/profile, Android upload key, Operator store records, products, or physical store-track test receipts exist.
+- Production has not received the v7 migration/code, full-stage provider credentials, or live Operator-specific legal pages.
+- The current tablet screenshots expose loading, pending-sync, and provider-error states and cannot be submitted.
+- Subscription pricing is locked at `$30 / $300`, `$50 / $500`, and `$150 / $1,650`, with monthly allowances of 40, 80, and 300 studies; store-product creation remains an external approval boundary.
+- Release-critical source remains dirty/untracked and is not reproducible from the remote repository.
 
-_Fix:_ Use friendlyApiErrorText here and in ParallelPanel, and add a branch for a 404 from bible-api.com that says the reference could not be found and suggests the canonical spelling, rather than surfacing the transport.
+### Exact next action
 
-### [LOW] src/components/ApiKeyModal.tsx:395
-**Demo mode is unreachable on a hosted build — the only zero-cost way to see the product before spending the one free study**
-
-The EXPLORE DEMO — ROMANS 8 button is gated on `!hasExistingKey`. On a hosted build secretStatus() reports ANTHROPIC_KEY=true (main.js:232-238), App sets apiKey to STORED_KEY (App.tsx:443), and hasExistingKey is therefore always true. The button never renders on the build every beta tester will download. The demo data is fully local (data/demoAnalysis.ts, no network, no key), and App's demo handler is wired and correct — it is simply unreachable. A hosted user's only way to see a finished reading is to spend his single lifetime credit.
-
-_Fix:_ Gate the demo button on `!hasExistingKey || hostedBuild` (or drop the gate entirely — the demo costs nothing on any build).
-
-### [LOW] server/src/index.js:316
-**The 'stranded' refund lets an anonymous caller reset their lifetime credit for free, without limit**
-
-/v1/read validates the size of `analysis` at the route but never the length of `reference`; that check happens inside engine.runPlainRead (engine.js:113 -> checkGenerationInput -> runtime.js:106, LIMITS.referenceChars=120), AFTER claimStudyForReading has already taken the claim and the response has started streaming. So: run one free /v1/analyze to get studyId S (credit spent, used=1). Then POST /v1/read four times with {analysis:{a:1}, reference:'x'.repeat(200), studyId:S}. Each call claims S ('analyzed'->'reading'), throws InputTooLarge before any model call, and hits release(); releaseStudyForRetry (engine.js:290-298) walks retries 0->1->2->3 and on the fourth returns 'stranded', at which
-
-_Fix:_ Validate reference length at the route, before claimStudyForReading/claimStudy. And refund a stranded claim only when engine.studyCost(studyId) shows the claim actually bought nothing — a claim that burned four generations should not also be free.
-
-### [LOW] server/src/index.js:313
-**The stranded refund releases a $0.75 reservation a ride-along no longer holds, silently eating another in-flight study's hold**
-
-On the stranded path, index.js:313 calls meter.releaseStudy unconditionally — including when ridesPriorClaim is true. On a ride-along, /v1/analyze already released that $0.75 hold via settleStudy (meter.js:117). releaseStudy's `reserved_usd = GREATEST(reserved_usd - 0.75, 0)` therefore decrements a hold that is not held, and if the same account has another study in flight it consumes THAT study's live reservation instead. This is precisely the hazard recordAdditionalSpend's own header (meter.js:126-134) was written to avoid — 'clamped at zero it silently eats some other request's in-flight money, which makes the global ceiling read low at exactly the moment a burst is happening' — reintroduc
-
-_Fix:_ On the stranded path, when ridesPriorClaim is true decrement studies_used only; call the full releaseStudy only for a claim whose reservation is still open.
-
-
-## Clint Riggin's beta feedback — done
-
-He wanted to copy output into his own documents. Two things blocked it, both
-fixed: the app had `user-select: none` on `<body>` with only three opt-ins, and
-Electron gives a window no context menu at all, so right-click did nothing.
-
-Older feedback is unrecoverable — the Supabase project behind it no longer
-exists (NXDOMAIN). Feedback now lives on the Operator API and is reachable at
-`GET /v1/feedback` with a comp account.
-
-## Known gaps, deliberately not pretended away
-
-- **Eleven deeper tools still need the user's own Anthropic key** — word study,
-  cross-references, the scholar panel, sermon drafting, group guide. The core
-  loop (study, read, ask) is hosted. The rest now says so honestly instead of
-  sending people to a Settings panel with no key field.
-- **The beta feedback panel has no entry point in the UI** (round 3 finding) —
-  testers cannot file a report until that is mounted.
+Complete physical iPhone/iPad smoke testing and Cole approves the release-source commit boundary. Then publish the three legal pages and deploy the v7 backend before creating store products, distribution signing, or capturing final screenshots.

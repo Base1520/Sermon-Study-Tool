@@ -21,12 +21,31 @@ interface Entitlement {
   email: string | null
   plan: string
   label: string
+  billingInterval?: 'month' | 'year' | null
   paying: boolean
   allowance: number
   lifetimeStudies?: number
   used: number
   remaining: number
-  plans?: Record<string, { label: string; priceUsd: number; studiesPerMonth: number }>
+  plans?: Record<string, {
+    label: string
+    family?: string
+    priceUsd: number
+    studiesPerMonth: number
+    billingInterval?: 'month' | 'year' | null
+    monthlyEquivalentUsd?: number | null
+    annualSavingsUsd?: number
+    hidden?: boolean
+  }>
+}
+
+interface DeviceRecord {
+  id: string
+  label: string | null
+  platform: string | null
+  current: boolean
+  created_at: string
+  last_seen_at: string | null
 }
 
 // The offer type lives in lib/hostedError.ts beside the decoder that produces it.
@@ -46,6 +65,8 @@ export function HostedAccount({ offer, onClose, onChanged }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  const [devices, setDevices] = useState<DeviceRecord[]>([])
+  const [deviceLink, setDeviceLink] = useState<{ code: string; expiresAt: string } | null>(null)
   /* Shown when a checkout poll gave up. The purchase is almost certainly fine —
      Stripe just took longer than the app waited — so this is a nudge, not an
      error. */
@@ -79,7 +100,14 @@ export function HostedAccount({ offer, onClose, onChanged }: {
       const state = await api()?.hostedMe?.()
       // null means OFFLINE, not "free". Keeping the last known entitlement is
       // deliberate: dropped wifi must never tell a paying man he is not one.
-      if (state) setMe(state)
+      if (state) {
+        setMe(state)
+        if (!state.anonymous && api()?.hostedDevices) {
+          setDevices(await api().hostedDevices().catch(() => []))
+        } else {
+          setDevices([])
+        }
+      }
     } catch { /* offline is not an entitlement change */ }
   }, [])
   useEffect(() => { refreshRef.current = refresh }, [refresh])
@@ -134,6 +162,30 @@ export function HostedAccount({ offer, onClose, onChanged }: {
       setError(e?.message || 'That code could not be redeemed.')
     } finally { setBusy(false) }
   }, [code, busy, refresh, onChanged])
+
+  const createPhoneLink = useCallback(async () => {
+    if (busy) return
+    setBusy(true); setError(null); setNote(null)
+    try {
+      const link = await api().hostedDeviceLink()
+      setDeviceLink(link)
+      setNote('Open The Operator on your phone and enter this code. It expires in 10 minutes.')
+    } catch (e: any) {
+      setError(e?.message || 'Could not create a phone link.')
+    } finally { setBusy(false) }
+  }, [busy])
+
+  const revokeLinkedDevice = useCallback(async (deviceId: string) => {
+    if (busy) return
+    setBusy(true); setError(null)
+    try {
+      await api().hostedDeviceRevoke(deviceId)
+      await refresh()
+      setNote('Device revoked.')
+    } catch (e: any) {
+      setError(e?.message || 'Could not revoke that device.')
+    } finally { setBusy(false) }
+  }, [busy, refresh])
 
   /**
    * A church asking for seats.
@@ -242,7 +294,7 @@ export function HostedAccount({ offer, onClose, onChanged }: {
       border: `1px solid ${offer ? BASE.borderGold : BASE.border}`,
       borderRadius: 4,
       padding: 20,
-      maxWidth: 520,
+      width: '100%', maxWidth: 1080, boxSizing: 'border-box',
     }}>
       <div style={{ font: `600 15px ${FONT.display}`, color: BASE.bone, marginBottom: 8 }}>
         {headline}
@@ -320,7 +372,7 @@ export function HostedAccount({ offer, onClose, onChanged }: {
             value={code}
             onChange={(e) => setCode(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') redeem() }}
-            placeholder="OPERATOR-…"
+            placeholder="OPERATOR-… or BUY-…"
             spellCheck={false}
             autoCapitalize="characters"
             style={{
@@ -344,6 +396,68 @@ export function HostedAccount({ offer, onClose, onChanged }: {
           </button>
         </div>
       </div>
+
+      {me && !me.anonymous && (
+        <div style={{ marginTop: 22, paddingTop: 18, borderTop: `1px solid ${BASE.borderDim}` }}>
+          {label('LINK A PHONE')}
+          <div style={{ font: `400 13px/1.55 ${FONT.serif}`, color: BASE.boneMid, marginBottom: 12 }}>
+            Use one temporary code to connect the mobile app to this same account. No second purchase.
+          </div>
+          {deviceLink && (
+            <div style={{
+              font: `700 18px ${FONT.mono}`, letterSpacing: '0.08em', color: BASE.gold,
+              background: BASE.bg, border: `1px solid ${BASE.borderGold}`,
+              padding: '14px 16px', textAlign: 'center', marginBottom: 10,
+            }}>
+              {deviceLink.code}
+            </div>
+          )}
+          <button
+            onClick={createPhoneLink}
+            disabled={busy}
+            style={{
+              font: `600 11px ${FONT.mono}`, letterSpacing: '0.06em',
+              color: BASE.bg, background: BASE.gold, border: 'none', borderRadius: 3,
+              padding: '9px 14px', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1,
+            }}
+          >
+            {deviceLink ? 'NEW CODE' : 'LINK A PHONE'}
+          </button>
+
+          {devices.length > 0 && (
+            <div style={{ display: 'grid', gap: 6, marginTop: 16 }}>
+              {devices.map((device) => (
+                <div key={device.id} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                  background: BASE.bg, border: `1px solid ${BASE.borderDim}`, padding: '9px 10px',
+                }}>
+                  <div>
+                    <div style={{ font: `600 12px ${FONT.display}`, color: BASE.bone }}>
+                      {device.label || device.platform || 'The Operator'}
+                    </div>
+                    <div style={{ font: `400 9px ${FONT.mono}`, color: BASE.steel, marginTop: 2 }}>
+                      {device.current ? 'THIS DEVICE' : device.last_seen_at ? `LAST SEEN ${new Date(device.last_seen_at).toLocaleDateString()}` : 'LINKED'}
+                    </div>
+                  </div>
+                  {!device.current && (
+                    <button
+                      onClick={() => revokeLinkedDevice(device.id)}
+                      disabled={busy}
+                      style={{
+                        font: `600 8px ${FONT.mono}`, letterSpacing: '0.08em', color: BASE.steel,
+                        background: 'transparent', border: `1px solid ${BASE.borderDim}`,
+                        padding: '6px 8px', cursor: busy ? 'default' : 'pointer',
+                      }}
+                    >
+                      REVOKE
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {needsClaim && (
         <div style={{ marginTop: 14 }}>

@@ -1,0 +1,42 @@
+{
+  "bundleId": "com.base1520.theoperator",
+  "androidPackage": "com.base1520.theoperator",
+  "products": [
+    {
+      "plan": "starter",
+      "appleProductId": "com.base1520.theoperator.starter.monthly",
+      "googleProductId": "com.base1520.theoperator.subscription",
+      "androidBasePlanId": "starter-monthly"
+    },
+    {
+      "plan": "starter_annual",
+      "appleProductId": "com.base1520.theoperator.starter.annual",
+      "googleProductId": "com.base1520.theoperator.subscription",
+      "androidBasePlanId": "starter-annual"
+    },
+    {
+      "plan": "standard",
+      "appleProductId": "com.base1520.theoperator.standard.monthly",
+      "googleProductId": "com.base1520.theoperator.subscription",
+      "androidBasePlanId": "standard-monthly"
+    },
+    {
+      "plan": "standard_annual",
+      "appleProductId": "com.base1520.theoperator.standard.annual",
+      "googleProductId": "com.base1520.theoperator.subscription",
+      "androidBasePlanId": "standard-annual"
+    },
+    {
+      "plan": "heavy",
+      "appleProductId": "com.base1520.theoperator.heavy.monthly",
+      "googleProductId": "com.base1520.theoperator.subscription",
+      "androidBasePlanId": "heavy-monthly"
+    },
+    {
+      "plan": "heavy_annual",
+      "appleProductId": "com.base1520.theoperator.heavy.annual",
+      "googleProductId": "com.base1520.theoperator.subscription",
+      "androidBasePlanId": "heavy-annual"
+    }
+  ]
+}

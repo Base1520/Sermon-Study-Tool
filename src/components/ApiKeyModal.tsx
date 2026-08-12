@@ -63,6 +63,7 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
   }
   const [key, setKey]       = useState('')
   const [esvKey, setEsvKey] = useState('')
+  const [showEsvKey, setShowEsvKey] = useState(false)
   const [showAnthropicHelp, setShowAnthropicHelp] = useState(!hasExistingKey)
   const [testing, setTesting] = useState(false)
   const [testError, setTestError] = useState<FriendlyError | null>(null)
@@ -146,15 +147,17 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
       backdropFilter: 'blur(16px)',
       WebkitBackdropFilter: 'blur(16px)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50,
+      padding: 24, boxSizing: 'border-box',
     }}>
       <div style={{
         background: `${BASE.bg}f4`,
         backdropFilter: 'blur(40px)',
         WebkitBackdropFilter: 'blur(40px)',
         border: `1px solid ${BASE.borderGold}`,
-        borderRadius: 16, padding: 32, width: '100%', maxWidth: 460,
+        borderRadius: 16, padding: '32px clamp(24px, 4vw, 48px)',
+        width: '100%', maxWidth: 1180, boxSizing: 'border-box',
         boxShadow: `0 40px 80px rgba(0,0,0,0.6), 0 0 0 1px ${BASE.borderDim}`,
-        position: 'relative', overflow: 'hidden', maxHeight: '90vh', overflowY: 'auto',
+        position: 'relative', overflow: 'hidden', maxHeight: 'calc(100vh - 48px)', overflowY: 'auto',
       }}>
         <div style={{
           position: 'absolute', top: 0, left: '20%', right: '20%', height: 1,
@@ -257,71 +260,68 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
           </div>
         )}
 
-        {/* ESV key */}
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.khaki, letterSpacing: '0.12em', marginBottom: 6, opacity: 0.9 }}>
-            ESV TRANSLATION <span style={{ color: BASE.steel, fontWeight: 400 }}>(optional — your own free key)</span>
-          </div>
-
-          <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12.5, color: BASE.steel, lineHeight: 1.6, marginBottom: 10 }}>
-            The ESV needs a key from Crossway, and it has to be <em>yours</em> — we cannot
-            ship one with the app. It takes about two minutes:
-            <ol style={{ margin: '8px 0 0', paddingLeft: 18, lineHeight: 1.7 }}>
-              <li>
-                Go to{' '}
-                <a
-                  href="https://api.esv.org/account/create-application/"
-                  onClick={(e) => {
-                    e.preventDefault()
-                    ;(window as any).electronAPI?.openExternal?.('https://api.esv.org/account/create-application/')
-                  }}
-                  style={{ color: BASE.gold, textDecoration: 'none', borderBottom: `1px solid ${BASE.borderGold}` }}
-                >api.esv.org</a>{' '}
-                and create a free account.
-              </li>
-              <li>Create an application — any name will do.</li>
-              <li>Copy the API key it gives you and paste it below.</li>
-            </ol>
-          </div>
-
-          {/* THE LIMIT, SAID OUT LOUD.
-              Crossway's free API key requires a NON-COMMERCIAL site, and defines
-              commercial as "primarily designed to motivate visitors to buy
-              something, to pay for a service, or to give a donation." That is a
-              different clause from the one that cleared the book, and it is why
-              the ESV cannot simply be bundled into a paid product. Read at
-              primary on api.esv.org, 2026-08-05. A man pasting his own key here
-              deserves to know what it does and does not cover. */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          gap: 18, alignItems: 'start', marginBottom: 24,
+        }}>
           <div style={{
-            fontFamily: 'Crimson Pro, serif', fontSize: 12, lineHeight: 1.6,
-            color: BASE.khaki, background: `${BASE.olive}22`,
-            border: `1px solid ${BASE.borderDim}`, borderRadius: 8,
-            padding: '10px 13px', marginBottom: 10,
+            background: BASE.bgCard, border: `1px solid ${BASE.borderDim}`,
+            borderRadius: 10, padding: 18,
           }}>
-            <strong style={{ color: BASE.boneMid }}>Why it is your key and not ours.</strong>{' '}
-            Crossway's free ESV key is licensed for non-commercial use, so we cannot
-            include the ESV in a paid app until they license it to us — that conversation
-            is open. Your own key is fine for your own study.
+            <button
+              type="button"
+              aria-expanded={showEsvKey}
+              onClick={() => setShowEsvKey(open => !open)}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                gap: 16, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
+                color: BASE.bone, textAlign: 'left',
+              }}
+            >
+              <span style={{ fontFamily: 'Crimson Pro, serif', fontSize: 18 }}>
+                Do you have your own ESV key?
+              </span>
+              <span style={{
+                flexShrink: 0, fontFamily: 'JetBrains Mono', fontSize: 8,
+                letterSpacing: '0.12em', color: hasExistingEsvKey ? BASE.gold : BASE.khaki,
+              }}>
+                {hasExistingEsvKey ? 'KEY SAVED' : showEsvKey ? 'CLOSE' : 'ADD KEY'} {showEsvKey ? '−' : '+'}
+              </span>
+            </button>
+
+            {showEsvKey && (
+              <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${BASE.borderDim}` }}>
+                <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 13, color: BASE.steel, lineHeight: 1.6, marginBottom: 12 }}>
+                  Paste it below. Need one?{' '}
+                  <a
+                    href="https://api.esv.org/account/create-application/"
+                    onClick={(e) => {
+                      e.preventDefault()
+                      ;(window as any).electronAPI?.openExternal?.('https://api.esv.org/account/create-application/')
+                    }}
+                    style={{ color: BASE.gold, textDecoration: 'none', borderBottom: `1px solid ${BASE.borderGold}` }}
+                  >Get a free key from Crossway.</a>{' '}
+                  Without one, KJV, ASV, YLT and Darby still work.
+                </div>
+                <input
+                  type="password" value={esvKey}
+                  onChange={e => setEsvKey(e.target.value.trim())}
+                  placeholder={hasExistingEsvKey ? 'Paste a new ESV key to replace the saved one' : 'Paste your ESV key'}
+                  autoComplete="off" spellCheck={false}
+                  style={{ ...fieldStyle, fontFamily: esvKey ? 'JetBrains Mono' : 'Crimson Pro, serif' }}
+                  onFocus={e => (e.target.style.borderColor = `${BASE.khaki}66`)}
+                  onBlur={e => (e.target.style.borderColor = BASE.borderDim)}
+                  onKeyDown={e => e.key === 'Enter' && canSave && void connect()}
+                />
+              </div>
+            )}
           </div>
 
-          <div style={{ fontFamily: 'Crimson Pro, serif', fontSize: 12, color: BASE.steel, lineHeight: 1.5, marginBottom: 8 }}>
-            Skip it entirely if you like — KJV, ASV, YLT and Darby need no key at all.
-          </div>
-
-          <input
-            type="password" value={esvKey}
-            onChange={e => setEsvKey(e.target.value.trim())}
-            placeholder={hasExistingEsvKey ? 'ESV key saved — paste to replace it' : 'Paste your ESV key (optional)'}
-            autoComplete="off" spellCheck={false}
-            style={{ ...fieldStyle, fontFamily: esvKey ? 'JetBrains Mono' : 'Crimson Pro, serif' }}
-            onFocus={e => (e.target.style.borderColor = `${BASE.khaki}66`)}
-            onBlur={e => (e.target.style.borderColor = BASE.borderDim)}
-            onKeyDown={e => e.key === 'Enter' && canSave && void connect()}
-          />
-        </div>
-
-        {/* License. Applied on its own button so it never waits on the API key. */}
-        <div style={{ marginBottom: 24 }}>
+          {/* License. Applied on its own button so it never waits on the API key. */}
+          <div style={{
+            background: BASE.bgCard, border: `1px solid ${BASE.borderDim}`,
+            borderRadius: 10, padding: 18,
+          }}>
           <div style={{ fontFamily: 'JetBrains Mono', fontSize: 8, color: BASE.khaki, letterSpacing: '0.12em', marginBottom: 6, opacity: 0.9 }}>
             LICENSE KEY <span style={{ color: BASE.steel, fontWeight: 400 }}>(optional — unlocks new studies)</span>
           </div>
@@ -382,10 +382,11 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
               )}
             </>
           )}
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => void connect()} disabled={!canSave}
+          {(!hostedBuild || showEsvKey) && <button onClick={() => void connect()} disabled={!canSave}
             style={{
               flex: 1, padding: '11px 0', borderRadius: 10, cursor: canSave ? 'pointer' : 'not-allowed',
               background: canSave ? BASE.goldMid : `${BASE.olive}22`,
@@ -394,8 +395,8 @@ export function ApiKeyModal({ onSave, onClose, onDemo, hasExistingKey, hasExisti
               fontFamily: 'Crimson Pro, serif', fontSize: 14,
               letterSpacing: '0.04em', transition: 'all 0.2s',
             }}>
-            {testing ? 'Checking connection…' : 'Check & Connect →'}
-          </button>
+            {testing ? 'Saving…' : hostedBuild ? 'Save ESV key →' : 'Check & Connect →'}
+          </button>}
           {/* A hosted build must ALWAYS be able to leave this modal. It opens on
               first launch, its Anthropic field is hidden, and gating the only
               exit on "do you already have a key" made it a dead end for exactly

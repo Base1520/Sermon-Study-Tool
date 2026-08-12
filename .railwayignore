@@ -3,14 +3,28 @@
 # Deploys from local go through this file, not .dockerignore — the ignore runs
 # before the tarball is built, so anything listed here never leaves the machine.
 # node_modules alone is 558MB and the image installs its own copy anyway.
+# `resources/theology-retrieval/library.sqlite3` is intentionally ignored by
+# Git but required by the API image. Local production deploys therefore use
+# `railway up --no-gitignore`; the secret patterns below become load-bearing.
 node_modules
 dist
+dist-mobile
 dist-electron
 release
 build
-resources
+android
+ios
+mobile
+website
+assets
 *.dmg
 *.zip
 *.exe
 *.blockmap
 .git
+.env
+.env.*
+.operator-license-key
+.operator-license-key.pub
+*-license-key
+electron/embedded-key.js

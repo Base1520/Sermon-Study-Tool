@@ -21,9 +21,23 @@
 const express = require('express')
 const Stripe = require('stripe')
 const auth = require('./auth')
-const { PLANS, TOPUP } = require('./entitlement')
+const { PLANS, PAID_PLAN_KEYS, TOPUP } = require('./entitlement')
+const billing = require('./billing')
+const {
+  mountWebPurchase,
+  preferredSubscription,
+  OPEN_SUBSCRIPTION_STATUSES,
+} = require('./web-purchase')
+const {
+  SOM_SOURCE,
+  mountSomPurchase,
+  recordSomPurchase,
+  syncSomBuyerMarketing,
+  markSomPurchaseRefunded,
+} = require('./som-purchase')
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' })
+const TOPUP_REFUND_RETRY_MS = 24 * 60 * 60 * 1000
 
 /**
  * Same wrapper as index.js, and needed for the same reason.
@@ -37,10 +51,46 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '20
 const route = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
 /** Map a Stripe price id to one of our plans. Set these in the environment. */
-const PRICE_TO_PLAN = {
-  [process.env.STRIPE_PRICE_STARTER]: 'starter',
-  [process.env.STRIPE_PRICE_STANDARD]: 'standard',
-  [process.env.STRIPE_PRICE_HEAVY]: 'heavy',
+function planPriceIds() {
+  return {
+    starter: process.env.STRIPE_PRICE_STARTER,
+    standard: process.env.STRIPE_PRICE_STANDARD,
+    heavy: process.env.STRIPE_PRICE_HEAVY,
+    starter_annual: process.env.STRIPE_PRICE_STARTER_ANNUAL,
+    standard_annual: process.env.STRIPE_PRICE_STANDARD_ANNUAL,
+    heavy_annual: process.env.STRIPE_PRICE_HEAVY_ANNUAL,
+  }
+}
+
+const PRICE_TO_PLAN = Object.fromEntries(
+  Object.entries(planPriceIds())
+    .filter(([, priceId]) => Boolean(priceId))
+    .map(([plan, priceId]) => [priceId, plan]),
+)
+
+async function listAllSubscriptions(stripeClient, customerId) {
+  const subscriptions = []
+  const cursors = new Set()
+  let startingAfter = null
+
+  while (true) {
+    const page = await stripeClient.subscriptions.list({
+      customer: customerId,
+      status: 'all',
+      limit: 100,
+      ...(startingAfter ? { starting_after: startingAfter } : {}),
+    })
+    if (!Array.isArray(page?.data)) throw new Error('Stripe returned an invalid subscription page.')
+    subscriptions.push(...page.data)
+    if (!page.has_more) return subscriptions
+
+    const nextCursor = page.data.at(-1)?.id
+    if (!nextCursor || cursors.has(nextCursor)) {
+      throw new Error('Stripe subscription pagination did not advance.')
+    }
+    cursors.add(nextCursor)
+    startingAfter = nextCursor
+  }
 }
 
 /**
@@ -49,34 +99,109 @@ const PRICE_TO_PLAN = {
  * what a man is entitled to — the "split brain" that makes Stripe integrations
  * rot is two code paths disagreeing about the same customer.
  */
-async function syncCustomer(db, customerId) {
-  const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 1 })
-  const sub = subs.data[0]
-
-  if (!sub) {
-    await db.query(
-      `UPDATE account SET plan='free', status='none', stripe_subscription_id=NULL
-        WHERE stripe_customer_id=$1`, [customerId])
-    return { plan: 'free', status: 'none' }
+async function syncCustomer(db, customerId, stripeClient = stripe, options = {}) {
+  const observedAt = new Date((options.now || Date.now)()).toISOString()
+  const subscriptions = await listAllSubscriptions(stripeClient, customerId)
+  const accountResult = await db.query(
+    `SELECT id FROM account WHERE stripe_customer_id = $1`,
+    [customerId],
+  )
+  const accountId = accountResult.rows[0]?.id
+  if (!accountId) return { plan: 'free', status: 'none' }
+  const recognized = subscriptions.filter((sub) => PRICE_TO_PLAN[sub.items.data[0]?.price?.id])
+  const preferred = preferredSubscription(recognized)
+  const client = typeof db.connect === 'function' ? await db.connect() : db
+  const ownsClient = client !== db
+  let transactionOpen = false
+  let accountDeleting = false
+  const deletionSignal = new Error('account deletion in progress')
+  try {
+    if (ownsClient) {
+      await client.query('BEGIN')
+      transactionOpen = true
+    }
+    const locked = await client.query(
+      `SELECT id, deleting_at FROM account WHERE id = $1 FOR UPDATE`,
+      [accountId],
+    )
+    if (!locked.rows.length || locked.rows[0].deleting_at) {
+      accountDeleting = true
+      if (transactionOpen) {
+        await client.query('ROLLBACK')
+        transactionOpen = false
+      }
+    }
+    if (accountDeleting) throw deletionSignal
+    const synchronizedIds = []
+    for (const sub of recognized) {
+      const priceId = sub.items.data[0]?.price?.id
+      const plan = PRICE_TO_PLAN[priceId]
+      const status =
+        sub.status === 'active' || sub.status === 'trialing' ? 'active'
+        : sub.status === 'past_due' || sub.status === 'unpaid' || sub.status === 'paused' || sub.status === 'incomplete' ? 'past_due'
+        : 'canceled'
+      synchronizedIds.push(sub.id)
+      await billing.upsertSubscription(client, {
+        accountId,
+        provider: 'stripe',
+        externalId: sub.id,
+        productId: priceId,
+        plan,
+        status,
+        currentPeriodEnd: sub.current_period_end
+          ? new Date(sub.current_period_end * 1000).toISOString()
+          : null,
+        billingAnchorAt: (sub.billing_cycle_anchor || sub.start_date || sub.current_period_start)
+          ? new Date((sub.billing_cycle_anchor || sub.start_date || sub.current_period_start) * 1000).toISOString()
+          : null,
+        providerEventAt: observedAt,
+        providerEventRank: status === 'canceled' ? 100 : status === 'past_due' ? 50 : 10,
+        environment: sub.livemode === false ? 'sandbox' : 'production',
+        metadata: { customerId },
+      })
+    }
+    if (synchronizedIds.length) {
+      await client.query(
+        `DELETE FROM billing_subscription
+          WHERE account_id = $1 AND provider = 'stripe'
+            AND NOT (external_id = ANY($2::text[]))
+            AND (provider_event_at IS NULL OR provider_event_at < $3)`,
+        [accountId, synchronizedIds, observedAt],
+      )
+    } else {
+      await client.query(
+        `DELETE FROM billing_subscription
+          WHERE account_id = $1 AND provider = 'stripe'
+            AND (provider_event_at IS NULL OR provider_event_at < $2)`,
+        [accountId, observedAt],
+      )
+    }
+    await client.query(
+      `UPDATE account SET stripe_subscription_id = $2 WHERE id = $1`,
+      [accountId, preferred?.id || null],
+    )
+    const entitlement = await billing.reconcileAccountEntitlement(client, accountId)
+    if (transactionOpen) {
+      await client.query('COMMIT')
+      transactionOpen = false
+    }
+    return entitlement
+  } catch (error) {
+    if (error !== deletionSignal) {
+      if (transactionOpen) await client.query('ROLLBACK').catch(() => {})
+      throw error
+    }
+  } finally {
+    if (ownsClient) client.release()
   }
 
-  const priceId = sub.items.data[0]?.price?.id
-  const plan = PRICE_TO_PLAN[priceId] || 'free'
-
-  // active and trialing pay. past_due does NOT — see rule 2.
-  const status =
-    sub.status === 'active' || sub.status === 'trialing' ? 'active'
-    : sub.status === 'past_due' || sub.status === 'unpaid' ? 'past_due'
-    : 'canceled'
-
-  await db.query(
-    `UPDATE account
-        SET plan=$2, status=$3, stripe_subscription_id=$4,
-            paid_through = to_timestamp($5)
-      WHERE stripe_customer_id=$1`,
-    [customerId, plan, status, sub.id, sub.current_period_end],
-  )
-  return { plan, status }
+  // A checkout can finish while deletion is being confirmed. Never recreate a
+  // local entitlement for a deleting account and leave the external charge
+  // alive: close every open Stripe subscription returned by the source ledger.
+  for (const subscription of subscriptions.filter((item) => OPEN_SUBSCRIPTION_STATUSES.has(item.status))) {
+    await stripeClient.subscriptions.cancel(subscription.id)
+  }
+  return { plan: 'free', status: 'none' }
 }
 
 /**
@@ -99,26 +224,46 @@ function mountWebhook(app, db) {
       return res.status(400).send(`signature check failed: ${e.message}`)
     }
 
-    // Acknowledge fast; Stripe retries anything slow, which would double the work.
-    res.json({ received: true })
-
-    const customerId =
-      event.data.object.customer ||
-      (event.data.object.object === 'customer' ? event.data.object.id : null)
-    if (!customerId) return
-
     try {
-      await syncCustomer(db, customerId)
-      // A completed top-up is a payment, not a subscription change, so
-      // syncCustomer says nothing about it. Credit it here or the customer paid
-      // $15 for nothing.
-      if (event.type === 'checkout.session.completed' && event.data.object.mode === 'payment') {
-        await creditTopUp(db, event.data.object)
-      }
+      await handleWebhookEvent(db, event)
+      res.json({ received: true })
     } catch (e) {
-      console.error('[stripe] sync failed for', customerId, e.message)
+      console.error('[stripe] event handling failed for', event.type, e.message)
+      res.status(500).json({ error: 'WEBHOOK_PROCESSING_FAILED' })
     }
   })
+}
+
+async function handleWebhookEvent(db, event, stripeClient = stripe) {
+  const eventObject = event.data.object
+  const customerId =
+    eventObject.customer ||
+    (eventObject.object === 'customer' ? eventObject.id : null)
+
+  if (customerId) await syncCustomer(db, customerId, stripeClient)
+  if (
+    ['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(event.type) &&
+    eventObject.mode === 'payment' &&
+    eventObject.metadata?.source === SOM_SOURCE
+  ) {
+    const purchase = await recordSomPurchase(db, eventObject)
+    await syncSomBuyerMarketing(db, purchase, eventObject)
+  }
+  if (
+    ['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(event.type) &&
+    eventObject.mode === 'payment' &&
+    eventObject.payment_status === 'paid' &&
+    eventObject.metadata?.source === 'operator-topup'
+  ) {
+    await creditTopUp(db, eventObject)
+  }
+  if (event.type === 'charge.refunded') {
+    await markSomPurchaseRefunded(db, eventObject)
+    await revokeOperatorTopUpRefund(db, eventObject, {
+      eventId: event.id,
+      eventCreated: event.created,
+    })
+  }
 }
 
 /**
@@ -129,31 +274,181 @@ function mountWebhook(app, db) {
  * race to the primary key and grants nothing.
  */
 async function creditTopUp(db, session) {
-  const { rowCount } = await db.query(
-    `INSERT INTO topup (session_id, stripe_customer_id, studies)
-          VALUES ($1, $2, $3)
-     ON CONFLICT (session_id) DO NOTHING`,
-    [session.id, session.customer, TOPUP.studies],
+  if (session.metadata?.source !== 'operator-topup') return false
+  if (!session.payment_intent) {
+    throw new Error(`Operator top-up is missing a PaymentIntent for Checkout Session ${session.id}`)
+  }
+  const client = typeof db.connect === 'function' ? await db.connect() : db
+  const ownsClient = client !== db
+  let transactionOpen = false
+  try {
+    await client.query('BEGIN')
+    transactionOpen = true
+    const inserted = await client.query(
+      `INSERT INTO topup
+         (session_id, stripe_customer_id, studies, payment_intent_id, amount_total, currency)
+            VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (session_id) DO NOTHING`,
+      [session.id, session.customer, TOPUP.studies, session.payment_intent,
+        session.amount_total, session.currency],
+    )
+    if (!inserted.rowCount) {
+      await client.query('ROLLBACK')
+      transactionOpen = false
+      return false
+    }
+    const credited = await client.query(
+      `UPDATE account SET topup_studies = topup_studies + $2 WHERE stripe_customer_id = $1`,
+      [session.customer, TOPUP.studies],
+    )
+    if (credited.rowCount !== 1) {
+      throw new Error(`Operator top-up account match failed for Checkout Session ${session.id}`)
+    }
+    await client.query('COMMIT')
+    transactionOpen = false
+    console.log(`[stripe] credited ${TOPUP.studies} top-up studies to ${session.customer}`)
+    return true
+  } catch (error) {
+    if (transactionOpen) await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    if (ownsClient) client.release()
+  }
+}
+
+async function revokeOperatorTopUpRefund(db, charge, options = {}) {
+  if (charge?.refunded !== true || !charge.payment_intent) return false
+  const eventCreatedMs = Number(options.eventCreated) * 1000
+  const nowMs = Number(options.nowMs ?? Date.now())
+  const insideRetryWindow = Number.isFinite(eventCreatedMs) && nowMs - eventCreatedMs < TOPUP_REFUND_RETRY_MS
+  const client = typeof db.connect === 'function' ? await db.connect() : db
+  const ownsClient = client !== db
+  let transactionOpen = false
+  try {
+    await client.query('BEGIN')
+    transactionOpen = true
+    const linked = await client.query(
+      `SELECT session_id, stripe_customer_id, studies, studies_revoked, refunded_at
+         FROM topup WHERE payment_intent_id = $1 FOR UPDATE`,
+      [charge.payment_intent],
+    )
+    const topup = linked.rows[0]
+    if (!topup) {
+      if (insideRetryWindow) {
+        throw new Error(`Operator top-up refund is waiting for PaymentIntent ${charge.payment_intent}`)
+      }
+      await client.query(
+        `INSERT INTO topup_reconciliation_failure
+           (stripe_event_id, payment_intent_id, reason, first_seen_at, last_seen_at, attempt_count)
+         VALUES ($1, $2, 'unmatched-full-refund', now(), now(), 1)
+         ON CONFLICT (stripe_event_id) DO UPDATE
+           SET last_seen_at = now(), attempt_count = topup_reconciliation_failure.attempt_count + 1`,
+        [options.eventId || `unidentified:${charge.payment_intent}`, charge.payment_intent],
+      )
+      await client.query('COMMIT')
+      transactionOpen = false
+      console.error('[stripe] operator top-up refund requires reconciliation', charge.payment_intent)
+      return false
+    }
+    if (topup.refunded_at) {
+      await client.query('ROLLBACK')
+      transactionOpen = false
+      return false
+    }
+    const remainingGrant = Math.max(0, Number(topup.studies) - Number(topup.studies_revoked || 0))
+    const accountResult = await client.query(
+      `SELECT id, topup_studies FROM account WHERE stripe_customer_id = $1 FOR UPDATE`,
+      [topup.stripe_customer_id],
+    )
+    const account = accountResult.rows[0]
+    if (!account) throw new Error(`Operator top-up refund account match failed for ${topup.session_id}`)
+    const revoked = Math.min(remainingGrant, Math.max(0, Number(account.topup_studies)))
+    const debited = await client.query(
+      `UPDATE account SET topup_studies = topup_studies - $2 WHERE id = $1`,
+      [account.id, revoked],
+    )
+    if (debited.rowCount !== 1) throw new Error(`Operator top-up refund debit failed for ${topup.session_id}`)
+    const recorded = await client.query(
+      `UPDATE topup
+          SET studies_revoked = studies_revoked + $2, refunded_at = now()
+        WHERE session_id = $1`,
+      [topup.session_id, revoked],
+    )
+    if (recorded.rowCount !== 1) throw new Error(`Operator top-up refund ledger update failed for ${topup.session_id}`)
+    await client.query('COMMIT')
+    transactionOpen = false
+    console.log(`[stripe] revoked ${revoked} top-up studies for ${topup.session_id}`)
+    return true
+  } catch (error) {
+    if (transactionOpen) await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    if (ownsClient) client.release()
+  }
+}
+
+async function cancelAccountSubscriptions(db, accountId, stripeClient = stripe) {
+  const { rows } = await db.query(
+    `SELECT stripe_customer_id FROM account WHERE id = $1`,
+    [accountId],
   )
-  if (!rowCount) return   // already credited
-  await db.query(
-    `UPDATE account SET topup_studies = topup_studies + $2 WHERE stripe_customer_id = $1`,
-    [session.customer, TOPUP.studies],
-  )
-  console.log(`[stripe] credited ${TOPUP.studies} top-up studies to ${session.customer}`)
+  const customerId = rows[0]?.stripe_customer_id
+  if (!customerId) return { canceled: 0, expiredCheckouts: 0 }
+  let expiredCheckouts = 0
+  if (stripeClient.checkout?.sessions?.list && stripeClient.checkout?.sessions?.expire) {
+    const sessions = await stripeClient.checkout.sessions.list({ customer: customerId, status: 'open', limit: 100 })
+    for (const session of sessions.data) {
+      try {
+        await stripeClient.checkout.sessions.expire(session.id)
+        expiredCheckouts += 1
+      } catch (error) {
+        if (error?.code !== 'checkout_session_not_expirable') throw error
+      }
+    }
+  }
+  const subscriptions = await listAllSubscriptions(stripeClient, customerId)
+  const open = subscriptions.filter((subscription) => OPEN_SUBSCRIPTION_STATUSES.has(subscription.status))
+  for (const subscription of open) await stripeClient.subscriptions.cancel(subscription.id)
+  return { canceled: open.length, expiredCheckouts }
+}
+
+function priceIdFor(plan) {
+  return planPriceIds()[plan]
+}
+
+function operatorWebUrl() {
+  const configured = String(
+    process.env.OPERATOR_WEB_PUBLIC_URL ||
+    process.env.PUBLIC_URL ||
+    'https://www.base1520.com/operator',
+  ).trim()
+  try {
+    const url = new URL(configured)
+    if (url.protocol !== 'https:' && !['localhost', '127.0.0.1', '::1'].includes(url.hostname)) throw new Error('unsafe URL')
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return 'https://www.base1520.com/operator'
+  }
 }
 
 function mount(app, db) {
+  const webUrl = operatorWebUrl()
+  mountWebPurchase(app, db, stripe, syncCustomer, {
+    apiOrigin: process.env.OPERATOR_API_PUBLIC_URL,
+    prices: planPriceIds(),
+  })
+  mountSomPurchase(app, db, stripe, {
+    apiOrigin: process.env.OPERATOR_API_PUBLIC_URL,
+    priceId: process.env.STRIPE_PRICE_SOM_DIGITAL,
+    cancelUrl: process.env.SOM_SALES_URL,
+  })
+
   // ── Start a subscription ──────────────────────────────────────────────────
   app.post('/v1/checkout', route(async (req, res) => {
     const { plan, email } = req.body || {}
-    if (!PLANS[plan] || plan === 'free') return res.status(400).json({ error: 'unknown plan' })
+    if (!PAID_PLAN_KEYS.includes(plan)) return res.status(400).json({ error: 'unknown plan' })
 
-    const priceId = {
-      starter: process.env.STRIPE_PRICE_STARTER,
-      standard: process.env.STRIPE_PRICE_STANDARD,
-      heavy: process.env.STRIPE_PRICE_HEAVY,
-    }[plan]
+    const priceId = priceIdFor(plan)
     if (!priceId) return res.status(500).json({ error: 'plan not configured' })
 
     // Reuse the account's customer if it has one, so a second subscription can
@@ -216,12 +511,12 @@ function mount(app, db) {
      * cannot produce two subscriptions.
      */
     const existing = await stripe.subscriptions.list({
-      customer: customerId, status: 'active', limit: 1,
+      customer: customerId, status: 'all', limit: 100,
     })
-    if (existing.data.length > 0) {
+    if (existing.data.some((subscription) => OPEN_SUBSCRIPTION_STATUSES.has(subscription.status))) {
       const portal = await stripe.billingPortal.sessions.create({
         customer: customerId,
-        return_url: process.env.PUBLIC_URL,
+        return_url: webUrl,
       })
       return res.json({ url: portal.url, changedPlan: true })
     }
@@ -230,8 +525,8 @@ function mount(app, db) {
       mode: 'subscription',
       customer: customerId,
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${process.env.PUBLIC_URL}/upgraded?session={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.PUBLIC_URL}/pricing`,
+      success_url: `${webUrl}?checkout=success&session={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${webUrl}?checkout=cancelled`,
       // Stripe's own recommendation, and the thing that stops one impatient
       // person opening two tabs and buying twice.
       allow_promotion_codes: true,
@@ -249,8 +544,9 @@ function mount(app, db) {
       mode: 'payment',                       // one-off. No stored intent, no surprise charge.
       customer: customerId,
       line_items: [{ price: process.env.STRIPE_PRICE_TOPUP, quantity: 1 }],
-      success_url: `${process.env.PUBLIC_URL}/topped-up`,
-      cancel_url: `${process.env.PUBLIC_URL}/`,
+      success_url: `${webUrl}?topup=success`,
+      cancel_url: webUrl,
+      metadata: { source: 'operator-topup' },
     })
     res.json({ url: session.url, studies: TOPUP.studies, priceUsd: TOPUP.priceUsd })
   }))
@@ -261,7 +557,7 @@ function mount(app, db) {
     if (!customerId) return res.status(401).json({ error: 'sign in first' })
     const session = await stripe.billingPortal.sessions.create({
       customer: customerId,
-      return_url: process.env.PUBLIC_URL,
+      return_url: webUrl,
     })
     res.json({ url: session.url })
   }))
@@ -336,4 +632,19 @@ function mount(app, db) {
   }))
 }
 
-module.exports = { mount, mountWebhook, syncCustomer, creditTopUp, PRICE_TO_PLAN }
+module.exports = {
+  mount,
+  mountWebhook,
+  handleWebhookEvent,
+  mountWebPurchase,
+  syncCustomer,
+  creditTopUp,
+  revokeOperatorTopUpRefund,
+  recordSomPurchase,
+  markSomPurchaseRefunded,
+  cancelAccountSubscriptions,
+  operatorWebUrl,
+  preferredSubscription,
+  OPEN_SUBSCRIPTION_STATUSES,
+  PRICE_TO_PLAN,
+}

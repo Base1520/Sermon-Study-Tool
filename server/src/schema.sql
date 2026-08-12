@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS account (
   -- is the single most expensive default in the stack — a non-paying user
   -- burning tokens for days.
   status          text NOT NULL DEFAULT 'none',   -- none|active|past_due|canceled
-  paid_through    timestamptz
+  paid_through    timestamptz,
+  usage_anchor_at timestamptz
 );
 
 -- Which install started the checkout that created this account. Without it a man
@@ -32,6 +33,73 @@ CREATE TABLE IF NOT EXISTS account (
 -- This is what /v1/claim matches on to hand his install a device token.
 ALTER TABLE account ADD COLUMN IF NOT EXISTS install_id text;
 CREATE INDEX IF NOT EXISTS account_install_idx ON account(install_id);
+
+-- A website buyer has no app install id yet. Checkout gives him a one-time
+-- activation code; only its hash is stored, and the first app install to redeem
+-- it becomes the only install allowed to retry that code.
+ALTER TABLE account ADD COLUMN IF NOT EXISTS purchase_code_hash text;
+ALTER TABLE account ADD COLUMN IF NOT EXISTS purchase_redeemed_install_id text;
+ALTER TABLE account ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false;
+ALTER TABLE account ADD COLUMN IF NOT EXISTS free_studies_used int NOT NULL DEFAULT 0;
+ALTER TABLE account ADD COLUMN IF NOT EXISTS free_asks_used int NOT NULL DEFAULT 0;
+ALTER TABLE account ADD COLUMN IF NOT EXISTS deleting_at timestamptz;
+ALTER TABLE account ADD COLUMN IF NOT EXISTS usage_anchor_at timestamptz;
+CREATE UNIQUE INDEX IF NOT EXISTS account_purchase_code_idx ON account(purchase_code_hash)
+  WHERE purchase_code_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS account_email_lower_idx ON account(lower(email));
+
+-- A deleted account must stay deleted, but deletion must not mint another free
+-- trial. Only keyed HMACs survive; no email or device identifier is retained.
+CREATE TABLE IF NOT EXISTS free_trial_tombstone (
+  identity_hash      text PRIMARY KEY,
+  identity_kind      text NOT NULL CHECK (identity_kind IN ('email', 'install')),
+  free_studies_used  int NOT NULL DEFAULT 0,
+  free_asks_used     int NOT NULL DEFAULT 0,
+  last_deleted_at    timestamptz NOT NULL DEFAULT now()
+);
+
+-- Billing providers are evidence sources, not the entitlement itself. Stripe,
+-- Apple and Google all write verified subscription rows here; account.plan and
+-- account.status remain the fast cache read by every study request.
+CREATE TABLE IF NOT EXISTS billing_subscription (
+  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id         uuid NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  provider           text NOT NULL CHECK (provider IN ('stripe', 'apple', 'google')),
+  external_id        text NOT NULL,
+  product_id         text NOT NULL,
+  plan               text NOT NULL,
+  status             text NOT NULL,
+  current_period_end timestamptz,
+  billing_anchor_at  timestamptz,
+  provider_event_at  timestamptz,
+  provider_event_rank int NOT NULL DEFAULT 0,
+  environment        text NOT NULL DEFAULT 'production',
+  metadata           jsonb NOT NULL DEFAULT '{}'::jsonb,
+  verified_at        timestamptz NOT NULL DEFAULT now(),
+  created_at         timestamptz NOT NULL DEFAULT now(),
+  updated_at         timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (provider, external_id)
+);
+CREATE INDEX IF NOT EXISTS billing_subscription_account_idx
+  ON billing_subscription(account_id, updated_at DESC);
+ALTER TABLE billing_subscription ADD COLUMN IF NOT EXISTS provider_event_at timestamptz;
+ALTER TABLE billing_subscription ADD COLUMN IF NOT EXISTS provider_event_rank int NOT NULL DEFAULT 0;
+ALTER TABLE billing_subscription ADD COLUMN IF NOT EXISTS billing_anchor_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS google_acknowledgment_outbox (
+  purchase_token_hash text PRIMARY KEY,
+  purchase_token      text NOT NULL,
+  account_id          uuid NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  product_id          text NOT NULL,
+  base_plan_id        text NOT NULL,
+  attempts            int NOT NULL DEFAULT 0,
+  next_attempt_at     timestamptz NOT NULL DEFAULT now(),
+  last_error          text,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  updated_at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS google_acknowledgment_outbox_due_idx
+  ON google_acknowledgment_outbox(next_attempt_at);
 
 -- ── Devices ─────────────────────────────────────────────────────────────────
 -- A desktop app cannot hold a browser session. Each install gets a long-lived
@@ -43,11 +111,89 @@ CREATE TABLE IF NOT EXISTS device (
   token_hash   text NOT NULL UNIQUE,      -- sha256; the raw token is shown once and never stored
   install_id   text,                      -- the app's own per-install uuid, for support
   label        text,                      -- "Cole's MacBook"
+  platform     text,
   created_at   timestamptz NOT NULL DEFAULT now(),
   last_seen_at timestamptz,
   revoked_at   timestamptz
 );
 CREATE INDEX IF NOT EXISTS device_account_idx ON device(account_id);
+ALTER TABLE device ADD COLUMN IF NOT EXISTS platform text;
+
+CREATE TABLE IF NOT EXISTS device_link (
+  code_hash             text PRIMARY KEY,
+  account_id            uuid NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  created_by_device_id  uuid REFERENCES device(id) ON DELETE SET NULL,
+  created_at            timestamptz NOT NULL DEFAULT now(),
+  expires_at            timestamptz NOT NULL,
+  used_at               timestamptz
+);
+CREATE INDEX IF NOT EXISTS device_link_account_idx ON device_link(account_id, created_at DESC);
+
+-- Every recovery request lands here, including requests for unknown emails.
+-- This keeps the public response and the cooldown behavior indistinguishable
+-- without retaining a raw email address.
+CREATE TABLE IF NOT EXISTS account_recovery_request (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id   uuid REFERENCES account(id) ON DELETE CASCADE,
+  email_hash   text NOT NULL,
+  install_hash text NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS account_recovery_request_email_rate_idx
+  ON account_recovery_request(email_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS account_recovery_request_install_rate_idx
+  ON account_recovery_request(install_hash, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS account_recovery_code (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id   uuid NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  install_hash text NOT NULL,
+  code_hash    text NOT NULL,
+  attempts     int NOT NULL DEFAULT 0,
+  expires_at   timestamptz NOT NULL,
+  consumed_at  timestamptz,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS account_recovery_code_lookup_idx
+  ON account_recovery_code(account_id, install_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS account_recovery_code_expiry_idx
+  ON account_recovery_code(expires_at) WHERE consumed_at IS NULL;
+
+-- New accounts do not exist yet, so verification is bound to keyed hashes of
+-- the normalized email and requesting install. No raw email or code is stored.
+CREATE TABLE IF NOT EXISTS account_registration_code (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id       uuid REFERENCES account(id) ON DELETE CASCADE,
+  email_hash       text NOT NULL,
+  install_hash     text NOT NULL,
+  source_ip_hash   text NOT NULL,
+  code_hash        text NOT NULL,
+  platform         text,
+  device_label     text,
+  marketing_opt_in boolean NOT NULL DEFAULT false,
+  attempts         int NOT NULL DEFAULT 0,
+  expires_at       timestamptz NOT NULL,
+  consumed_at      timestamptz,
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE account_registration_code
+  ADD COLUMN IF NOT EXISTS account_id uuid REFERENCES account(id) ON DELETE CASCADE;
+ALTER TABLE account_registration_code
+  ADD COLUMN IF NOT EXISTS source_ip_hash text;
+CREATE INDEX IF NOT EXISTS account_registration_code_lookup_idx
+  ON account_registration_code(email_hash, install_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS account_registration_code_account_idx
+  ON account_registration_code(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS account_registration_code_email_rate_idx
+  ON account_registration_code(email_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS account_registration_code_install_rate_idx
+  ON account_registration_code(install_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS account_registration_code_source_ip_rate_idx
+  ON account_registration_code(source_ip_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS account_registration_code_global_rate_idx
+  ON account_registration_code(created_at DESC);
+CREATE INDEX IF NOT EXISTS account_registration_code_expiry_idx
+  ON account_registration_code(expires_at) WHERE consumed_at IS NULL;
 
 -- ── Usage, one row per account per billing period ────────────────────────────
 -- The period is anchored to the SUBSCRIPTION start, never the 1st of the month.
@@ -72,6 +218,21 @@ CREATE TABLE IF NOT EXISTS usage_period (
   PRIMARY KEY (account_id, period_start)
 );
 CREATE INDEX IF NOT EXISTS usage_period_updated_idx ON usage_period(updated_at);
+
+CREATE TABLE IF NOT EXISTS study_reservation (
+  id           text PRIMARY KEY,
+  account_id   uuid REFERENCES account(id) ON DELETE CASCADE,
+  install_id   text,
+  access_kind  text NOT NULL CHECK (access_kind IN ('recurring', 'topup', 'account_free', 'anon_free')),
+  period_start timestamptz NOT NULL,
+  reserved_usd numeric(10,4) NOT NULL DEFAULT 0.75,
+  state        text NOT NULL DEFAULT 'held' CHECK (state IN ('held', 'settled', 'released', 'refunded')),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS study_reservation_account_idx ON study_reservation(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS study_reservation_install_idx ON study_reservation(install_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS study_reservation_held_idx ON study_reservation(state, updated_at);
 
 -- ── Per-call ledger ─────────────────────────────────────────────────────────
 -- Append-only. This is what finally replaces the estimated cost-per-study with a
@@ -99,6 +260,20 @@ ALTER TABLE usage_event ADD COLUMN IF NOT EXISTS install_id text;
 CREATE INDEX IF NOT EXISTS usage_event_account_idx ON usage_event(account_id, at);
 CREATE INDEX IF NOT EXISTS usage_event_study_idx   ON usage_event(study_id);
 CREATE INDEX IF NOT EXISTS usage_event_install_idx ON usage_event(install_id, study_id);
+
+CREATE TABLE IF NOT EXISTS ask_reservation (
+  id           text PRIMARY KEY,
+  account_id   uuid REFERENCES account(id) ON DELETE SET NULL,
+  install_id   text,
+  access_kind  text NOT NULL CHECK (access_kind IN ('recurring', 'account_free', 'anon_free')),
+  reserved_usd numeric(10,4) NOT NULL DEFAULT 0.08,
+  state        text NOT NULL DEFAULT 'held' CHECK (state IN ('held', 'settled', 'released')),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ask_reservation_account_idx ON ask_reservation(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ask_reservation_install_idx ON ask_reservation(install_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ask_reservation_held_idx ON ask_reservation(state, updated_at);
 
 -- ── Settings ────────────────────────────────────────────────────────────────
 -- The kill switch lives HERE and not in an environment variable, so it can be
@@ -149,6 +324,60 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 CREATE INDEX IF NOT EXISTS feedback_created_idx ON feedback(created_at DESC);
 
+-- ── Download leads ──────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS download_lead (
+  email               text PRIMARY KEY,
+  source              text NOT NULL DEFAULT 'operator-website',
+  last_platform       text NOT NULL,
+  marketing_opt_in    boolean NOT NULL DEFAULT false,
+  consent_version     text,
+  download_count      int NOT NULL DEFAULT 1,
+  first_downloaded_at timestamptz NOT NULL DEFAULT now(),
+  last_downloaded_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS download_lead_last_idx ON download_lead(last_downloaded_at DESC);
+DELETE FROM download_lead WHERE email ILIKE '%.invalid';
+
+-- Account deletion commits locally even when Mailchimp is temporarily down.
+-- Only Mailchimp's one-way subscriber hash survives; the email itself does not.
+CREATE TABLE IF NOT EXISTS marketing_contact_state (
+  subscriber_hash text PRIMARY KEY,
+  action          text NOT NULL CHECK (action IN ('sync', 'archive')),
+  intent_id       text NOT NULL,
+  updated_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS marketing_deletion_outbox (
+  id                bigserial PRIMARY KEY,
+  subscriber_hash   text NOT NULL UNIQUE,
+  attempts          int NOT NULL DEFAULT 0,
+  next_attempt_at   timestamptz NOT NULL DEFAULT now(),
+  last_error        text,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS marketing_deletion_outbox_due_idx
+  ON marketing_deletion_outbox(next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS som_purchase (
+  session_id          text PRIMARY KEY,
+  email               text NOT NULL,
+  stripe_customer_id  text,
+  payment_intent_id   text,
+  amount_total        int NOT NULL,
+  currency            text NOT NULL,
+  status              text NOT NULL DEFAULT 'paid',
+  source              text NOT NULL DEFAULT 'som-digital-early-access',
+  marketing_opt_in    boolean NOT NULL DEFAULT false,
+  consent_version     text,
+  download_count      int NOT NULL DEFAULT 0,
+  purchased_at        timestamptz NOT NULL DEFAULT now(),
+  last_downloaded_at  timestamptz,
+  updated_at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS som_purchase_email_idx ON som_purchase(lower(email), purchased_at DESC);
+CREATE INDEX IF NOT EXISTS som_purchase_recent_idx ON som_purchase(purchased_at DESC);
+
 -- ── Access codes ────────────────────────────────────────────────────────────
 -- Comped access, handed out by Cole. Two reasons this is a table and not a
 -- constant in the code: a code must be revocable the moment it leaks, and Cole
@@ -182,7 +411,27 @@ CREATE TABLE IF NOT EXISTS topup (
   session_id         text PRIMARY KEY,
   stripe_customer_id text,
   studies            int NOT NULL,
+  payment_intent_id  text,
+  amount_total       integer,
+  currency           text,
+  refunded_at        timestamptz,
+  studies_revoked    integer NOT NULL DEFAULT 0,
   at                 timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE topup ADD COLUMN IF NOT EXISTS payment_intent_id text;
+ALTER TABLE topup ADD COLUMN IF NOT EXISTS amount_total integer;
+ALTER TABLE topup ADD COLUMN IF NOT EXISTS currency text;
+ALTER TABLE topup ADD COLUMN IF NOT EXISTS refunded_at timestamptz;
+ALTER TABLE topup ADD COLUMN IF NOT EXISTS studies_revoked integer NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS topup_payment_intent_id_uidx
+  ON topup(payment_intent_id) WHERE payment_intent_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS topup_reconciliation_failure (
+  stripe_event_id   text PRIMARY KEY,
+  payment_intent_id text NOT NULL,
+  reason            text NOT NULL,
+  first_seen_at     timestamptz NOT NULL DEFAULT now(),
+  last_seen_at      timestamptz NOT NULL DEFAULT now(),
+  attempt_count     integer NOT NULL DEFAULT 1
 );
 ALTER TABLE account ADD COLUMN IF NOT EXISTS topup_studies int NOT NULL DEFAULT 0;
 
@@ -212,6 +461,7 @@ CREATE TABLE IF NOT EXISTS study (
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE study ADD COLUMN IF NOT EXISTS passage jsonb;
 -- How many times this claim has been handed back after a failed reading. An
 -- unbounded retry is an unbounded spend on one credit — see releaseStudyForRetry.
 ALTER TABLE study ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
@@ -219,6 +469,14 @@ ALTER TABLE study ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
 -- strand on purpose, get the lifetime credit back and repeat — free studies with
 -- extra steps, each one spending real Opus tokens.
 ALTER TABLE study ADD COLUMN IF NOT EXISTS refunded_at timestamptz;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS analysis jsonb;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS document jsonb;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS level text;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS notes text;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS workspace jsonb;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS workspace_revision int NOT NULL DEFAULT 0;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS study_account_idx ON study(account_id, created_at);
 CREATE INDEX IF NOT EXISTS study_install_idx ON study(install_id, created_at);
@@ -230,6 +488,8 @@ CREATE INDEX IF NOT EXISTS study_install_idx ON study(install_id, created_at);
 CREATE TABLE IF NOT EXISTS anon_install (
   install_id   text PRIMARY KEY,
   studies_used int NOT NULL DEFAULT 0,
+  asks_used    int NOT NULL DEFAULT 0,
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE anon_install ADD COLUMN IF NOT EXISTS asks_used int NOT NULL DEFAULT 0;

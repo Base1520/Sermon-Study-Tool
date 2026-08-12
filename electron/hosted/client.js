@@ -279,7 +279,7 @@ async function checkout(store, { plan, email }) {
  * Not a study and not billed as one — see the route. A 429 is a real answer the
  * reader should see plainly, so it comes back as a refusal rather than an error.
  */
-async function ask(store, { doc, analysis, question, history, vaultNotes }) {
+async function ask(store, { doc, analysis, studyId, question, history, vaultNotes }) {
   const base = hostedBaseUrl()
   if (!base) throw new Error('ask: OPERATOR_API_URL is not set')
 
@@ -290,7 +290,7 @@ async function ask(store, { doc, analysis, question, history, vaultNotes }) {
     res = await fetch(`${base}/v1/ask`, {
       method: 'POST',
       headers: headers(store),
-      body: JSON.stringify({ doc, analysis, question, history, vaultNotes }),
+      body: JSON.stringify({ doc, analysis, studyId, question, history, vaultNotes }),
       signal: ctl.signal,
     })
   } finally { clearTimeout(timer) }
@@ -372,6 +372,36 @@ async function claim(store) {
   return { ok: true, ...body }
 }
 
+async function createDeviceLink(store) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('device link: OPERATOR_API_URL is not set')
+  const res = await fetch(`${base}/v1/device-links`, { method: 'POST', headers: headers(store) })
+  const body = await readJsonOrText(res)
+  if (!res.ok) throw new Error(body?.message || `device link unavailable (${res.status})`)
+  return body
+}
+
+async function devices(store) {
+  const base = hostedBaseUrl()
+  if (!base) return []
+  const res = await fetch(`${base}/v1/devices`, { headers: headers(store) })
+  const body = await readJsonOrText(res)
+  if (!res.ok) throw new Error(body?.message || `devices unavailable (${res.status})`)
+  return body.devices || []
+}
+
+async function revokeDevice(store, deviceId) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('device revoke: OPERATOR_API_URL is not set')
+  const res = await fetch(`${base}/v1/devices/${encodeURIComponent(deviceId)}`, {
+    method: 'DELETE',
+    headers: headers(store),
+  })
+  const body = await readJsonOrText(res)
+  if (!res.ok) throw new Error(body?.message || `device could not be revoked (${res.status})`)
+  return body
+}
+
 module.exports = {
   analyze,
   plainRead,
@@ -384,6 +414,9 @@ module.exports = {
   listFeedback,
   redeem,
   claim,
+  createDeviceLink,
+  devices,
+  revokeDevice,
   hostedBaseUrl,
   installId,
   HostedRefusal,

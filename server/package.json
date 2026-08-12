@@ -1,17 +1,21 @@
 {
   "name": "operator-server",
-  "version": "0.4.0",
+  "version": "1.4.1",
   "private": true,
-  "description": "The Operator API \u2014 reading engine, metering, and billing.",
+  "description": "The Operator API — reading engine, metering, and billing.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node src/test-meter.js && node src/test-entitlement.js && node src/test-routes.js && node src/test-ridealong.js",
+    "test": "node src/test-meter.js && node src/test-entitlement.js && node src/test-billing.js && node src/test-billing-period.js && node src/test-routes.js && node src/test-ridealong.js && node src/test-web-purchase.js && node src/test-stripe-web.js && node src/test-stripe-sync.js && node src/test-som-purchase.js && node src/test-stripe-topup.js && node src/test-mobile.js && node src/test-mobile-account.js && node src/test-account-registration.js && node src/test-mobile-registration-routes.js && node src/test-account-recovery.js && node src/test-mailchimp.js && node src/test-iap.js && node src/test-readiness.js && node src/test-quick-study.js && node src/test-guided-study.js && node src/test-sermon-assist.js && node src/test-ai-consent-routes.js && node src/test-commentary.js && node src/test-review-access.js",
     "migrate": "node src/migrate.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.0",
+    "@apple/app-store-server-library": "^3.1.0",
+    "@aws-sdk/client-s3": "^3.883.0",
+    "@aws-sdk/s3-request-presigner": "^3.883.0",
     "express": "^4.21.2",
+    "google-auth-library": "^11.0.0",
     "pg": "^8.13.1",
     "stripe": "^17.5.0"
   },

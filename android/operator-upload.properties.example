@@ -1,0 +1,12 @@
+# Copy this file to operator-upload.properties. The real file and keystore are
+# ignored by git. Paths are relative to the android directory unless absolute.
+storeFile=operator-upload.jks
+storePassword=replace-me
+keyAlias=operator-upload
+keyPassword=replace-me
+
+# CI may use these environment variables instead of this file:
+# OPERATOR_UPLOAD_STORE_FILE
+# OPERATOR_UPLOAD_STORE_PASSWORD
+# OPERATOR_UPLOAD_KEY_ALIAS
+# OPERATOR_UPLOAD_KEY_PASSWORD

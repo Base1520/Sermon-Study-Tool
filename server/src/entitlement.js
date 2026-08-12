@@ -30,8 +30,14 @@
  * top-up — so nobody can save money by staying small and topping up, which is
  * how a badly-priced overage cannibalises its own subscriptions.
  */
-/** Where "move up" actually goes. Heavy is the top, so it has no next. */
-const NEXT_PLAN_UP = { free: 'starter', starter: 'standard', standard: 'heavy' }
+/** Where "move up" actually goes. Preserve the billing cadence when moving tiers. */
+const NEXT_PLAN_UP = {
+  free: 'starter',
+  starter: 'standard',
+  standard: 'heavy',
+  starter_annual: 'standard_annual',
+  standard_annual: 'heavy_annual',
+}
 
 const PLANS = {
   free: {
@@ -41,9 +47,30 @@ const PLANS = {
     lifetimeStudies: 1,          // one live study, ever — the taste of the real thing
     library: true,
   },
-  starter: { label: 'Starter',  priceUsd: 30,  studiesPerMonth: 40,  library: true },
-  standard:{ label: 'Standard', priceUsd: 50,  studiesPerMonth: 80,  library: true },
-  heavy:   { label: 'Heavy',    priceUsd: 150, studiesPerMonth: 300, library: true },
+  starter: {
+    label: 'Starter', family: 'starter', billingInterval: 'month', billingMonths: 1,
+    priceUsd: 30, studiesPerMonth: 40, library: true,
+  },
+  standard: {
+    label: 'Standard', family: 'standard', billingInterval: 'month', billingMonths: 1,
+    priceUsd: 50, studiesPerMonth: 80, library: true,
+  },
+  heavy: {
+    label: 'Heavy', family: 'heavy', billingInterval: 'month', billingMonths: 1,
+    priceUsd: 150, studiesPerMonth: 300, library: true,
+  },
+  starter_annual: {
+    label: 'Starter', family: 'starter', billingInterval: 'year', billingMonths: 12,
+    priceUsd: 300, studiesPerMonth: 40, library: true,
+  },
+  standard_annual: {
+    label: 'Standard', family: 'standard', billingInterval: 'year', billingMonths: 12,
+    priceUsd: 500, studiesPerMonth: 80, library: true,
+  },
+  heavy_annual: {
+    label: 'Heavy', family: 'heavy', billingInterval: 'year', billingMonths: 12,
+    priceUsd: 1650, studiesPerMonth: 300, library: true,
+  },
 
   /**
    * Comped access. Not for sale and never shown in the plan picker.
@@ -65,11 +92,36 @@ const PLANS = {
 /** Bought deliberately, never auto-charged. Priced ABOVE every tier's per-study rate. */
 const TOPUP = { label: 'Top-up', priceUsd: 15, studies: 15 }
 
+const PAID_PLAN_KEYS = [
+  'starter', 'standard', 'heavy',
+  'starter_annual', 'standard_annual', 'heavy_annual',
+]
+
+function monthlyPriceUsd(plan) {
+  const value = typeof plan === 'string' ? PLANS[plan] : plan
+  if (!value || !value.billingMonths) return null
+  return value.priceUsd / value.billingMonths
+}
+
+function annualSavingsUsd(plan) {
+  const value = typeof plan === 'string' ? PLANS[plan] : plan
+  if (!value || value.billingInterval !== 'year') return 0
+  const monthly = PLANS[value.family]
+  return monthly ? monthly.priceUsd * 12 - value.priceUsd : 0
+}
+
+function priceLabel(planKey) {
+  const plan = PLANS[planKey]
+  if (!plan) return ''
+  const cadence = plan.billingInterval === 'year' ? 'yr' : 'mo'
+  return `${plan.label} — $${plan.priceUsd}/${cadence} · ${plan.studiesPerMonth} studies/mo`
+}
+
 /** Per-study price at each tier, and the guarantee that the ladder points the right way. */
 function perStudy(plan) {
   const p = PLANS[plan]
   if (!p || !p.studiesPerMonth) return null
-  return p.priceUsd / p.studiesPerMonth
+  return monthlyPriceUsd(p) / p.studiesPerMonth
 }
 
 /**
@@ -82,19 +134,23 @@ function perStudy(plan) {
 function entitlementFor(account) {
   const planKey = PLANS[account?.plan] ? account.plan : 'free'
   const plan = PLANS[planKey]
+  const paidThrough = account?.paidThrough ? new Date(account.paidThrough).getTime() : null
+  const expired = Number.isFinite(paidThrough) && paidThrough <= Date.now()
+  const effectiveStatus = expired && account?.status === 'active' ? 'canceled' : account?.status ?? 'none'
 
   // Status is set explicitly rather than inferred, because Stripe's default
   // grace period leaves a subscription "active" after a card fails — the single
   // most expensive default in this stack for a metered product.
-  const paying = planKey !== 'free' && account?.status === 'active'
+  const paying = planKey !== 'free' && effectiveStatus === 'active'
 
   return {
     plan: planKey,
-    label: plan.label,
+    label: plan.billingInterval === 'year' ? `${plan.label} annual` : plan.label,
+    billingInterval: plan.billingInterval ?? null,
     // Carried so callers can tell "never subscribed" from "card just failed".
     // Without it the past_due branch in upgradePrompt could never match, and a
     // lapsed subscriber was shown free-trial copy for a plan he pays for.
-    status: account?.status ?? 'none',
+    status: effectiveStatus,
     paying,
     library: true,                         // always, for everyone, forever
     allowance: paying ? plan.studiesPerMonth : 0,
@@ -146,8 +202,8 @@ function upgradePrompt(ent, { used = 0 } = {}) {
         'So does everything in the library. What a subscription adds is running new ' +
         'passages of your own choosing, whenever you want.',
       actions: [
-        { kind: 'subscribe', plan: 'starter',  label: `Starter — $${PLANS.starter.priceUsd}/mo · ${PLANS.starter.studiesPerMonth} studies` },
-        { kind: 'subscribe', plan: 'standard', label: `Standard — $${PLANS.standard.priceUsd}/mo · ${PLANS.standard.studiesPerMonth} studies` },
+        { kind: 'subscribe', plan: 'starter', label: priceLabel('starter') },
+        { kind: 'subscribe', plan: 'starter_annual', label: priceLabel('starter_annual') },
       ],
     }
   }
@@ -167,12 +223,21 @@ function upgradePrompt(ent, { used = 0 } = {}) {
         ? [{
             kind: 'upgrade',
             plan: NEXT_PLAN_UP[ent.plan],
-            label: `${PLANS[NEXT_PLAN_UP[ent.plan]].label} — $${PLANS[NEXT_PLAN_UP[ent.plan]].priceUsd}/mo · ` +
-                   `${PLANS[NEXT_PLAN_UP[ent.plan]].studiesPerMonth} studies`,
+            label: priceLabel(NEXT_PLAN_UP[ent.plan]),
           }]
         : [],
     ],
   }
 }
 
-module.exports = { PLANS, TOPUP, entitlementFor, upgradePrompt, perStudy, NEXT_PLAN_UP }
+module.exports = {
+  PLANS,
+  PAID_PLAN_KEYS,
+  TOPUP,
+  entitlementFor,
+  upgradePrompt,
+  perStudy,
+  monthlyPriceUsd,
+  annualSavingsUsd,
+  NEXT_PLAN_UP,
+}

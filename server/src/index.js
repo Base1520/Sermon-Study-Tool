@@ -13,14 +13,37 @@
  * becomes a two-minute stare.
  */
 
+const crypto = require('crypto')
 const express = require('express')
 const { Pool } = require('pg')
 
 const auth = require('./auth')
-const { entitlementFor, upgradePrompt, PLANS } = require('./entitlement')
+const {
+  entitlementFor,
+  upgradePrompt,
+  PLANS,
+  monthlyPriceUsd,
+  annualSavingsUsd,
+} = require('./entitlement')
 const meter = require('./meter')
 const engine = require('./engine')
 const { checkGenerationInput } = require('../../electron/plainread/runtime')
+const { isPurchaseCode, claimPurchasedAccount } = require('./web-purchase')
+const mobile = require('./mobile')
+const stripeApi = require('./stripe')
+const iap = require('./iap')
+const billing = require('./billing')
+const { billingPeriodFor } = require('./billing-period')
+const { processMarketingDeletionOutbox } = require('./mailchimp')
+const { trialIdentitySecret, trialIdentityHash } = require('./mobile-account')
+const { probeReadiness, releaseStage, runtimeIdentity } = require('./readiness')
+const { retrieveCommentary } = require('./commentary')
+const { purgeExpiredRegistrationCodes } = require('./account-registration')
+
+// Trial tombstones are a security boundary, not an optional feature. Starting
+// without their dedicated key would let account deletion mint another free
+// trial after the next deploy changes whichever unrelated fallback key was used.
+trialIdentitySecret()
 
 const db = new Pool({ connectionString: process.env.DATABASE_URL })
 
@@ -63,25 +86,25 @@ app.set('trust proxy', 1)
 //
 // Proven, not assumed: an express app with json() before raw() delivers
 // `typeof req.body === 'object'` to the raw handler.
-require('./stripe').mountWebhook(app, db)
+stripeApi.mountWebhook(app, db)
+mobile.mountCors(app)
 
+app.patch('/v1/studies/:id/workspace', express.json({ limit: '520kb' }), (_req, _res, next) => next())
 app.use(express.json({ limit: '256kb' }))   // a passage is small; anything larger is abuse
+app.use(express.urlencoded({ extended: false, limit: '16kb' }))
 app.use(auth.middleware(db))
-
-const period = () => {
-  const now = new Date()
-  const start = new Date(now.getFullYear(), now.getMonth(), 1)
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
-  return { periodStart: start.toISOString(), periodEnd: end.toISOString() }
-}
 
 // ── Health ──────────────────────────────────────────────────────────────────
 app.get('/health', route(async (_req, res) => {
   try {
-    await db.query('SELECT 1')
-    res.json({ ok: true })
+    const readiness = await probeReadiness(db)
+    res.status(readiness.ok ? 200 : 503).json(readiness)
   } catch (e) {
-    res.status(503).json({ ok: false, error: e.message })
+    res.status(503).json({
+      ...runtimeIdentity(),
+      ok: false,
+      missing: ['database_probe'],
+    })
   }
 }))
 
@@ -89,23 +112,54 @@ app.get('/health', route(async (_req, res) => {
 // The client calls this on launch to decide what to show. It never 401s.
 app.get('/v1/me', route(async (req, res) => {
   const ent = entitlementFor(req.identity.account)
-  const { periodStart } = period()
+  const { periodStart } = billingPeriodFor(req.identity.account)
   let used = 0
+  let billingProvider = req.identity.account?.stripeSubscriptionId ? 'stripe' : null
   if (req.identity.account) {
+    if (ent.plan === 'free') {
+      used = req.identity.account.freeStudiesUsed
+    } else {
+      const { rows } = await db.query(
+        `SELECT studies_used FROM usage_period WHERE account_id = $1 AND period_start = $2`,
+        [req.identity.account.id, periodStart],
+      )
+      used = rows[0]?.studies_used ?? 0
+    }
+    const subscriptions = await db.query(
+      `SELECT provider, plan, status, current_period_end
+         FROM billing_subscription WHERE account_id = $1`,
+      [req.identity.account.id],
+    ).catch(() => ({ rows: [] }))
+    billingProvider = billing.preferredEntitlement(subscriptions.rows)?.provider || billingProvider
+  } else if (req.identity.installId) {
+    const installIdentityHash = trialIdentityHash('install', req.identity.installId)
     const { rows } = await db.query(
-      `SELECT studies_used FROM usage_period WHERE account_id = $1 AND period_start = $2`,
-      [req.identity.account.id, periodStart],
+      `SELECT GREATEST(
+          COALESCE((SELECT studies_used FROM anon_install WHERE install_id = $1), 0),
+          COALESCE((SELECT MAX(free_studies_used) FROM free_trial_tombstone WHERE identity_hash = $2), 0)
+        )::int AS studies_used`,
+      [req.identity.installId, installIdentityHash],
     )
     used = rows[0]?.studies_used ?? 0
   }
   res.json({
     anonymous: req.identity.anonymous,
+    accountId: req.identity.account?.id ?? null,
     email: req.identity.account?.email ?? null,
+    billingProvider,
     ...ent,
     used,
-    remaining: Math.max(ent.allowance - used, 0),
-    plans: Object.fromEntries(Object.entries(PLANS).map(([k, v]) =>
-      [k, { label: v.label, priceUsd: v.priceUsd, studiesPerMonth: v.studiesPerMonth }])),
+    remaining: mobile.remainingStudyCount(ent, used, Boolean(req.identity.account)),
+    plans: Object.fromEntries(Object.entries(PLANS).map(([k, v]) => [k, {
+      label: v.label,
+      family: v.family ?? k,
+      priceUsd: v.priceUsd,
+      studiesPerMonth: v.studiesPerMonth,
+      billingInterval: v.billingInterval ?? null,
+      monthlyEquivalentUsd: monthlyPriceUsd(v),
+      annualSavingsUsd: annualSavingsUsd(v),
+      hidden: Boolean(v.hidden),
+    }])),
   })
 }))
 
@@ -116,87 +170,98 @@ app.get('/v1/me', route(async (req, res) => {
  * global brake are enforced identically. Returns null when the caller may
  * proceed, or the response body to send back when they may not.
  */
-async function claimStudy(req, { ent, accountId, periodStart, periodEnd }) {
-  const ceiling = await meter.ceilingStatus(db)
-  if (ceiling.blockEverything) {
-    return { status: 503, body: {
-      error: 'SERVICE_PAUSED',
-      message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
-    } }
-  }
-
-  // THE MIDDLE RUNG, which was computed and then never consulted. Without this
-  // the brake had exactly one setting — 150% of the ceiling — so the first thing
-  // that ever stopped a runaway also stopped every paying customer. At 90% the
-  // FREE tier closes and paid work continues: the people who are paying keep
-  // working, and the tier anyone can open with a fresh uuid is the one that
-  // yields. That ordering is the whole point of having two rungs.
-  if (ceiling.blockNewSignups && !accountId) {
-    return { status: 503, body: {
-      error: 'FREE_TIER_PAUSED',
-      headline: 'Free studies are paused right now.',
-      message: 'More people started studies today than expected. Subscribers are unaffected, and this clears on its own.',
-    } }
-  }
-
-  // Anonymous users get their one lifetime study, tracked against the install.
-  if (!accountId) {
-    const installId = req.identity.installId
-    if (!installId) return { status: 400, body: { error: 'x-install-id header required' } }
-    const { rows } = await db.query(
-      `INSERT INTO anon_install (install_id, studies_used)
-            VALUES ($1, 1)
-       ON CONFLICT (install_id) DO UPDATE SET studies_used = anon_install.studies_used + 1,
-                                             updated_at = now()
-            WHERE anon_install.studies_used < $2
-        RETURNING studies_used`,
-      [installId, ent.lifetimeStudies],
-    )
-    if (rows.length === 0) {
-      return { status: 402, body: { error: 'UPGRADE_REQUIRED', ...upgradePrompt(ent) } }
+async function claimStudy(req, {
+  ent,
+  accountId,
+  periodStart,
+  periodEnd,
+  reservationId,
+  reserveUsd = meter.STUDY_RESERVE_USD,
+}) {
+  return meter.withGlobalSpendLock(db, async (client) => {
+    if (accountId && !(await meter.accountAvailableForSpend(client, accountId))) {
+      return { status: 409, body: {
+        error: 'ACCOUNT_UNAVAILABLE',
+        message: 'This account is being deleted and cannot start new work.',
+      } }
+    }
+    if (reservationId) {
+      const existingReservation = await client.query(
+        `SELECT state FROM study_reservation WHERE id = $1 LIMIT 1`,
+        [reservationId],
+      )
+      if (existingReservation.rows.length) {
+        const retryable = ['held', 'settled'].includes(existingReservation.rows[0].state)
+        return { status: retryable ? 409 : 500, body: {
+          error: retryable ? 'STUDY_IN_PROGRESS' : 'STUDY_RESERVATION_CLOSED',
+          message: retryable
+            ? 'That study is already in progress.'
+            : 'That study attempt is closed. Start it again.',
+        } }
+      }
+    }
+    const ceiling = await meter.ceilingStatus(client)
+    const projected = ceiling.committed + reserveUsd
+    if (projected > ceiling.ceiling * 1.5) {
+      return { status: 503, body: {
+        error: 'SERVICE_PAUSED',
+        message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
+      } }
     }
 
-    /**
-     * A FREE STUDY IN FLIGHT IS STILL MONEY IN FLIGHT.
-     *
-     * anon_install has no money columns, so a free study held no reservation and
-     * the ceiling's in-flight number saw NOTHING of it. Every anonymous study
-     * running right now — the one tier anyone can open with a fresh uuid, and
-     * therefore the only one that can actually run away — was invisible to the
-     * brake until its cost reconciled minutes later. Booked against a reserved
-     * account row so committedSpend() counts it while it is happening.
-     */
-    await db.query(
-      `INSERT INTO usage_period (account_id, period_start, period_end, studies_used, reserved_usd)
-            VALUES ($1, $2, $3, 0, $4)
-       ON CONFLICT (account_id, period_start) DO UPDATE
-              SET reserved_usd = usage_period.reserved_usd + $4,
-                  updated_at   = now()`,
-      [ANON_LEDGER_ACCOUNT, periodStart, periodEnd, meter.STUDY_RESERVE_USD],
-    ).catch(() => {})   // accounting must never refuse a study
+    if (!ent.paying && projected > ceiling.ceiling * 0.9) {
+      return { status: 503, body: {
+        error: 'FREE_TIER_PAUSED',
+        headline: 'Free studies are paused right now.',
+        message: 'More people started studies today than expected. Subscribers are unaffected, and this clears on its own.',
+      } }
+    }
+
+    if (!accountId) {
+      const installId = req.identity.installId
+      if (!installId) return { status: 400, body: { error: 'x-install-id header required' } }
+      const claim = await meter.reserveAnonymousStudy(client, {
+        installId,
+        identityHash: trialIdentityHash('install', installId),
+        lifetimeStudies: ent.lifetimeStudies,
+        periodStart,
+        periodEnd,
+        reservationId,
+        reserveUsd,
+      })
+      return claim.ok
+        ? null
+        : { status: 402, body: { error: 'UPGRADE_REQUIRED', ...upgradePrompt(ent) } }
+    }
+
+    const claim = ent.plan === 'free'
+      ? await meter.reserveLifetimeStudy(client, {
+          accountId,
+          lifetimeStudies: ent.lifetimeStudies,
+          periodStart,
+          periodEnd,
+          reservationId,
+          reserveUsd,
+        })
+      : await meter.reserveStudy(client, {
+          accountId,
+          allowance: ent.allowance,
+          periodStart,
+          periodEnd,
+          reservationId,
+          reserveUsd,
+        })
+    if (!claim.ok) {
+      return { status: 402, body: {
+        error: 'UPGRADE_REQUIRED',
+        used: claim.used,
+        allowance: claim.allowance,
+        ...upgradePrompt(ent, { used: claim.used }),
+      } }
+    }
     return null
-  }
-
-  const claim = await meter.reserveStudy(db, { accountId, allowance: ent.allowance, periodStart, periodEnd })
-  if (!claim.ok) {
-    return { status: 402, body: {
-      error: 'UPGRADE_REQUIRED',
-      used: claim.used,
-      allowance: claim.allowance,
-      ...upgradePrompt(ent, { used: claim.used }),
-    } }
-  }
-  return null
+  })
 }
-
-/**
- * One synthetic account row that carries the free tier's in-flight money.
- *
- * A fixed uuid rather than a real account: it exists only so usage_period has
- * somewhere to hold reservations for work that belongs to no account, which is
- * the only way the ceiling can see a free-tier burst while it is happening.
- */
-const ANON_LEDGER_ACCOUNT = '00000000-0000-0000-0000-000000000001'
 
 const newStudyId = () =>
   `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
@@ -234,50 +299,383 @@ app.post('/v1/analyze', route(async (req, res) => {
 
   const ent = entitlementFor(req.identity.account)
   const accountId = req.identity.account?.id ?? null
-  const { periodStart, periodEnd } = period()
+  const { periodStart, periodEnd } = billingPeriodFor(req.identity.account)
+  const studyId = newStudyId()
 
-  const refused = await claimStudy(req, { ent, accountId, periodStart, periodEnd })
+  const refused = await claimStudy(req, {
+    ent, accountId, periodStart, periodEnd, reservationId: studyId,
+  })
   if (refused) return res.status(refused.status).json(refused.body)
 
-  const studyId = newStudyId()
+  const reservationHeartbeat = setInterval(() => {
+    meter.heartbeatStudyReservation(db, studyId).catch(() => {})
+  }, meter.RESERVATION_HEARTBEAT_MS)
+  reservationHeartbeat.unref?.()
+
   // The claim is written BEFORE the work, and never depends on the work. A cache
   // hit spends nothing and writes no usage rows; inferring ownership from usage
   // meant a cached analysis produced a study its owner could not prove — and
   // being served from cache is the COMMON case, not the rare one.
-  await engine.openStudy(db, {
-    studyId, accountId, installId: req.identity.installId, reference,
-  })
-
   try {
+    await engine.openStudy(db, {
+      studyId, accountId, installId: req.identity.installId, reference,
+    })
     const { analysis, cached } = await engine.runAnalyze(db, {
       text, reference, accountId, studyId, installId: req.identity.installId,
     })
-    if (accountId) {
-      const actualUsd = await engine.studyCost(db, studyId)
-      await meter.settleStudy(db, { accountId, periodStart, actualUsd }).catch(() => {})
-    }
+    await engine.saveStudyAnalysis(db, {
+      studyId,
+      accountId,
+      installId: req.identity.installId,
+      analysis,
+    }).catch(() => {})
+    const actualUsd = await engine.studyCost(db, studyId)
+    await meter.settleStudyReservation(db, {
+      reservationId: studyId,
+      actualUsd,
+    }).catch(() => {})
     res.json({ analysis, studyId, cached })
   } catch (e) {
     // "No result returned" is NOT "no money spent". The fan-out runs up to three
     // calls in parallel and only two are fatal, so a failure here routinely lands
     // AFTER real tokens were billed. Book what was actually spent before handing
     // the credit back, or a retry loop burns money the ceiling never sees.
+    const spent = await engine.studyCost(db, studyId).catch(() => 0)
+    await meter.releaseStudyReservation(db, studyId).catch(() => {})
     if (accountId) {
-      const spent = await engine.studyCost(db, studyId).catch(() => 0)
-      await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
       await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
-    } else if (req.identity.installId) {
-      // THE FREE CREDIT IS THE ONLY ONE HE WILL EVER GET. Spending it on a
-      // crash — a model timeout, a parse failure — and never giving it back
-      // means his single impression of the product is an error message and a
-      // paywall, permanently, with no way to retry. Give it back.
-      await db.query(
-        `UPDATE anon_install SET studies_used = GREATEST(studies_used - 1, 0), updated_at = now()
-          WHERE install_id = $1`, [req.identity.installId]).catch(() => {})
     }
     const code = e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'ANALYSIS_FAILED'
     res.status(code === 'INPUT_TOO_LARGE' ? 413 : 500)
        .json({ error: code, message: e?.message || 'The analysis could not be completed.' })
+  } finally {
+    clearInterval(reservationHeartbeat)
+  }
+}))
+
+// ── Mobile quick study ─────────────────────────────────────────────────────
+// One metered call, one compact answer. The desktop's full analyze + read
+// pipeline remains intact; the phone never runs it just to answer a quick
+// passage question.
+const QUICK_STUDY_TRANSLATIONS = new Set(['kjv', 'asv', 'web', 'ylt', 'esv'])
+const QUICK_REQUEST_ID = /^[a-f0-9-]{20,80}$/i
+const AI_PROCESSING_CONSENT_VERSION = 'operator-ai-processing-v1'
+
+function requireGeneratedStudyAccount(req, res) {
+  if (releaseStage() !== 'full' || req.identity.account) return true
+  res.status(401).json({
+    error: 'ACCOUNT_REQUIRED',
+    message: 'Create or recover your free Operator account before running generated study tools.',
+  })
+  return false
+}
+
+function quickStudyId(req, requestId) {
+  const owner = req.identity.account?.id || req.identity.installId || 'anonymous'
+  const digest = crypto.createHash('sha256').update(`${owner}:${requestId}`).digest('hex').slice(0, 32)
+  return `quick-${digest}`
+}
+
+function guidedStudyId(req, requestId) {
+  const owner = req.identity.account?.id || req.identity.installId || 'anonymous'
+  const digest = crypto.createHash('sha256').update(`${owner}:${requestId}`).digest('hex').slice(0, 32)
+  return `guided-${digest}`
+}
+
+app.post('/v1/quick-study', route(async (req, res) => {
+  if (!requireGeneratedStudyAccount(req, res)) return
+  const { reference, translation, requestId, aiConsentVersion } = req.body || {}
+  const normalizedTranslation = typeof translation === 'string' ? translation.trim().toLowerCase() : ''
+  if (aiConsentVersion !== AI_PROCESSING_CONSENT_VERSION) {
+    return res.status(400).json({
+      error: 'AI_CONSENT_REQUIRED',
+      message: 'Review and accept the current AI-processing disclosure before starting a generated study.',
+    })
+  }
+  if (typeof reference !== 'string' || !reference.trim()) {
+    return res.status(400).json({ error: 'reference is required' })
+  }
+  if (!QUICK_STUDY_TRANSLATIONS.has(normalizedTranslation)) {
+    return res.status(400).json({ error: 'a supported translation is required' })
+  }
+  if (typeof requestId !== 'string' || !QUICK_REQUEST_ID.test(requestId)) {
+    return res.status(400).json({ error: 'a valid requestId is required' })
+  }
+
+  const accountId = req.identity.account?.id ?? null
+  const studyId = quickStudyId(req, requestId)
+  const existing = await db.query(
+    `SELECT state, analysis, document, passage
+       FROM study
+      WHERE id = $1
+        AND (($2::uuid IS NOT NULL AND account_id = $2)
+          OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
+      LIMIT 1`,
+    [studyId, accountId, req.identity.installId || ''],
+  )
+  if (existing.rows[0]?.document && existing.rows[0]?.analysis) {
+    const storedAnalysis = existing.rows[0].analysis
+    return res.json({
+      document: existing.rows[0].document,
+      analysis: storedAnalysis,
+      studyId,
+      passage: existing.rows[0].passage || {
+        reference: storedAnalysis.reference,
+        translation: storedAnalysis.translation || normalizedTranslation,
+        text: storedAnalysis.passageText || '',
+        verses: [],
+        copyright: '',
+      },
+      cached: true,
+      idempotent: true,
+    })
+  }
+  if (existing.rows.length) {
+    const failed = existing.rows[0].state === 'failed'
+    return res.status(failed ? 500 : 409).json({
+      error: failed ? 'QUICK_STUDY_FAILED' : 'STUDY_IN_PROGRESS',
+      message: failed
+        ? 'That lookup did not finish. Start it again.'
+        : 'That Quick Study is still finishing. Give it a moment, then try again.',
+    })
+  }
+
+  let passage
+  try {
+    passage = await mobile.fetchPassage({
+      reference: reference.trim(),
+      translation: normalizedTranslation,
+      esvKey: req.get('x-esv-key') || '',
+    })
+  } catch (e) {
+    return res.status(Number(e?.status) || 502).json({
+      error: e?.code || 'PASSAGE_UNAVAILABLE',
+      message: e?.message || 'That passage could not be loaded.',
+    })
+  }
+
+  try {
+    checkGenerationInput({ text: passage.text, reference: passage.reference })
+  } catch (e) {
+    return res.status(413).json({
+      error: 'INPUT_TOO_LARGE',
+      message: e?.message || 'That passage is too long to study in one go.',
+    })
+  }
+
+  const ent = entitlementFor(req.identity.account)
+  const { periodStart, periodEnd } = billingPeriodFor(req.identity.account)
+  const refused = await claimStudy(req, {
+    ent,
+    accountId,
+    periodStart,
+    periodEnd,
+    reservationId: studyId,
+    reserveUsd: meter.QUICK_STUDY_RESERVE_USD,
+  })
+  if (refused) return res.status(refused.status).json(refused.body)
+
+  const reservationHeartbeat = setInterval(() => {
+    meter.heartbeatStudyReservation(db, studyId).catch(() => {})
+  }, meter.RESERVATION_HEARTBEAT_MS)
+  reservationHeartbeat.unref?.()
+
+  try {
+    await engine.openStudy(db, {
+      studyId, accountId, installId: req.identity.installId, reference: passage.reference,
+    })
+    const result = await engine.runQuickStudy(db, {
+      text: passage.text,
+      reference: passage.reference,
+      translation: passage.translation,
+      accountId,
+      studyId,
+      installId: req.identity.installId,
+    })
+    const saved = await engine.saveStudyDocument(db, {
+      studyId,
+      accountId,
+      installId: req.identity.installId,
+      analysis: result.analysis,
+      document: result.document,
+      level: 'quick',
+      passage,
+    })
+    if (!saved) throw new Error('The Quick Study could not be saved.')
+    const actualUsd = await engine.studyCost(db, studyId)
+    const settled = await meter.settleStudyReservation(db, {
+      reservationId: studyId,
+      actualUsd,
+    })
+    if (!settled) throw new Error('The Quick Study could not be settled safely.')
+    res.json({ ...result, studyId, passage })
+  } catch (e) {
+    const spent = await engine.studyCost(db, studyId).catch(() => 0)
+    await meter.releaseStudyReservation(db, studyId).catch(() => {})
+    await db.query(
+      `UPDATE study SET state = 'failed', updated_at = now()
+        WHERE id = $1 AND state <> 'done'`,
+      [studyId],
+    ).catch(() => {})
+    if (accountId) {
+      await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+    }
+    res.status(500).json({
+      error: 'QUICK_STUDY_FAILED',
+      message: e?.message || 'The quick study could not be completed.',
+    })
+  } finally {
+    clearInterval(reservationHeartbeat)
+  }
+}))
+
+// ── Tablet guided study ────────────────────────────────────────────────────
+// A complete COVENANT-shaped PLAIN study in three parallel bounded calls. It is
+// deeper than the phone lookup without invoking the desktop sermon pipeline.
+app.post('/v1/guided-study', route(async (req, res) => {
+  if (!requireGeneratedStudyAccount(req, res)) return
+  const { reference, translation, requestId, aiConsentVersion } = req.body || {}
+  const normalizedTranslation = typeof translation === 'string' ? translation.trim().toLowerCase() : ''
+  if (aiConsentVersion !== AI_PROCESSING_CONSENT_VERSION) {
+    return res.status(400).json({
+      error: 'AI_CONSENT_REQUIRED',
+      message: 'Review and accept the current AI-processing disclosure before starting a generated study.',
+    })
+  }
+  if (typeof reference !== 'string' || !reference.trim()) {
+    return res.status(400).json({ error: 'reference is required' })
+  }
+  if (!QUICK_STUDY_TRANSLATIONS.has(normalizedTranslation)) {
+    return res.status(400).json({ error: 'a supported translation is required' })
+  }
+  if (typeof requestId !== 'string' || !QUICK_REQUEST_ID.test(requestId)) {
+    return res.status(400).json({ error: 'a valid requestId is required' })
+  }
+
+  const accountId = req.identity.account?.id ?? null
+  const studyId = guidedStudyId(req, requestId)
+  const existing = await db.query(
+    `SELECT state, analysis, document, passage
+       FROM study
+      WHERE id = $1
+        AND (($2::uuid IS NOT NULL AND account_id = $2)
+          OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
+      LIMIT 1`,
+    [studyId, accountId, req.identity.installId || ''],
+  )
+  if (existing.rows[0]?.document && existing.rows[0]?.analysis) {
+    const storedAnalysis = existing.rows[0].analysis
+    return res.json({
+      document: existing.rows[0].document,
+      analysis: storedAnalysis,
+      studyId,
+      passage: existing.rows[0].passage || {
+        reference: storedAnalysis.reference,
+        translation: storedAnalysis.translation || normalizedTranslation,
+        text: storedAnalysis.passageText || '',
+        verses: [],
+        copyright: '',
+      },
+      cached: true,
+      idempotent: true,
+    })
+  }
+  if (existing.rows.length) {
+    const failed = existing.rows[0].state === 'failed'
+    return res.status(failed ? 500 : 409).json({
+      error: failed ? 'GUIDED_STUDY_FAILED' : 'STUDY_IN_PROGRESS',
+      message: failed
+        ? 'That guided study did not finish. Start it again.'
+        : 'That guided study is still finishing. Give it a moment, then try again.',
+    })
+  }
+
+  let passage
+  try {
+    passage = await mobile.fetchPassage({
+      reference: reference.trim(),
+      translation: normalizedTranslation,
+      esvKey: req.get('x-esv-key') || '',
+    })
+  } catch (e) {
+    return res.status(Number(e?.status) || 502).json({
+      error: e?.code || 'PASSAGE_UNAVAILABLE',
+      message: e?.message || 'That passage could not be loaded.',
+    })
+  }
+
+  try {
+    checkGenerationInput({ text: passage.text, reference: passage.reference })
+  } catch (e) {
+    return res.status(413).json({
+      error: 'INPUT_TOO_LARGE',
+      message: e?.message || 'That passage is too long to study in one go.',
+    })
+  }
+
+  const ent = entitlementFor(req.identity.account)
+  const { periodStart, periodEnd } = billingPeriodFor(req.identity.account)
+  const refused = await claimStudy(req, {
+    ent,
+    accountId,
+    periodStart,
+    periodEnd,
+    reservationId: studyId,
+    reserveUsd: meter.GUIDED_STUDY_RESERVE_USD,
+  })
+  if (refused) return res.status(refused.status).json(refused.body)
+
+  const reservationHeartbeat = setInterval(() => {
+    meter.heartbeatStudyReservation(db, studyId).catch(() => {})
+  }, meter.RESERVATION_HEARTBEAT_MS)
+  reservationHeartbeat.unref?.()
+
+  try {
+    await engine.openStudy(db, {
+      studyId, accountId, installId: req.identity.installId, reference: passage.reference,
+    })
+    const result = await engine.runGuidedStudy(db, {
+      text: passage.text,
+      reference: passage.reference,
+      translation: passage.translation,
+      accountId,
+      studyId,
+      installId: req.identity.installId,
+    })
+    const saved = await engine.saveStudyDocument(db, {
+      studyId,
+      accountId,
+      installId: req.identity.installId,
+      analysis: result.analysis,
+      document: result.document,
+      level: 'guided',
+      passage,
+    })
+    if (!saved) throw new Error('The guided study could not be saved.')
+    const actualUsd = await engine.studyCost(db, studyId)
+    const settled = await meter.settleStudyReservation(db, {
+      reservationId: studyId,
+      actualUsd,
+    })
+    if (!settled) throw new Error('The guided study could not be settled safely.')
+    res.json({ ...result, studyId, passage })
+  } catch (e) {
+    const spent = await engine.studyCost(db, studyId).catch(() => 0)
+    await meter.releaseStudyReservation(db, studyId).catch(() => {})
+    await db.query(
+      `UPDATE study SET state = 'failed', updated_at = now()
+        WHERE id = $1 AND state <> 'done'`,
+      [studyId],
+    ).catch(() => {})
+    if (accountId) {
+      await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+    }
+    res.status(500).json({
+      error: 'GUIDED_STUDY_FAILED',
+      message: e?.message || 'The guided study could not be completed.',
+    })
+  } finally {
+    clearInterval(reservationHeartbeat)
   }
 }))
 
@@ -303,10 +701,18 @@ app.post('/v1/read', route(async (req, res) => {
       message: `That analysis is too large to read (${Math.round(analysisSize / 1000)}KB).`,
     })
   }
+  try {
+    checkGenerationInput({ reference })
+  } catch (e) {
+    return res.status(413).json({
+      error: 'INPUT_TOO_LARGE',
+      message: e?.message || 'That passage reference is too long.',
+    })
+  }
 
   const ent = entitlementFor(req.identity.account)
   const accountId = req.identity.account?.id ?? null
-  const { periodStart, periodEnd } = period()
+  const { periodStart, periodEnd } = billingPeriodFor(req.identity.account)
 
   /**
    * ALREADY WRITTEN? THEN IT IS FREE.
@@ -324,6 +730,14 @@ app.post('/v1/read', route(async (req, res) => {
    */
   const alreadyWritten = await engine.cachedDocument(db, analysis, level)
   if (alreadyWritten) {
+    await engine.saveStudyDocument(db, {
+      studyId: priorStudyId,
+      accountId,
+      installId: req.identity.installId,
+      analysis,
+      document: alreadyWritten,
+      level,
+    }).catch(() => {})
     res.setHeader('Content-Type', 'application/x-ndjson')
     res.setHeader('Cache-Control', 'no-cache, no-transform')
     res.write(JSON.stringify({ type: 'done', document: alreadyWritten, cached: true }) + '\n')
@@ -334,8 +748,8 @@ app.post('/v1/read', route(async (req, res) => {
   // charged for, so a client that passes back the studyId it was given rides
   // that same reservation. The id cannot be forged into free work: it only
   // exists because analyze reserved and billed against this very caller, and one
-  // reservation buys exactly one document — a replayed id whose document already
-  // exists falls through and pays again.
+  // reservation buys exactly one document. A replayed or simultaneous request
+  // is refused below without consuming another claim.
   //
   // THE FREE USER RIDES TOO, and must. A free install gets one lifetime study;
   // analyze spends it. If the reading then refused them, every single person who
@@ -348,22 +762,59 @@ app.post('/v1/read', route(async (req, res) => {
   const ridesPriorClaim = await engine.claimStudyForReading(db, {
     studyId: priorStudyId, accountId, installId: req.identity.installId,
   })
+  let freshStudyId = null
 
   if (!ridesPriorClaim) {
-    const refused = await claimStudy(req, { ent, accountId, periodStart, periodEnd })
+    const priorState = await engine.ownedStudyState(db, {
+      studyId: priorStudyId, accountId, installId: req.identity.installId,
+    })
+    if (priorState === 'reading') {
+      return res.status(409).json({
+        error: 'STUDY_IN_PROGRESS',
+        message: 'That reading is already being built. Give it a moment, then open it again.',
+      })
+    }
+    if (priorState === 'done') {
+      return res.status(409).json({
+        error: 'STUDY_ALREADY_FINISHED',
+        message: 'That reading is already finished. Open it from your Library.',
+      })
+    }
+    freshStudyId = newStudyId()
+    const refused = await claimStudy(req, {
+      ent, accountId, periodStart, periodEnd, reservationId: freshStudyId,
+    })
     if (refused) return res.status(refused.status).json(refused.body)
   }
 
   // Reusing the analyze id keeps the fan-out, the document, its retries and the
   // verify pass rolled up as one study in the ledger — which is what makes
   // cost-per-study a measured number rather than an estimate.
-  const studyId = ridesPriorClaim ? priorStudyId : newStudyId()
+  const studyId = ridesPriorClaim ? priorStudyId : freshStudyId
+  if (ridesPriorClaim) {
+    const held = await meter.holdStudyReservationForReading(db, studyId)
+    if (!held) {
+      await engine.resetStudyReadingClaim(db, studyId).catch(() => {})
+      return res.status(409).json({
+        error: 'STUDY_RESERVATION_UNAVAILABLE',
+        message: 'That study could not resume safely. Open it from your Library and try again.',
+      })
+    }
+  }
   if (!ridesPriorClaim) {
-    await engine.openStudy(db, { studyId, accountId, installId: req.identity.installId, reference })
-    await engine.claimStudyForReading(db, { studyId, accountId, installId: req.identity.installId })
+    try {
+      await engine.openStudy(db, { studyId, accountId, installId: req.identity.installId, reference })
+      const opened = await engine.claimStudyForReading(db, {
+        studyId, accountId, installId: req.identity.installId,
+      })
+      if (!opened) throw new Error('The reading claim could not be opened.')
+    } catch (error) {
+      await meter.releaseStudyReservation(db, studyId).catch(() => {})
+      throw error
+    }
   }
   let settled = false
-  const release = async () => {
+  const release = async (actualUsd) => {
     // A reading that failed must leave the claim rideable again, or a man pays a
     // second study to retry something he never received.
     //
@@ -377,47 +828,30 @@ app.post('/v1/read', route(async (req, res) => {
     // claim that has not already been retried too many times.
     const state = await engine.releaseStudyForRetry(db, studyId).catch(() => null)
 
-    if (state === 'stranded') {
-      /**
-       * THE REFUND IS BOOKED ON THE STUDY, so it can only ever happen once.
-       *
-       * Two ways the naive version leaked. First, releaseStudy() subtracts a
-       * $0.75 hold as well as the study — but a RIDE-ALONG holds no reservation,
-       * because /v1/analyze already settled it, so releasing here silently ate
-       * some other request's in-flight money and made the ceiling read low.
-       * Second, an anonymous caller could strand a study on purpose and get his
-       * lifetime credit back, over and over, spending real Opus tokens on every
-       * attempt — free studies with extra steps.
-       *
-       * The conditional UPDATE is the guard: a study can be marked refunded
-       * exactly once, and only the caller that wins it gives anything back.
-       */
-      const { rows: refundable } = await db.query(
-        `UPDATE study SET refunded_at = now()
-          WHERE id = $1 AND refunded_at IS NULL RETURNING id`, [studyId]).catch(() => ({ rows: [] }))
+    await meter.settleStudyReservation(db, {
+      reservationId: studyId,
+      actualUsd,
+    })
 
-      if (refundable.length) {
-        if (accountId) {
-          // studies_used only. The hold is either already settled (ride-along)
-          // or released by the sweep; subtracting it here would double-release.
-          await db.query(
-            `UPDATE usage_period SET studies_used = GREATEST(studies_used - 1, 0), updated_at = now()
-              WHERE account_id = $1 AND period_start = $2`,
-            [accountId, periodStart]).catch(() => {})
-        } else if (req.identity.installId) {
-          await db.query(
-            `UPDATE anon_install SET studies_used = GREATEST(studies_used - 1, 0), updated_at = now()
-              WHERE install_id = $1`, [req.identity.installId]).catch(() => {})
-        }
-      }
+    if (state === 'stranded') {
+      await meter.refundStudyReservation(db, studyId).catch(() => {})
       settled = true
       return
     }
 
-    // Nothing to give back if this reading was riding a claim it did not make.
-    if (settled || !accountId || ridesPriorClaim) return
+    // A ridden claim stays charged and can be retried. Its read hold is settled
+    // above so the global ceiling no longer counts work that has stopped.
+    if (settled || ridesPriorClaim) {
+      settled = true
+      return
+    }
     settled = true
-    await meter.releaseStudy(db, { accountId, periodStart }).catch(() => {})
+    await db.query(
+      `UPDATE study SET state = 'stranded', updated_at = now()
+        WHERE id = $1 AND state = 'analyzed'`,
+      [studyId],
+    ).catch(() => {})
+    await meter.refundStudyReservation(db, studyId).catch(() => {})
   }
 
   // NDJSON. No compression on this route — it is the classic way a live stream
@@ -432,6 +866,12 @@ app.post('/v1/read', route(async (req, res) => {
   // A ~63-second silence precedes the first section. Without a heartbeat an
   // idle-timeout somewhere in the path will kill a request that is working fine.
   const beat = setInterval(() => send({ type: 'ping' }), 15000)
+  const reservationHeartbeat = studyId
+    ? setInterval(() => {
+        meter.heartbeatStudyReservation(db, studyId).catch(() => {})
+      }, meter.RESERVATION_HEARTBEAT_MS)
+    : null
+  reservationHeartbeat?.unref?.()
 
   // If the client hangs up, stop pretending the study is still wanted.
   let aborted = false
@@ -440,9 +880,10 @@ app.post('/v1/read', route(async (req, res) => {
   // Charge the DELTA, not the total. On a ride-along the analyze half is already
   // in usage_event under this same study id and has already been booked — summing
   // the whole study here would bill that half twice.
-  const spentBefore = accountId ? await engine.studyCost(db, studyId) : 0
+  let spentBefore = 0
 
   try {
+    spentBefore = accountId ? await engine.studyCost(db, studyId) : 0
     const doc = await engine.runPlainRead(db, {
       analysis, requestedReference: reference, level, accountId, studyId,
       installId: req.identity.installId,
@@ -455,23 +896,21 @@ app.post('/v1/read', route(async (req, res) => {
     })
 
     clearInterval(beat)
+    if (reservationHeartbeat) clearInterval(reservationHeartbeat)
 
-    if (accountId) {
-      settled = true
-      const actualUsd = (await engine.studyCost(db, studyId)) - spentBefore
-      // A fresh claim still holds its $0.75 reservation and must release it.
-      // A ride-along's hold was released when analyze settled.
-      await (ridesPriorClaim
-        ? meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd })
-        : meter.settleStudy(db, { accountId, periodStart, actualUsd })
-      ).catch(() => {})
-    }
+    const actualUsd = accountId ? (await engine.studyCost(db, studyId)) - spentBefore : 0
+    await meter.settleStudyReservation(db, {
+      reservationId: studyId,
+      actualUsd,
+    })
+    settled = true
 
-    await engine.finishStudy(db, studyId).catch(() => {})
+    await engine.finishStudy(db, studyId, { analysis, document: doc, level }).catch(() => {})
     send({ type: 'done', document: doc, studyId })
     res.end()
   } catch (e) {
     clearInterval(beat)
+    if (reservationHeartbeat) clearInterval(reservationHeartbeat)
 
     /**
      * DID IT ACTUALLY FAIL?
@@ -488,20 +927,23 @@ app.post('/v1/read', route(async (req, res) => {
      */
     const salvaged = await engine.cachedDocument(db, analysis, level).catch(() => null)
     if (salvaged) {
-      if (accountId) {
-        settled = true
-        const actualUsd = (await engine.studyCost(db, studyId).catch(() => 0)) - spentBefore
-        await (ridesPriorClaim
-          ? meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd })
-          : meter.settleStudy(db, { accountId, periodStart, actualUsd })
-        ).catch(() => {})
-      }
-      await engine.finishStudy(db, studyId).catch(() => {})
+      const actualUsd = accountId
+        ? (await engine.studyCost(db, studyId).catch(() => 0)) - spentBefore
+        : 0
+      await meter.settleStudyReservation(db, {
+        reservationId: studyId,
+        actualUsd,
+      })
+      settled = true
+      await engine.finishStudy(db, studyId, { analysis, document: salvaged, level }).catch(() => {})
       send({ type: 'done', document: salvaged, studyId, salvaged: true })
       return res.end()
     }
 
-    await release()   // a study that never ran must not eat the allowance
+    const actualUsd = accountId
+      ? Math.max((await engine.studyCost(db, studyId).catch(() => 0)) - spentBefore, 0)
+      : 0
+    await release(actualUsd)   // a study that never ran must not eat the allowance
     const code = e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'GENERATION_FAILED'
     send({ type: 'error', code, message: e?.message || 'The reading could not be completed.' })
     res.end()
@@ -516,12 +958,13 @@ app.post('/v1/read', route(async (req, res) => {
  * make that sentence false.
  *
  * What bounds it instead of an allowance:
- *   - a hard daily cap per caller, so a loop cannot run all night
- *   - the global ceiling, checked first like every other spending route
- *   - the document must be supplied, so there is nothing to answer FROM unless
- *     the reader already has a reading
+ *   - a completed, server-owned study is required
+ *   - free users get five follow-ups for the lifetime study
+ *   - subscribed and comp accounts have a hard daily cap
+ *   - the global ceiling is checked first like every other spending route
  */
 const MAX_ASKS_PER_DAY = 100
+const FREE_LIFETIME_ASKS = 5
 /**
  * A real reading is ~20KB. 200K was set "generously" and that was the wrong
  * instinct on a route that runs an Opus call 100 times a day per install id:
@@ -531,14 +974,41 @@ const MAX_ASKS_PER_DAY = 100
 const MAX_ASK_CHARS = 60_000
 
 app.post('/v1/ask', route(async (req, res) => {
-  const { doc, analysis, question, history, vaultNotes } = req.body || {}
+  if (!requireGeneratedStudyAccount(req, res)) return
+  const { studyId, question, history, vaultNotes, aiConsentVersion } = req.body || {}
+  if (aiConsentVersion !== AI_PROCESSING_CONSENT_VERSION) {
+    return res.status(400).json({
+      error: 'AI_CONSENT_REQUIRED',
+      message: 'Review and accept the current AI-processing disclosure before sending a question.',
+    })
+  }
   if (!question || !String(question).trim()) return res.status(400).json({ error: 'question is required' })
-  if (!doc) return res.status(400).json({ error: 'doc is required' })
+  if (!studyId) return res.status(400).json({ error: 'studyId is required' })
 
-  // BOUND THE INPUT. doc, analysis and history are all client-supplied and all
-  // go into the prompt, so their size is a cost the sender picks and Cole pays.
-  // Without this the route is an open Opus proxy with a nice name.
-  const payloadChars = JSON.stringify({ doc, analysis, history, vaultNotes }).length
+  const accountId = req.identity.account?.id ?? null
+  const installId = req.identity.installId
+  const owned = await db.query(
+    `SELECT analysis, document
+       FROM study
+      WHERE id = $1 AND document IS NOT NULL
+        AND (($2::uuid IS NOT NULL AND account_id = $2)
+          OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
+      LIMIT 1`,
+    [studyId, accountId, installId || ''],
+  )
+  if (!owned.rows.length) {
+    return res.status(404).json({
+      error: 'STUDY_NOT_FOUND',
+      message: 'Open a finished study from your library, then ask from that reading.',
+    })
+  }
+  const doc = owned.rows[0].document
+  const analysis = owned.rows[0].analysis
+
+  // The document and analysis now come from the owned server row, not from the
+  // request. History and optional grounding notes are still client-supplied and
+  // therefore remain bounded before they can become prompt spend.
+  const payloadChars = JSON.stringify({ history, vaultNotes }).length
   if (payloadChars > MAX_ASK_CHARS) {
     return res.status(413).json({ error: 'INPUT_TOO_LARGE', message: 'That reading is too large to ask about.' })
   }
@@ -546,46 +1016,175 @@ app.post('/v1/ask', route(async (req, res) => {
     return res.status(413).json({ error: 'INPUT_TOO_LARGE', message: 'That question is too long.' })
   }
 
-  // An ask must be ABOUT a study someone paid for. An install that has never
-  // run one has nothing to ask about, and letting it through made this the
-  // cheapest way to spend Cole's key without ever taking a credit.
-  if (!req.identity.account) {
-    const { rows } = await db.query(
-      `SELECT 1 FROM study WHERE install_id = $1 LIMIT 1`, [req.identity.installId ?? ''])
-    if (rows.length === 0) {
-      return res.status(402).json({
-        error: 'UPGRADE_REQUIRED',
-        headline: 'Run a study first.',
-        message: 'Questions are answered from a reading. Study a passage and then ask about it.',
+  const ent = entitlementFor(req.identity.account)
+  const recurringAskAccess = Boolean(req.identity.account && ent.paying)
+  const askReservationId = `ask-${newStudyId()}`
+  const claim = await meter.reserveAsk(db, {
+    id: askReservationId,
+    accountId,
+    installId,
+    recurringAccess: recurringAskAccess,
+    freeLimit: FREE_LIFETIME_ASKS,
+    dailyLimit: MAX_ASKS_PER_DAY,
+  })
+  if (!claim.ok) {
+    if (claim.reason === 'service-paused' || claim.reason === 'free-tier-paused') {
+      return res.status(503).json({
+        error: claim.reason === 'service-paused' ? 'SERVICE_PAUSED' : 'FREE_TIER_PAUSED',
+        message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
       })
     }
-  }
-
-  const accountId = req.identity.account?.id ?? null
-  const installId = req.identity.installId
-
-  const ceiling = await meter.ceilingStatus(db)
-  if (ceiling.blockEverything) {
-    return res.status(503).json({ error: 'SERVICE_PAUSED', message: 'The Operator is paused for a moment.' })
-  }
-
-  const asked = await engine.askCountToday(db, { accountId, installId })
-  if (asked >= MAX_ASKS_PER_DAY) {
-    return res.status(429).json({
+    if (claim.reason === 'account-unavailable') return res.status(409).json({
+      error: 'ACCOUNT_UNAVAILABLE',
+      message: 'This account is being deleted and cannot start new work.',
+    })
+    if (claim.reason === 'daily-limit') return res.status(429).json({
       error: 'ASK_LIMIT',
       headline: "That's a lot of questions for one day.",
       message: 'The limit resets in a few hours. Everything you have studied stays available.',
     })
+    return res.status(429).json({
+      error: 'FREE_ASK_LIMIT',
+      headline: 'You have worked this free study all the way through.',
+      message: `Your ${FREE_LIFETIME_ASKS} free follow-up questions are used. The study and every answer stay in your library.`,
+    })
   }
 
+  const reservationHeartbeat = setInterval(() => {
+    meter.heartbeatAskReservation(db, askReservationId).catch(() => {})
+  }, meter.RESERVATION_HEARTBEAT_MS)
+  reservationHeartbeat.unref?.()
   try {
     const answer = await engine.runAsk(db, {
       doc, analysis, question, history, vaultNotes, accountId, installId,
     })
+    await meter.settleAskReservation(db, askReservationId)
     res.json(answer)
   } catch (e) {
+    await meter.releaseAskReservation(db, askReservationId).catch(() => {})
     res.status(500).json({ error: 'ASK_FAILED', message: e?.message || 'That question could not be answered.' })
+  } finally {
+    clearInterval(reservationHeartbeat)
   }
+}))
+
+const SERMON_AGENT_ROLES = new Set(['exegetical', 'theological', 'homiletical', 'scholar'])
+
+app.post('/v1/sermon-assist', route(async (req, res) => {
+  if (!requireGeneratedStudyAccount(req, res)) return
+  const { studyId, agent, question, history, aiConsentVersion } = req.body || {}
+  if (aiConsentVersion !== AI_PROCESSING_CONSENT_VERSION) {
+    return res.status(400).json({
+      error: 'AI_CONSENT_REQUIRED',
+      message: 'Review and accept the current specialist-agent disclosure before sending a question.',
+    })
+  }
+  if (!studyId) return res.status(400).json({ error: 'studyId is required' })
+  if (!SERMON_AGENT_ROLES.has(agent)) return res.status(400).json({ error: 'a supported agent is required' })
+  if (!question || !String(question).trim()) return res.status(400).json({ error: 'question is required' })
+  if (String(question).length > 2000) {
+    return res.status(413).json({ error: 'INPUT_TOO_LARGE', message: 'That question is too long.' })
+  }
+  if (JSON.stringify({ history }).length > MAX_ASK_CHARS) {
+    return res.status(413).json({ error: 'INPUT_TOO_LARGE', message: 'That agent conversation is too large.' })
+  }
+
+  const accountId = req.identity.account?.id ?? null
+  const installId = req.identity.installId
+  const owned = await db.query(
+    `SELECT analysis, document
+       FROM study
+      WHERE id = $1 AND document IS NOT NULL
+        AND (($2::uuid IS NOT NULL AND account_id = $2)
+          OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
+      LIMIT 1`,
+    [studyId, accountId, installId || ''],
+  )
+  if (!owned.rows.length) {
+    return res.status(404).json({
+      error: 'STUDY_NOT_FOUND',
+      message: 'Open a finished study from your library, then ask a specialist from that study.',
+    })
+  }
+
+  const ent = entitlementFor(req.identity.account)
+  const recurringAskAccess = Boolean(req.identity.account && ent.paying)
+  const askReservationId = `sermon-assist-${newStudyId()}`
+  const claim = await meter.reserveAsk(db, {
+    id: askReservationId,
+    accountId,
+    installId,
+    recurringAccess: recurringAskAccess,
+    freeLimit: FREE_LIFETIME_ASKS,
+    dailyLimit: MAX_ASKS_PER_DAY,
+  })
+  if (!claim.ok) {
+    if (claim.reason === 'service-paused' || claim.reason === 'free-tier-paused') {
+      return res.status(503).json({
+        error: claim.reason === 'service-paused' ? 'SERVICE_PAUSED' : 'FREE_TIER_PAUSED',
+        message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
+      })
+    }
+    if (claim.reason === 'account-unavailable') return res.status(409).json({
+      error: 'ACCOUNT_UNAVAILABLE',
+      message: 'This account is being deleted and cannot start new work.',
+    })
+    if (claim.reason === 'daily-limit') return res.status(429).json({
+      error: 'ASK_LIMIT',
+      message: 'The specialist-question limit resets in a few hours. Your study and agent threads stay available.',
+    })
+    return res.status(429).json({
+      error: 'FREE_ASK_LIMIT',
+      message: `Your ${FREE_LIFETIME_ASKS} included follow-up questions are used. The study and every answer stay in your library.`,
+    })
+  }
+
+  const reservationHeartbeat = setInterval(() => {
+    meter.heartbeatAskReservation(db, askReservationId).catch(() => {})
+  }, meter.RESERVATION_HEARTBEAT_MS)
+  reservationHeartbeat.unref?.()
+  try {
+    const result = await engine.runSermonAssist(db, {
+      agent,
+      doc: owned.rows[0].document,
+      analysis: owned.rows[0].analysis,
+      question,
+      history,
+      accountId,
+      installId,
+    })
+    await meter.settleAskReservation(db, askReservationId)
+    res.json(result)
+  } catch (error) {
+    await meter.releaseAskReservation(db, askReservationId).catch(() => {})
+    res.status(500).json({
+      error: 'SERMON_ASSIST_FAILED',
+      message: error?.message || 'That specialist could not answer right now.',
+    })
+  } finally {
+    clearInterval(reservationHeartbeat)
+  }
+}))
+
+app.get('/v1/studies/:id/commentary', route(async (req, res) => {
+  const accountId = req.identity.account?.id
+  if (!accountId) {
+    return res.status(401).json({ error: 'ACCOUNT_REQUIRED', message: 'Link or activate this device first.' })
+  }
+  const { rows } = await db.query(
+    `SELECT reference, analysis
+       FROM study
+      WHERE id = $1 AND account_id = $2 AND document IS NOT NULL
+      LIMIT 1`,
+    [req.params.id, accountId],
+  )
+  if (!rows.length) return res.status(404).json({ error: 'STUDY_NOT_FOUND' })
+  const analysis = rows[0].analysis || {}
+  res.json(await retrieveCommentary({
+    reference: rows[0].reference,
+    passageText: analysis.passageText || '',
+    mainTheme: analysis.mainTheme || '',
+  }))
 }))
 
 // ── Beta feedback ───────────────────────────────────────────────────────────
@@ -603,7 +1202,7 @@ app.post('/v1/feedback', route(async (req, res) => {
   if (!text) return res.status(400).json({ error: 'body is required' })
   if (text.length > 8000) return res.status(413).json({ error: 'that is too long to submit' })
 
-  const CATEGORIES = new Set(['Bug', 'Feature', 'UX', 'General'])
+  const CATEGORIES = new Set(['Bug', 'Feature', 'UX', 'General', 'AI Report'])
   const { rows } = await db.query(
     `INSERT INTO feedback (name, category, body, version, platform, install_id, account_id)
           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at`,
@@ -629,7 +1228,7 @@ app.post('/v1/feedback', route(async (req, res) => {
  * or a beta code holder, since comp is not for sale.
  */
 app.get('/v1/feedback', route(async (req, res) => {
-  if (req.identity.account?.plan !== 'comp') {
+  if (!req.identity.account?.isAdmin) {
     return res.status(403).json({ error: 'FORBIDDEN' })
   }
   const limit = Math.min(Number(req.query.limit) || 50, 200)
@@ -660,7 +1259,7 @@ app.get('/v1/feedback', route(async (req, res) => {
  * Comp accounts only, same as the feedback feed.
  */
 app.get('/v1/corpus', route(async (req, res) => {
-  if (req.identity.account?.plan !== 'comp') {
+  if (!req.identity.account?.isAdmin) {
     return res.status(403).json({ error: 'FORBIDDEN' })
   }
 
@@ -670,7 +1269,8 @@ app.get('/v1/corpus', route(async (req, res) => {
     db.query(
       `SELECT reference, COUNT(DISTINCT study_id)::int AS studies
          FROM usage_event
-        WHERE reference IS NOT NULL AND label LIKE 'analyze%'
+        WHERE reference IS NOT NULL
+          AND (label LIKE 'analyze%' OR label IN ('quick-study', 'guided-study'))
         GROUP BY reference
         ORDER BY studies DESC, reference
         LIMIT 200`),
@@ -718,6 +1318,25 @@ app.post('/v1/redeem', route(async (req, res) => {
   if (!raw) return res.status(400).json({ error: 'code required' })
   if (!installId) return res.status(400).json({ error: 'x-install-id header required' })
 
+  const refuse = () => res.status(404).json({
+    error: 'INVALID_CODE',
+    message: "That code isn't valid. Check it and try again.",
+  })
+
+  if (isPurchaseCode(raw)) {
+    const purchased = await claimPurchasedAccount(db, { code: raw, installId })
+    if (!purchased) return refuse()
+    const { token } = await auth.issueDeviceToken(db, {
+      accountId: purchased.id, installId, label: 'Website purchase',
+    })
+    return res.json({
+      token,
+      accountId: purchased.id,
+      ...entitlementFor(purchased),
+      label: `${PLANS[purchased.plan]?.label || 'Paid'} subscription`,
+    })
+  }
+
   const { rows } = await db.query(
     `SELECT code, plan, label, uses_max, uses_count, revoked_at
        FROM access_code WHERE code = $1`, [raw])
@@ -725,10 +1344,6 @@ app.post('/v1/redeem', route(async (req, res) => {
 
   // One message for "wrong" and "revoked" and "used up", on purpose: a distinct
   // reply for each turns this endpoint into an oracle for guessing codes.
-  const refuse = () => res.status(404).json({
-    error: 'INVALID_CODE',
-    message: "That code isn't valid. Check it and try again.",
-  })
   if (!code || code.revoked_at) return refuse()
 
   // Already redeemed on this install — hand back a token rather than refusing,
@@ -773,11 +1388,13 @@ app.post('/v1/redeem', route(async (req, res) => {
   // anonymous on every request. Caught end to end, not by a unit test.
   const { token } = await auth.issueDeviceToken(db, { accountId, installId, label: code.label || 'Comp' })
   const { rows: acct } = await db.query(`SELECT plan, status FROM account WHERE id = $1`, [accountId])
-  res.json({ token, ...entitlementFor(acct[0]), label: code.label ?? null })
+  res.json({ token, accountId, ...entitlementFor(acct[0]), label: code.label ?? null })
 }))
 
-// ── Stripe ──────────────────────────────────────────────────────────────────
-require('./stripe').mount(app, db)
+// ── Stripe + mobile account surfaces ────────────────────────────────────────
+stripeApi.mount(app, db)
+mobile.mount(app, db, auth, { cancelStripeSubscriptions: stripeApi.cancelAccountSubscriptions })
+iap.mount(app, db)
 
 /**
  * The last stop for anything route() caught.
@@ -788,6 +1405,7 @@ require('./stripe').mount(app, db)
  * simply closed rather than corrupted with a JSON error object appended to a
  * half-written document.
  */
+app.use(iap.errorMiddleware)
 app.use((err, _req, res, _next) => {
   console.error('[route] unhandled:', err?.stack || err?.message || err)
   if (res.headersSent) return res.end()
@@ -813,6 +1431,18 @@ setInterval(() => {
   meter.sweepStaleReservations(db)
     .then((n) => { if (n) console.log(`[meter] swept ${n} stale reservation(s)`) })
     .catch((e) => console.error('[meter] sweep failed:', e.message))
+}, 5 * 60 * 1000).unref()
+
+setInterval(() => {
+  purgeExpiredRegistrationCodes(db)
+    .then((n) => { if (n) console.log(`[registration] purged ${n} expired code record(s)`) })
+    .catch((e) => console.error('[registration] retention sweep failed:', e.message))
+}, 5 * 60 * 1000).unref()
+
+setInterval(() => {
+  processMarketingDeletionOutbox(db)
+    .then(({ completed }) => { if (completed) console.log(`[mailchimp] completed ${completed} deletion job(s)`) })
+    .catch((e) => console.error('[mailchimp] deletion sweep failed:', e.message))
 }, 5 * 60 * 1000).unref()
 
 const port = process.env.PORT || 8080

@@ -55,7 +55,7 @@ function parseModelJSON(res) {
   try {
     return JSON.parse(raw)
   } catch (e) {
-    console.error('[parseModelJSON] failed:', e.message, '| excerpt:', raw.slice(Math.max(0, raw.length - 300)))
+    console.error('[parseModelJSON] failed:', e.message, `| payload length: ${raw.length}`)
     throw new Error('The model returned malformed data — please try again.')
   }
 }

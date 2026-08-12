@@ -7,7 +7,15 @@
 //
 //   node server/src/test-entitlement.js
 
-const { PLANS, TOPUP, entitlementFor, upgradePrompt, perStudy } = require('./entitlement')
+const {
+  PLANS,
+  TOPUP,
+  entitlementFor,
+  upgradePrompt,
+  perStudy,
+  monthlyPriceUsd,
+  annualSavingsUsd,
+} = require('./entitlement')
 
 let pass = 0
 let fail = 0
@@ -38,7 +46,7 @@ console.log('\nTHE PRICING LADDER POINTS THE RIGHT WAY')
     viaTopups > PLANS.heavy.priceUsd, `$${viaTopups} vs $${PLANS.heavy.priceUsd}`)
 }
 
-console.log('\nEVERY TIER SURVIVES A USER WHO MAXES IT OUT')
+console.log('\nEVERY MONTHLY TIER SURVIVES A USER WHO MAXES IT OUT')
 {
   // $0.42 is the upper-bound estimate for a cold study; Stripe takes 2.9% + 30c
   // plus the 0.7% Billing fee. If a tier is profitable here it is profitable in
@@ -50,6 +58,35 @@ console.log('\nEVERY TIER SURVIVES A USER WHO MAXES IT OUT')
     const net = p.priceUsd - stripe - p.studiesPerMonth * COST
     ok(`${p.label} is profitable at 100% usage`, net > 0,
       `net $${net.toFixed(2)}`)
+  }
+
+  for (const key of ['starter_annual', 'standard_annual', 'heavy_annual']) {
+    const p = PLANS[key]
+    const stripe = p.priceUsd * 0.029 + 0.30 + p.priceUsd * 0.007
+    const net = p.priceUsd - stripe - p.studiesPerMonth * 12 * COST
+    ok(`${p.label} annual is profitable at 100% usage all year`, net > 0,
+      `net $${net.toFixed(2)}`)
+  }
+}
+
+console.log('\nANNUAL BILLING NEVER BECOMES AN ANNUAL USAGE BUCKET')
+{
+  const expected = {
+    starter: { annual: 300, monthly: 25, saving: 60 },
+    standard: { annual: 500, monthly: 500 / 12, saving: 100 },
+    heavy: { annual: 1650, monthly: 137.5, saving: 150 },
+  }
+  for (const [family, values] of Object.entries(expected)) {
+    const monthly = PLANS[family]
+    const annual = PLANS[`${family}_annual`]
+    ok(`${annual.label} annual charges $${values.annual} once a year`,
+      annual.priceUsd === values.annual && annual.billingInterval === 'year')
+    ok(`${annual.label} annual keeps ${monthly.studiesPerMonth} studies each month`,
+      annual.studiesPerMonth === monthly.studiesPerMonth)
+    ok(`${annual.label} annual has the intended monthly equivalent`,
+      Math.abs(monthlyPriceUsd(annual) - values.monthly) < 1e-9)
+    ok(`${annual.label} annual saves $${values.saving} against twelve monthly payments`,
+      annualSavingsUsd(annual) === values.saving)
   }
 }
 
@@ -79,6 +116,11 @@ console.log('\nA PAYING ACCOUNT GETS WHAT IT PAID FOR')
   ok('paying is recognised', e.paying)
   ok('the allowance matches the plan', e.allowance === PLANS.standard.studiesPerMonth)
   ok('the per-study rate is exposed', Math.abs(e.perStudyUsd - 50 / 80) < 1e-9)
+
+  const annual = entitlementFor({ plan: 'standard_annual', status: 'active' })
+  ok('annual billing is recognised as paying', annual.paying)
+  ok('annual billing exposes the same monthly allowance', annual.allowance === 80)
+  ok('annual billing is named plainly', annual.billingInterval === 'year' && /annual/.test(annual.label))
 }
 
 console.log('\nTHE UPGRADE PROMPT LEADS WITH WHAT HE STILL HAS')
@@ -98,6 +140,10 @@ console.log('\nTHE UPGRADE PROMPT LEADS WITH WHAT HE STILL HAS')
   const top = upgradePrompt(entitlementFor({ plan: 'heavy', status: 'active' }))
   ok('the top tier is not told to upgrade to nothing',
     !top.actions.some(a => a.kind === 'upgrade'))
+
+  const annual = upgradePrompt(entitlementFor({ plan: 'starter_annual', status: 'active' }))
+  ok('an annual upgrade stays annual',
+    annual.actions.some(a => a.kind === 'upgrade' && a.plan === 'standard_annual'))
 }
 
 console.log('\nNOTHING AUTO-CHARGES')

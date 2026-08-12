@@ -937,6 +937,35 @@ async function main() {
     assert.doesNotMatch(doc.situation.soWhat, /answer to frightened people/i)
   })
 
+  await test('the last retry repairs a structural outline heading that only drifts into second person', async () => {
+    const bad = rawDoc()
+    bad.outline.units[0].heading =
+      'v. 10 — the core claim: the rescue is grace, received by trust, and it did not come from you'
+    const { createClient, calls } = scriptedClient([bad, bad])
+
+    const doc = await plainRead({
+      analysis: ANALYSIS,
+      apiKey: 'test-key',
+      createClient,
+      verify: false,
+    })
+
+    assert.strictEqual(calls.length, 2, 'the repair does not add a third model call')
+    assert.match(doc.outline.units[0].heading, /was not self-generated/i)
+    assert.doesNotMatch(doc.outline.units[0].heading, /\byou\b/i)
+  })
+
+  await test('the last retry does not launder a non-structural second-person slogan', async () => {
+    const bad = rawDoc()
+    bad.outline.units[0].heading = 'You can do all things through Christ'
+    const { createClient } = scriptedClient([bad, bad])
+
+    await assert.rejects(
+      () => plainRead({ analysis: ANALYSIS, apiKey: 'test-key', createClient, verify: false }),
+      (err) => err instanceof PlainReadValidationError && /exhorts the reader/i.test(err.message)
+    )
+  })
+
   /* ---------------------------------------------------------------- *
    * summary
    * ---------------------------------------------------------------- */

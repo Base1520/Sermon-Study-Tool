@@ -7,6 +7,7 @@
 //   node server/src/test-ridealong.js
 
 const meter = require('./meter')
+const engine = require('./engine')
 
 let pass = 0
 let fail = 0
@@ -21,10 +22,12 @@ function fakeDb() {
   const periods = new Map()
   const events = []            // { study_id, account_id, label, usd }
   const accounts = new Map()   // id -> { topup_studies }
+  const studies = new Map()
   let queue = Promise.resolve()
   const api = {
-    _periods: periods, _events: events, _accounts: accounts,
+    _periods: periods, _events: events, _accounts: accounts, _studies: studies,
     setTopUp: (id, n) => accounts.set(id, { topup_studies: n }),
+    setStudy: (id, study) => studies.set(id, { id, ...study }),
     row: (a, s) => periods.get(a + '|' + s),
     addEvent: (e) => events.push(e),
     query(sql, params) { queue = queue.then(() => run(sql, params)); return queue },
@@ -32,6 +35,25 @@ function fakeDb() {
   return api
 
   function run(sql, p) {
+    if (/SELECT id FROM account/.test(sql) && /deleting_at IS NULL/.test(sql)) {
+      return { rows: [{ id: p[0] }], rowCount: 1 }
+    }
+    if (/UPDATE study\s+SET state = 'reading'/.test(sql)) {
+      const row = studies.get(p[0])
+      const owns = /account_id = \$2/.test(sql)
+        ? row?.account_id === p[1]
+        : row?.install_id === p[1] && !row?.account_id
+      if (!row || !owns || row.state !== 'analyzed') return { rows: [], rowCount: 0 }
+      row.state = 'reading'
+      return { rows: [{ id: row.id }], rowCount: 1 }
+    }
+    if (/SELECT state FROM study/.test(sql)) {
+      const row = studies.get(p[0])
+      const owns = /account_id = \$2/.test(sql)
+        ? row?.account_id === p[1]
+        : row?.install_id === p[1] && !row?.account_id
+      return { rows: row && owns ? [{ state: row.state }] : [] }
+    }
     if (/INSERT INTO usage_period/.test(sql)) {
       const [acct, start, , allowance, reserve] = p
       const k = acct + '|' + start
@@ -167,6 +189,26 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
        (await studyBelongsTo(db, 'study-C', { accountId: ACCT })) === false)
     ok('an invented study id is refused',
        (await studyBelongsTo(db, 'no-such-study', { accountId: ACCT })) === false)
+  }
+
+  console.log('\nSIMULTANEOUS READS NEVER BUY A SECOND STUDY')
+  {
+    const db = fakeDb()
+    db.setStudy('study-race', { account_id: ACCT, install_id: 'install-1', state: 'analyzed' })
+    const [first, second] = await Promise.all([
+      engine.claimStudyForReading(db, { studyId: 'study-race', accountId: ACCT }),
+      engine.claimStudyForReading(db, { studyId: 'study-race', accountId: ACCT }),
+    ])
+    ok('exactly one request takes the reading claim', [first, second].filter(Boolean).length === 1)
+    ok('the losing request sees work already in progress',
+      await engine.ownedStudyState(db, { studyId: 'study-race', accountId: ACCT }) === 'reading')
+    ok('no new allowance was consumed by the loser', db._periods.size === 0)
+
+    db._studies.get('study-race').state = 'done'
+    ok('a finished replay is distinguishable from a missing id',
+      await engine.ownedStudyState(db, { studyId: 'study-race', accountId: ACCT }) === 'done')
+    ok('another account cannot inspect that state',
+      await engine.ownedStudyState(db, { studyId: 'study-race', accountId: 'someone-else' }) === null)
   }
 
   console.log('\nTHE FREE STUDY DELIVERS A WHOLE STUDY')

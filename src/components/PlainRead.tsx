@@ -41,17 +41,17 @@ import { AskPanel, ASK_ICON, ASK_LABEL, ASK_TILE_LABEL, PendingPulse } from './A
 
 /* Heavy study surfaces — pulled only when the reader opens one, so the document
    never waits on a map tile or a 55KB timeline it may not look at. */
-const TopoMap       = lazy(() => import('./TopoMap').then(m => ({ default: m.TopoMap })))
-const LineageViewer = lazy(() => import('./LineageViewer'))
-const KingsList     = lazy(() => import('./KingsList'))
-const MonarchyCard  = lazy(() => import('./MonarchyCard').then(m => ({ default: m.MonarchyCard })))
+const TopoMap       = /* @__PURE__ */ lazy(() => import('./TopoMap').then(m => ({ default: m.TopoMap })))
+const LineageViewer = /* @__PURE__ */ lazy(() => import('./LineageViewer'))
+const KingsList     = /* @__PURE__ */ lazy(() => import('./KingsList'))
+const MonarchyCard  = /* @__PURE__ */ lazy(() => import('./MonarchyCard').then(m => ({ default: m.MonarchyCard })))
 /* The tabernacle and the two temples. Same standalone (width, height) export as
    the lineage and kings viewers. It lives on the pastor's canvas as a tile, and
    a reader working through Exodus, 1 Kings, Ezekiel or Hebrews needs the floor
    plan more than a pastor does — nothing about it is delivery apparatus. */
-const WorshipStructure = lazy(() => import('./WorshipStructure'))
+const WorshipStructure = /* @__PURE__ */ lazy(() => import('./WorshipStructure'))
 
-interface Props {
+export interface Props {
   /**
    * THE FINISHED READING. Validated, and — when the claim check has landed —
    * corrected. It is authoritative: the moment it exists it replaces whatever
@@ -995,13 +995,14 @@ function Shell({
 }) {
   return (
     <motion.div
+      className="plain-read-shell"
       key="plain-read"
       ref={scrollRef}
       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       transition={{ duration: 0.2 }}
       style={{ position: 'absolute', inset: 0, overflowY: 'auto', zIndex: 5 }}
     >
-      <div style={{ maxWidth: 780, margin: '0 auto', padding: '34px 44px 120px' }}>
+      <div className="plain-read-inner" style={{ maxWidth: 780, margin: '0 auto', padding: '34px 44px 120px' }}>
         {children}
       </div>
     </motion.div>
@@ -1085,7 +1086,7 @@ export function PlainRead(props: Props) {
   )
 }
 
-function PlainReadDocument({
+export function PlainReadDocument({
   doc: finalDoc,
   partial = null,
   loading,

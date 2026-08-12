@@ -1,11 +1,18 @@
 # The desktop app and its build artifacts have no business in the API image.
 node_modules
 dist
+dist-mobile
 dist-electron
 src
 build
-resources
+android
+ios
+mobile
+website
+assets
 .git
+.env
+.env.*
 *.dmg
 *.zip
 *.exe

@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 
 RELEASE_INPUTS=(
   package.json
+  package-lock.json
   vite.mobile.config.ts
   capacitor.config.ts
   mobile

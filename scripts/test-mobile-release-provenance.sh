@@ -11,7 +11,7 @@ fi
 PROBE_DIR=$(mktemp -d)
 trap 'rm -rf "$PROBE_DIR"' EXIT
 mkdir -p "$PROBE_DIR/scripts" "$PROBE_DIR/mobile" "$PROBE_DIR/src/mobile" "$PROBE_DIR/src/components" "$PROBE_DIR/src/types" "$PROBE_DIR/src/assets" "$PROBE_DIR/server/src" "$PROBE_DIR/store" "$PROBE_DIR/ios/App/App.xcodeproj" "$PROBE_DIR/ios/App/App" "$PROBE_DIR/android/app/src/main"
-cp package.json vite.mobile.config.ts capacitor.config.ts "$PROBE_DIR/"
+cp package.json package-lock.json vite.mobile.config.ts capacitor.config.ts "$PROBE_DIR/"
 cp scripts/check-release-provenance.sh scripts/check-mobile-release-provenance.sh "$PROBE_DIR/scripts/"
 cp mobile/index.html mobile/main.tsx "$PROBE_DIR/mobile/"
 cp src/mobile/store.ts "$PROBE_DIR/src/mobile/"
@@ -62,6 +62,15 @@ printf '\n// deliberate mobile-entrypoint mutation\n' >> "$PROBE_DIR/mobile/main
 tail -n 1 "$PROBE_DIR/mobile/main.tsx"
 if bash "$PROBE_DIR/scripts/check-mobile-release-provenance.sh" >/dev/null 2>&1; then
   echo "mobile provenance guard accepted a modified mobile entrypoint" >&2
+  exit 1
+fi
+
+git -C "$PROBE_DIR" checkout -q -- mobile/main.tsx
+printf '\n ' >> "$PROBE_DIR/package-lock.json"
+tail -c 8 "$PROBE_DIR/package-lock.json"
+printf '\n'
+if bash "$PROBE_DIR/scripts/check-mobile-release-provenance.sh" >/dev/null 2>&1; then
+  echo "mobile provenance guard accepted a modified dependency lockfile" >&2
   exit 1
 fi
 

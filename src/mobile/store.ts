@@ -37,6 +37,12 @@ export function isStoreFinalizationPendingError(error: unknown): error is StoreF
 
 type StorePlatform = 'ios' | 'android'
 
+function catalogForPlatform(platform: StorePlatform) {
+  return platform === 'ios'
+    ? catalog.products.filter((product) => product.plan !== 'heavy_annual')
+    : catalog.products
+}
+
 function nativePlatform(): StorePlatform | null {
   const platform = Capacitor.getPlatform()
   return platform === 'ios' || platform === 'android' ? platform : null
@@ -77,15 +83,16 @@ function productForDefinition(products: Product[], definition: (typeof catalog.p
 export async function loadStorePlans(): Promise<StorePlan[]> {
   const platform = nativePlatform()
   if (!platform) return []
+  const definitions = catalogForPlatform(platform)
   await assertStorePurchaseEnabled(platform)
   const supported = await NativePurchases.isBillingSupported()
   if (!supported.isBillingSupported) return []
   const { products } = await NativePurchases.getProducts({
-    productIdentifiers: [...new Set(catalog.products.map((product) =>
-      nativePlatform() === 'android' ? product.googleProductId : product.appleProductId))],
+    productIdentifiers: [...new Set(definitions.map((product) =>
+      platform === 'android' ? product.googleProductId : product.appleProductId))],
     productType: PURCHASE_TYPE.SUBS,
   })
-  return catalog.products.flatMap((definition) => {
+  return definitions.flatMap((definition) => {
     const product = productForDefinition(products, definition)
     return product ? [{
       ...definition,

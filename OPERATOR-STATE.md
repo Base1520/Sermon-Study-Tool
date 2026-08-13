@@ -355,7 +355,7 @@ against current source before being resurfaced.
 - No Apple Distribution identity/profile, Android upload key, Operator store records, products, or physical store-track test receipts exist.
 - Production has not received the v7 migration/code, full-stage provider credentials, or live Operator-specific legal pages.
 - The current tablet screenshots expose loading, pending-sync, and provider-error states and cannot be submitted.
-- Subscription pricing is locked at `$30 / $300`, `$50 / $500`, and `$150 / $1,650`, with monthly allowances of 40, 80, and 300 studies; store-product creation remains an external approval boundary.
+- Subscription pricing is locked at `$29.99 / $299.99`, `$49.99 / $499.99`, and `$149.99 / $1,649.99`, with monthly allowances of 40, 80, and 300 studies. Heavy Annual is web/Google Play only; iOS offers Heavy Monthly because Apple's annual-price ceiling would make that plan uneconomic.
 - Release-critical source remains dirty/untracked and is not reproducible from the remote repository.
 
 ### Exact next action

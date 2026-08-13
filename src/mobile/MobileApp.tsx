@@ -121,9 +121,9 @@ const PLAN_USAGE: Record<string, number> = {
   heavy_annual: 300,
 }
 const PLAN_PRICING = {
-  starter: { label: 'STARTER', monthly: '$30', annual: '$300', allowance: 40 },
-  standard: { label: 'STANDARD', monthly: '$50', annual: '$500', allowance: 80 },
-  heavy: { label: 'HEAVY', monthly: '$150', annual: '$1,650', allowance: 300 },
+  starter: { label: 'STARTER', monthly: '$29.99', annual: '$299.99', allowance: 40 },
+  standard: { label: 'STANDARD', monthly: '$49.99', annual: '$499.99', allowance: 80 },
+  heavy: { label: 'HEAVY', monthly: '$149.99', annual: '$1,649.99', allowance: 300 },
 } as const
 const PRIVACY_URL = 'https://www.base1520.com/operator/privacy/'
 const DELETE_INFO_URL = 'https://www.base1520.com/operator/account-deletion/'

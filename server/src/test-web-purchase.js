@@ -43,8 +43,8 @@ function fakeDb(code, { status = 'active', plan = 'starter' } = {}) {
   ok('bad email is rejected', normalizeEmail('not-an-email') === null)
   ok('reserved test domains never pollute the download list',
     normalizeDownloadEmail('capture@example.invalid') === null)
-  ok('only real paid plans are accepted', webPlan('standard')?.priceUsd === 50)
-  ok('annual plans are accepted', webPlan('standard_annual')?.priceUsd === 500)
+  ok('only real paid plans are accepted', webPlan('standard')?.priceUsd === 49.99)
+  ok('annual plans are accepted', webPlan('standard_annual')?.priceUsd === 499.99)
   ok('free is not a web checkout plan', webPlan('free') === null)
   ok('download platforms resolve only to fixed assets',
     /The-Operator-windows\.exe$/.test(downloadAsset('windows')?.url || ''))

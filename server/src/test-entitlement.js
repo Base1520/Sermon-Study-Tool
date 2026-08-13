@@ -72,9 +72,9 @@ console.log('\nEVERY MONTHLY TIER SURVIVES A USER WHO MAXES IT OUT')
 console.log('\nANNUAL BILLING NEVER BECOMES AN ANNUAL USAGE BUCKET')
 {
   const expected = {
-    starter: { annual: 300, monthly: 25, saving: 60 },
-    standard: { annual: 500, monthly: 500 / 12, saving: 100 },
-    heavy: { annual: 1650, monthly: 137.5, saving: 150 },
+    starter: { annual: 299.99, monthly: 299.99 / 12, saving: 59.89 },
+    standard: { annual: 499.99, monthly: 499.99 / 12, saving: 99.89 },
+    heavy: { annual: 1649.99, monthly: 1649.99 / 12, saving: 149.89 },
   }
   for (const [family, values] of Object.entries(expected)) {
     const monthly = PLANS[family]
@@ -115,7 +115,7 @@ console.log('\nA PAYING ACCOUNT GETS WHAT IT PAID FOR')
   const e = entitlementFor({ plan: 'standard', status: 'active' })
   ok('paying is recognised', e.paying)
   ok('the allowance matches the plan', e.allowance === PLANS.standard.studiesPerMonth)
-  ok('the per-study rate is exposed', Math.abs(e.perStudyUsd - 50 / 80) < 1e-9)
+  ok('the per-study rate is exposed', Math.abs(e.perStudyUsd - 49.99 / 80) < 1e-9)
 
   const annual = entitlementFor({ plan: 'standard_annual', status: 'active' })
   ok('annual billing is recognised as paying', annual.paying)

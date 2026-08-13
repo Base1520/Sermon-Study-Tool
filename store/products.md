@@ -1,6 +1,6 @@
 # Store Products
 
-> PRICE LOCK — 2026-08-09: Cole approved the current six-plan grid: `$30 / $300`, `$50 / $500`, and `$150 / $1,650`, with monthly allowances of 40, 80, and 300 studies. Product creation remains a separate external action requiring Cole's approval when it occurs.
+> PRICE LOCK — updated 2026-08-12: Starter is `$29.99 / $299.99`, Standard is `$49.99 / $499.99`, and Heavy is `$149.99` monthly on iOS. Heavy Annual remains `$1,649.99` on web and Google Play because Apple's subscription ceiling cannot represent it profitably.
 
 ## Shared rules
 
@@ -13,16 +13,15 @@
 
 ## Apple App Store
 
-Use one subscription group named `The Operator Access` with six auto-renewable subscriptions.
+Use one subscription group named `The Operator Access` with five purchasable auto-renewable subscriptions. The existing Heavy Annual record remains unavailable and is excluded from the iOS catalog.
 
 | Plan | Product ID | Period | Price | Monthly allowance |
 |---|---|---:|---:|---:|
-| Starter Monthly | `com.base1520.theoperator.starter.monthly` | 1 month | $30 | 40 |
-| Starter Annual | `com.base1520.theoperator.starter.annual` | 1 year | $300 | 40 |
-| Standard Monthly | `com.base1520.theoperator.standard.monthly` | 1 month | $50 | 80 |
-| Standard Annual | `com.base1520.theoperator.standard.annual` | 1 year | $500 | 80 |
-| Heavy Monthly | `com.base1520.theoperator.heavy.monthly` | 1 month | $150 | 300 |
-| Heavy Annual | `com.base1520.theoperator.heavy.annual` | 1 year | $1,650 | 300 |
+| Starter Monthly | `com.base1520.theoperator.starter.monthly` | 1 month | $29.99 | 40 |
+| Starter Annual | `com.base1520.theoperator.starter.annual` | 1 year | $299.99 | 40 |
+| Standard Monthly | `com.base1520.theoperator.standard.monthly` | 1 month | $49.99 | 80 |
+| Standard Annual | `com.base1520.theoperator.standard.annual` | 1 year | $499.99 | 80 |
+| Heavy Monthly | `com.base1520.theoperator.heavy.monthly` | 1 month | $149.99 | 300 |
 
 Subscription group display name: `The Operator Access`.
 
@@ -34,14 +33,14 @@ Create one subscription product named `The Operator Access` with product ID `com
 
 | Base plan ID | Period | Price | Monthly allowance |
 |---|---:|---:|---:|
-| `starter-monthly` | P1M | $30 | 40 |
-| `starter-annual` | P1Y | $300 | 40 |
-| `standard-monthly` | P1M | $50 | 80 |
-| `standard-annual` | P1Y | $500 | 80 |
-| `heavy-monthly` | P1M | $150 | 300 |
-| `heavy-annual` | P1Y | $1,650 | 300 |
+| `starter-monthly` | P1M | $29.99 | 40 |
+| `starter-annual` | P1Y | $299.99 | 40 |
+| `standard-monthly` | P1M | $49.99 | 80 |
+| `standard-annual` | P1Y | $499.99 | 80 |
+| `heavy-monthly` | P1M | $149.99 | 300 |
+| `heavy-annual` | P1Y | $1,649.99 | 300 |
 
-Use the same benefits copy and pricing in the store console, app UI, website, receipt-verification service, and `server/src/iap-products.json`. Do not create legacy in-app products for digital access.
+Use the same benefits copy and pricing across each platform's purchasable catalog, app UI, website, and receipt-verification service. The deliberate platform exception is Heavy Annual: web and Google Play may offer `$1,649.99`; iOS must not request or render it. Keep its identifier in `server/src/iap-products.json` for Android mapping and defensive receipt recognition. Do not create legacy in-app products for digital access.
 
 ## Before product creation
 

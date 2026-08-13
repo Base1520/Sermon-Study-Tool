@@ -51,7 +51,7 @@ function offerFromError(e) {
       error: 'UPGRADE_REQUIRED', code: 'FREE_STUDY_SPENT',
       headline: 'That was your free study.',
       body: 'It stays here — read it, ask about it, export it.',
-      actions: [{ kind: 'subscribe', plan: 'starter', label: 'Starter — $30/mo · 40 studies' }],
+      actions: [{ kind: 'subscribe', plan: 'starter', label: 'Starter — $29.99/mo · 40 studies' }],
     }
 
     // The OLD way, which is why no paywall ever rendered.

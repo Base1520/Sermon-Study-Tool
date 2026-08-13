@@ -17,7 +17,7 @@
     "build:mac": "VITE_ADMIN=false vite build && electron-builder --mac --dir",
     "dev:mobile": "vite --config vite.mobile.config.ts --host 0.0.0.0",
     "build:mobile": "vite build --config vite.mobile.config.ts",
-    "mobile:sync": "VITE_OPERATOR_RELEASE_STAGE=full VITE_ESV_MOBILE_LICENSED=false npm run build:mobile && DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer npx cap sync",
+    "mobile:sync": "bash scripts/check-mobile-release-provenance.sh && VITE_OPERATOR_RELEASE_STAGE=full VITE_ESV_MOBILE_LICENSED=false npm run build:mobile && DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer npx cap sync",
     "mobile:ios": "npm run mobile:sync && DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer npx cap open ios",
     "mobile:android": "npm run mobile:sync && npx cap open android",
     "mobile:store:assets": "bash scripts/render-store-assets.sh",

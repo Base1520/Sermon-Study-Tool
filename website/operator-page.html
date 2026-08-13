@@ -268,33 +268,33 @@ body.page-id-9839,body.page-id-9839 .site,body.page-id-9839 .ast-container,body.
     <div class="op-pricing">
       <article class="op-plan" data-family="starter">
         <div class="op-plan-name">Starter</div>
-        <div class="op-price"><strong class="op-plan-amount">$30</strong><span class="op-plan-cycle">/mo</span></div>
+        <div class="op-price"><strong class="op-plan-amount">$29.99</strong><span class="op-plan-cycle">/mo</span></div>
         <div class="op-effective"></div>
         <div class="op-count">40 studies a month</div>
         <div class="op-rate"><strong class="op-plan-rate">$0.75</strong> <span>per study</span><br><span class="op-plan-meta op-start">where most people start</span></div>
         <p class="op-plan-copy">Sunday, plus the passages around it. About nine or ten studies a week.</p>
-        <button class="op-button op-buy" type="button" data-plan="starter" data-label="Starter" data-price="$30/month">Choose Starter</button>
+        <button class="op-button op-buy" type="button" data-plan="starter" data-label="Starter" data-price="$29.99/month">Choose Starter</button>
       </article>
 
       <article class="op-plan op-plan-featured" data-family="standard">
         <div class="op-badge">Most choose this</div>
         <div class="op-plan-name">Standard</div>
-        <div class="op-price"><strong class="op-plan-amount">$50</strong><span class="op-plan-cycle">/mo</span></div>
+        <div class="op-price"><strong class="op-plan-amount">$49.99</strong><span class="op-plan-cycle">/mo</span></div>
         <div class="op-effective"></div>
         <div class="op-count">80 studies a month</div>
         <div class="op-rate"><strong class="op-plan-rate">$0.63</strong> <span>per study</span><br><span class="op-plan-meta op-save">Save 17% per study</span></div>
         <p class="op-plan-copy">Preaching and teaching in the same week—a series, a class, or a study you are working ahead on.</p>
-        <button class="op-button op-buy" type="button" data-plan="standard" data-label="Standard" data-price="$50/month">Choose Standard</button>
+        <button class="op-button op-buy" type="button" data-plan="standard" data-label="Standard" data-price="$49.99/month">Choose Standard</button>
       </article>
 
       <article class="op-plan" data-family="heavy">
         <div class="op-plan-name">Heavy</div>
-        <div class="op-price"><strong class="op-plan-amount">$150</strong><span class="op-plan-cycle">/mo</span></div>
+        <div class="op-price"><strong class="op-plan-amount">$149.99</strong><span class="op-plan-cycle">/mo</span></div>
         <div class="op-effective"></div>
         <div class="op-count">300 studies a month</div>
         <div class="op-rate"><strong class="op-plan-rate">$0.50</strong> <span>per study</span><br><span class="op-plan-meta op-save">Save 33% per study</span></div>
         <p class="op-plan-copy">Daily study or a writing project. Ten a day, every day, without watching the number.</p>
-        <button class="op-button op-buy" type="button" data-plan="heavy" data-label="Heavy" data-price="$150/month">Choose Heavy</button>
+        <button class="op-button op-buy" type="button" data-plan="heavy" data-label="Heavy" data-price="$149.99/month">Choose Heavy</button>
       </article>
     </div>
 
@@ -403,9 +403,9 @@ body.page-id-9839,body.page-id-9839 .site,body.page-id-9839 .ast-container,body.
   if(params.get('checkout')==='cancelled')document.getElementById('op-notice').style.display='block';
 
   var planData={
-    starter:{monthly:{plan:'starter',price:'$30',cycle:'/mo',effective:'',rate:'$0.75',meta:'where most people start',priceLabel:'$30/month'},annual:{plan:'starter_annual',price:'$300',cycle:'/year',effective:'$25/month effective',rate:'$0.63',meta:'Save $60/year',priceLabel:'$300/year'}},
-    standard:{monthly:{plan:'standard',price:'$50',cycle:'/mo',effective:'',rate:'$0.63',meta:'Save 17% per study',priceLabel:'$50/month'},annual:{plan:'standard_annual',price:'$500',cycle:'/year',effective:'$41.67/month effective',rate:'$0.52',meta:'Save $100/year',priceLabel:'$500/year'}},
-    heavy:{monthly:{plan:'heavy',price:'$150',cycle:'/mo',effective:'',rate:'$0.50',meta:'Save 33% per study',priceLabel:'$150/month'},annual:{plan:'heavy_annual',price:'$1,650',cycle:'/year',effective:'$137.50/month effective',rate:'$0.46',meta:'Save $150/year',priceLabel:'$1,650/year'}}
+    starter:{monthly:{plan:'starter',price:'$29.99',cycle:'/mo',effective:'',rate:'$0.75',meta:'where most people start',priceLabel:'$29.99/month'},annual:{plan:'starter_annual',price:'$299.99',cycle:'/year',effective:'$25/month effective',rate:'$0.62',meta:'Save $59.89/year',priceLabel:'$299.99/year'}},
+    standard:{monthly:{plan:'standard',price:'$49.99',cycle:'/mo',effective:'',rate:'$0.62',meta:'Save 17% per study',priceLabel:'$49.99/month'},annual:{plan:'standard_annual',price:'$499.99',cycle:'/year',effective:'$41.67/month effective',rate:'$0.52',meta:'Save $99.89/year',priceLabel:'$499.99/year'}},
+    heavy:{monthly:{plan:'heavy',price:'$149.99',cycle:'/mo',effective:'',rate:'$0.50',meta:'Save 33% per study',priceLabel:'$149.99/month'},annual:{plan:'heavy_annual',price:'$1,649.99',cycle:'/year',effective:'$137.50/month effective',rate:'$0.46',meta:'Save $149.89/year',priceLabel:'$1,649.99/year'}}
   };
   var billingCopy=document.getElementById('op-billing-copy');
   var planNote=document.getElementById('op-plan-note');

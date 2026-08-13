@@ -49,27 +49,27 @@ const PLANS = {
   },
   starter: {
     label: 'Starter', family: 'starter', billingInterval: 'month', billingMonths: 1,
-    priceUsd: 30, studiesPerMonth: 40, library: true,
+    priceUsd: 29.99, studiesPerMonth: 40, library: true,
   },
   standard: {
     label: 'Standard', family: 'standard', billingInterval: 'month', billingMonths: 1,
-    priceUsd: 50, studiesPerMonth: 80, library: true,
+    priceUsd: 49.99, studiesPerMonth: 80, library: true,
   },
   heavy: {
     label: 'Heavy', family: 'heavy', billingInterval: 'month', billingMonths: 1,
-    priceUsd: 150, studiesPerMonth: 300, library: true,
+    priceUsd: 149.99, studiesPerMonth: 300, library: true,
   },
   starter_annual: {
     label: 'Starter', family: 'starter', billingInterval: 'year', billingMonths: 12,
-    priceUsd: 300, studiesPerMonth: 40, library: true,
+    priceUsd: 299.99, studiesPerMonth: 40, library: true,
   },
   standard_annual: {
     label: 'Standard', family: 'standard', billingInterval: 'year', billingMonths: 12,
-    priceUsd: 500, studiesPerMonth: 80, library: true,
+    priceUsd: 499.99, studiesPerMonth: 80, library: true,
   },
   heavy_annual: {
     label: 'Heavy', family: 'heavy', billingInterval: 'year', billingMonths: 12,
-    priceUsd: 1650, studiesPerMonth: 300, library: true,
+    priceUsd: 1649.99, studiesPerMonth: 300, library: true,
   },
 
   /**
@@ -107,7 +107,7 @@ function annualSavingsUsd(plan) {
   const value = typeof plan === 'string' ? PLANS[plan] : plan
   if (!value || value.billingInterval !== 'year') return 0
   const monthly = PLANS[value.family]
-  return monthly ? monthly.priceUsd * 12 - value.priceUsd : 0
+  return monthly ? Math.round((monthly.priceUsd * 12 - value.priceUsd) * 100) / 100 : 0
 }
 
 function priceLabel(planKey) {

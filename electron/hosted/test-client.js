@@ -126,7 +126,7 @@ const withEnv = async (url, fn) => {
         error: 'UPGRADE_REQUIRED',
         code: 'FREE_STUDY_SPENT',
         body: 'Your study stays here.',
-        actions: [{ label: '$30/mo', plan: 'starter' }],
+        actions: [{ label: '$29.99/mo', plan: 'starter' }],
       }
       let caught = null
       await withFetch(async () => jsonResponse(offer, 402), async () => {

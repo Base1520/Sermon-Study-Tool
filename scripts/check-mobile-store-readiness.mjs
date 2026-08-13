@@ -154,6 +154,14 @@ const readiness = read('server/src/readiness.js')
 const screenshotPlan = read('store/screenshots.md')
 const productPlan = read('store/products.md')
 
+check(
+  /platform === ['"]ios['"]\s*\?\s*catalog\.products\.filter\(\(product\) => product\.plan !== ['"]heavy_annual['"]\)\s*:\s*catalog\.products/.test(mobileStore) &&
+    /const definitions = catalogForPlatform\(platform\)/.test(mobileStore) &&
+    /productIdentifiers: \[\.\.\.new Set\(definitions\.map/.test(mobileStore) &&
+    /return definitions\.flatMap/.test(mobileStore),
+  'iOS excludes the uneconomic Heavy Annual plan from both StoreKit requests and rendered plans',
+)
+
 check(metadata.app.name.length <= 30, 'App name fits both stores')
 check(metadata.apple.subtitle.length <= 30, 'Apple subtitle is 30 characters or fewer')
 check(metadata.apple.promotionalText.length <= 170, 'Apple promotional text is 170 characters or fewer')

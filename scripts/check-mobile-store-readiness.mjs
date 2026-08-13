@@ -115,6 +115,8 @@ function pngMetadata(relative) {
 const metadata = JSON.parse(read('store/metadata.json'))
 const catalog = JSON.parse(read('server/src/iap-products.json'))
 const packageJson = JSON.parse(read('package.json'))
+const serverPackageJson = JSON.parse(read('server/package.json'))
+const serverPackageLock = JSON.parse(read('server/package-lock.json'))
 const pbxproj = read('ios/App/App.xcodeproj/project.pbxproj')
 const xcodeRelease = xcodeTargetReleaseSettings(pbxproj)
 const iosInfoPlist = read('ios/App/App/Info.plist')
@@ -160,6 +162,8 @@ check(metadata.apple.description.length <= 4000, 'Apple description is 4,000 cha
 check(metadata.google.shortDescription.length <= 80, 'Google short description is 80 characters or fewer')
 check(metadata.google.fullDescription.length <= 4000, 'Google full description is 4,000 characters or fewer')
 check(packageJson.version === metadata.app.version, 'Package and store versions match')
+check(serverPackageJson.version === metadata.app.version, 'Server and store versions match')
+check(serverPackageLock.version === serverPackageJson.version && serverPackageLock.packages?.['']?.version === serverPackageJson.version, 'Server lockfile version matches its package')
 
 check(catalog.bundleId === metadata.app.bundleId, 'Apple catalog bundle ID matches metadata')
 check(catalog.androidPackage === metadata.app.bundleId, 'Android catalog package matches metadata')

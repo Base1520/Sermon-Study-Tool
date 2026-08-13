@@ -203,7 +203,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::Release $TAG is already public. Refusing to replace Windows assets outside the draft-release boundary."
+              exit 1
+            fi
+          else
             gh release create "$TAG" \
               --draft \
               --verify-tag \

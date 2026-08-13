@@ -1,6 +1,6 @@
 {
   "name": "operator-server",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "private": true,
   "description": "The Operator API — reading engine, metering, and billing.",
   "main": "src/index.js",

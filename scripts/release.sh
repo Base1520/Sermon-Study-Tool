@@ -31,6 +31,7 @@ fi
 
 echo "--- tests (the gate) ---"
 bash scripts/test-windows-update-manifest.sh
+bash scripts/test-windows-release-workflow.sh
 node server/src/test-stripe-topup.js
 npm run test:release >/tmp/rel-gate.log 2>&1 || { echo "TESTS FAILED — not releasing"; tail -20 /tmp/rel-gate.log; exit 1; }
 echo "    $(grep -cE '^  ok' /tmp/rel-gate.log 2>/dev/null || echo '?') checks passed"

@@ -7,6 +7,7 @@ RELEASE_INPUTS=(
   package.json
   vite.mobile.config.ts
   capacitor.config.ts
+  mobile
   src
   server/src/iap-products.json
   store/metadata.json

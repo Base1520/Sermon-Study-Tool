@@ -17,6 +17,7 @@ cp src/mobile/store.ts "$PROBE_DIR/src/mobile/"
 cp src/components/PlainRead.tsx src/components/ErrorBoundary.tsx "$PROBE_DIR/src/components/"
 cp src/types/phrasing.ts "$PROBE_DIR/src/types/"
 cp src/assets/b-icon.png "$PROBE_DIR/src/assets/"
+cp src/theme.ts "$PROBE_DIR/src/"
 cp server/src/iap-products.json "$PROBE_DIR/server/src/"
 cp store/metadata.json "$PROBE_DIR/store/"
 cp ios/App/App.xcodeproj/project.pbxproj "$PROBE_DIR/ios/App/App.xcodeproj/"
@@ -44,6 +45,14 @@ printf '\n// deliberate formerly-uncovered import mutation\n' >> "$PROBE_DIR/src
 tail -n 1 "$PROBE_DIR/src/components/PlainRead.tsx"
 if bash "$PROBE_DIR/scripts/check-mobile-release-provenance.sh" >/dev/null 2>&1; then
   echo "mobile provenance guard accepted a modified imported bundle input" >&2
+  exit 1
+fi
+
+git -C "$PROBE_DIR" checkout -q -- src/components/PlainRead.tsx
+printf '\n// deliberate transitive release-input mutation\n' >> "$PROBE_DIR/src/theme.ts"
+tail -n 1 "$PROBE_DIR/src/theme.ts"
+if bash "$PROBE_DIR/scripts/check-mobile-release-provenance.sh" >/dev/null 2>&1; then
+  echo "mobile provenance guard accepted a modified transitive bundle input" >&2
   exit 1
 fi
 

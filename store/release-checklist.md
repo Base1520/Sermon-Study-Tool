@@ -35,13 +35,13 @@
   - ✅ **Device-neutral source fix is audit-confirmed.** Shared tablet UI now uses `tablet` / `stylus`; Claude mutation-tested the static guard and independently confirmed the rebuilt source state. This does not clear the separate screenshot recapture hold.
 - [ ] No staged, mock, disabled, or dead control is visible in the full store build.
 - [ ] Final screenshot set contains no loading indicator, `SYNC PENDING`, clipped status text, or provider error.
-- [ ] 🔴 Release source is committed and reproducible — **this is a PREREQUISITE of archiving, not a follow-up to it.**
+- [x] Release source is committed and reproducible — **this is a PREREQUISITE of archiving, not a follow-up to it.**
   - **Closed 2026-08-13:** build 3's defining source landed together in `3f692cf` and was pushed to `origin/main` before archiving. The mobile provenance guard passed at `HEAD`; after a deliberate stale-bundle failure, `npm run mobile:sync` rebuilt the native payload and the readiness gate passed 155/2/0 before the archive.
   - ⚠️ **The wording of this row previously read "…after Cole approves the release commit,"** which implies committing happens *later*. For a mobile archive that ordering is backwards and is exactly how the defect recurs. **Commit → archive → upload.**
   - ✅ **The mobile path now enforces this.** `npm run mobile:sync` invokes `scripts/check-mobile-release-provenance.sh` before building or copying native assets. Its isolated mutation test proves a dirty release input is refused rather than silently packaged.
 - [ ] The approved `.99` catalog is consistent across displayed prices and every live billing provider: Starter `$29.99 / $299.99`, Standard `$49.99 / $499.99`, Heavy `$149.99 / $1,649.99`; Heavy Annual remains web/Google Play-only.
   - ✅ Source, build-3 bundle, website display, and intended Apple/Google catalog copy use the approved values.
-  - 🔴 Fresh Stripe API inspection on 2026-08-13 found the six live Price objects still charge the superseded round-dollar amounts. Stripe reports zero subscriptions. Six replacement live Price objects and the guarded Railway ID switch require Cole's explicit action-time approval; no billing object or variable was changed during the inspection.
+  - 🔴 Fresh Stripe API inspection on 2026-08-13 found the six live Price objects still charge the superseded round-dollar amounts. Stripe returned zero non-test-clock subscriptions across all statuses, so no live customer subscriber migration is required. Six replacement live Price objects and the guarded Railway ID switch require Cole's explicit action-time approval; no billing object or variable was changed during the inspection.
 
 ## Public legal pages
 
@@ -56,8 +56,10 @@
 - [x] BASE1520 App Store Connect account is active and paid agreements, tax, and banking are complete.
 - [x] App record `The Operator by BASE1520` exists for `com.base1520.theoperator` with Apple ID `6799805279`.
 - [ ] Produce and upload version `1.4.2` build `3` from the final `.99` pricing source; build 2 predates the price and iOS catalog changes and must not be submitted.
-  - ✅ Build 3 was archived/exported from committed source and Xcode returned `Upload succeeded` plus `Uploaded package is processing` on 2026-08-13. Keep this parent open until App Store Connect independently shows build 3 processed and selectable.
-- [ ] Five iOS subscriptions exist in one group and match the iOS-filtered catalog in `server/src/iap-products.json`; Heavy Annual remains web/Android-only by decision.
+  - ✅ **Produce: AUDIT CONFIRMED (Claude).** Build 3 was archived and exported from pushed commit `3f692cf`; the IPA measures SHA-256 `98dbafa1…3272cdaa` and is signed `Apple Distribution: Base 1520 LLC (6UP72M96Q5)`.
+  - ✅ **Upload: AUDIT CONFIRMED (Claude).** Receipt is `App_2026-08-13_08-13-59.156.xcdistributionlogs` in `TMPDIR` (an earlier Claude search looked only under `~/Library/Developer/Xcode`, wrongly reported it missing, and is superseded). It records `UPLOAD SUCCEEDED`, `Upload succeeded`, and `Uploaded package is processing` for `com.base1520.theoperator` at `1.4.2`, with Apple-issued **`Delivery UUID: b6540d16-4294-4dfe-bcc0-6af58da7675f`**. The 07:51 bundle has no success marker, matching the abandoned first attempt.
+  - 🔒 Keep this parent open until App Store Connect independently shows build 3 processed and selectable. The current browser session requires Cole's private Apple sign-in/2FA.
+- [ ] Five purchasable iOS subscriptions exist in one group and match the iOS-filtered catalog in `server/src/iap-products.json`; the existing Heavy Annual record remains unavailable on iOS and is retained only for Android/web mapping and defensive receipt recognition.
 - [ ] StoreKit sandbox purchase, renewal, cancellation, restore, and account-switch tests pass.
 - [ ] App privacy answers match `store/privacy-data.md`.
 - [ ] Age rating, category, copyright, support URL, privacy URL, and review contact are complete.
@@ -67,7 +69,7 @@
   - 🔴 **UNCHECKED because the whole set predates the build it claims to represent.** Claude opened `ios-ipad-submission/01-infinite-sermon-desk.png` and it renders **`SAVED ON THIS IPAD`** — the device-specific string replaced by `SAVED ON THIS TABLET` at `TabletSermonDesk.tsx:576`. Its status bar reads **Mon Aug 10**. Timestamps confirm the scope is the entire set, not one image: **all five captured Aug-10**, the device-neutral fix landed **Aug-11 19:59**, and the build-3 bundle was made **Aug-12 20:54**. **Every submission screenshot therefore depicts a build that no longer exists.**
   - ⚠️ **No automated check can see this.** Every screenshot gate — dimensions, alpha, colour space, file presence — passes. This row was `[x]` while provably false, which is the same failure as the `152 passed, 0 failed` row and the Apple-scoped live gate. **Recapture all five against build 3, then re-check.**
 - [ ] Archive validates in Organizer without critical warnings.
-  - ✅ **Build-number prerequisite audit-confirmed 2026-08-12.** Debug and Release are both set to build `2`; build `1` is already consumed in App Store Connect. Archive validation and upload remain separate approval-gated steps.
+  - ✅ Build 3 has `CURRENT_PROJECT_VERSION = 3` in Debug and Release, archived and exported successfully, and Apple accepted the uploaded package for processing. Keep this exact Organizer row open until the console independently shows build 3 processed/selectable or an Organizer validation receipt is captured.
 - [ ] TestFlight external review passes before production submission.
 
 ## Google Play

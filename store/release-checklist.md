@@ -38,9 +38,9 @@
 - [ ] No staged, mock, disabled, or dead control is visible in the full store build.
 - [ ] Final screenshot set contains no loading indicator, `SYNC PENDING`, clipped status text, or provider error.
 - [ ] 🔴 Release source is committed and reproducible — **this is a PREREQUISITE of archiving, not a follow-up to it.**
-  - **Current state (Claude, 2026-08-13 10:4x): 15 files uncommitted**, including everything that defines build 3 — the build number and marketing version (`ios/App/App.xcodeproj/project.pbxproj`), the iOS Heavy-Annual exclusion (`src/mobile/store.ts`), and the `.99` prices (`src/mobile/MobileApp.tsx`). **Archiving before committing produces a binary no commit reproduces** — the identical failure that put `1.4.1 (1)` under a do-not-submit order.
+  - **Closed 2026-08-13:** build 3's defining source landed together in `3f692cf` and was pushed to `origin/main` before archiving. The mobile provenance guard passed at `HEAD`; after a deliberate stale-bundle failure, `npm run mobile:sync` rebuilt the native payload and the readiness gate passed 155/2/0 before the archive.
   - ⚠️ **The wording of this row previously read "…after Cole approves the release commit,"** which implies committing happens *later*. For a mobile archive that ordering is backwards and is exactly how the defect recurs. **Commit → archive → upload.**
-  - 🔧 **Nothing enforces this on the mobile path.** `scripts/check-release-provenance.sh` refuses an uncommitted release, but `scripts/release.sh:19` is its only caller — the desktop path. `mobile:sync` and `mobile:ios` never invoke it. Codex holds the follow-up to extend the guard.
+  - ✅ **The mobile path now enforces this.** `npm run mobile:sync` invokes `scripts/check-mobile-release-provenance.sh` before building or copying native assets. Its isolated mutation test proves a dirty release input is refused rather than silently packaged.
 - [x] Cole set Starter to `$29.99 / $299.99`, Standard to `$49.99 / $499.99`, and Heavy Monthly to `$149.99`. Heavy Annual remains `$1,649.99` on web/Google Play and is excluded from iOS because Apple's subscription ceiling cannot represent it profitably.
 
 ## Public legal pages

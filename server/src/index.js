@@ -26,7 +26,7 @@ const {
   annualSavingsUsd,
 } = require('./entitlement')
 const meter = require('./meter')
-const { accessCodeUnavailable, invalidCodeResponse } = require('./access-code-policy')
+const { accessCodeUnavailable, invalidCodeResponse, compAccountEmail } = require('./access-code-policy')
 const engine = require('./engine')
 const { checkGenerationInput } = require('../../electron/plainread/runtime')
 const { isPurchaseCode, claimPurchasedAccount } = require('./web-purchase')
@@ -1368,7 +1368,7 @@ app.post('/v1/redeem', route(async (req, res) => {
             VALUES ($1, $2, 'active', $3)
        ON CONFLICT (email) DO UPDATE SET plan = EXCLUDED.plan, status = 'active'
         RETURNING id`,
-      [`${raw.toLowerCase()}.${installId}@comp.invalid`, code.plan, installId],
+      [compAccountEmail(raw, installId), code.plan, installId],
     )
     accountId = created.rows[0].id
     await db.query(

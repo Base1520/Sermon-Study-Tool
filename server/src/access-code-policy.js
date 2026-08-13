@@ -12,4 +12,13 @@ function invalidCodeResponse() {
   return { ...INVALID_CODE_RESPONSE }
 }
 
-module.exports = { accessCodeUnavailable, invalidCodeResponse }
+function compAccountEmail(code, installId) {
+  const identifier = crypto
+    .createHash('sha256')
+    .update(`${code}\0${installId}`)
+    .digest('hex')
+  return `${identifier}@comp.invalid`
+}
+
+module.exports = { accessCodeUnavailable, invalidCodeResponse, compAccountEmail }
+const crypto = require('crypto')

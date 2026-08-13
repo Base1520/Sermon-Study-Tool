@@ -13,6 +13,11 @@ V=$(node -p "require('./package.json').version")
 REPO=Base1520/Sermon-Study-Tool
 echo "=== The Operator $V ==="
 
+# GitHub creates a missing release tag from HEAD, never from the working tree.
+# Refuse an uncommitted version bump so a vX.Y.Z release cannot point at source
+# that still declares an older version.
+bash scripts/check-release-provenance.sh "$V"
+
 # This repo is PUBLIC. The notarisation password was already a keychain lookup,
 # but the Apple ID was a literal — a personal email is the login identity for the
 # Developer account that signs and submits, so publishing it hands out half of a
@@ -32,6 +37,7 @@ fi
 echo "--- tests (the gate) ---"
 bash scripts/test-windows-update-manifest.sh
 bash scripts/test-windows-release-workflow.sh
+bash scripts/test-release-provenance.sh
 node server/src/test-stripe-topup.js
 npm run test:release >/tmp/rel-gate.log 2>&1 || { echo "TESTS FAILED — not releasing"; tail -20 /tmp/rel-gate.log; exit 1; }
 echo "    $(grep -cE '^  ok' /tmp/rel-gate.log 2>/dev/null || echo '?') checks passed"

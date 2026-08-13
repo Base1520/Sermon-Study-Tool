@@ -56,6 +56,7 @@
 - [x] BASE1520 App Store Connect account is active and paid agreements, tax, and banking are complete.
 - [x] App record `The Operator by BASE1520` exists for `com.base1520.theoperator` with Apple ID `6799805279`.
 - [ ] Produce and upload version `1.4.2` build `3` from the final `.99` pricing source; build 2 predates the price and iOS catalog changes and must not be submitted.
+  - ✅ Build 3 was archived/exported from committed source and Xcode returned `Upload succeeded` plus `Uploaded package is processing` on 2026-08-13. Keep this parent open until App Store Connect independently shows build 3 processed and selectable.
 - [ ] Six subscriptions exist in one group and match `server/src/iap-products.json`.
 - [ ] StoreKit sandbox purchase, renewal, cancellation, restore, and account-switch tests pass.
 - [ ] App privacy answers match `store/privacy-data.md`.

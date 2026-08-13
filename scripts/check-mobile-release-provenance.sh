@@ -8,6 +8,10 @@ RELEASE_INPUTS=(
   vite.mobile.config.ts
   capacitor.config.ts
   src/mobile
+  src/components/PlainRead.tsx
+  src/components/ErrorBoundary.tsx
+  src/types/phrasing.ts
+  src/assets/b-icon.png
   server/src/iap-products.json
   store/metadata.json
   ios/App/App.xcodeproj/project.pbxproj

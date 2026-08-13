@@ -10,10 +10,13 @@ fi
 
 PROBE_DIR=$(mktemp -d)
 trap 'rm -rf "$PROBE_DIR"' EXIT
-mkdir -p "$PROBE_DIR/scripts" "$PROBE_DIR/src/mobile" "$PROBE_DIR/server/src" "$PROBE_DIR/store" "$PROBE_DIR/ios/App/App.xcodeproj" "$PROBE_DIR/ios/App/App" "$PROBE_DIR/android/app/src/main"
+mkdir -p "$PROBE_DIR/scripts" "$PROBE_DIR/src/mobile" "$PROBE_DIR/src/components" "$PROBE_DIR/src/types" "$PROBE_DIR/src/assets" "$PROBE_DIR/server/src" "$PROBE_DIR/store" "$PROBE_DIR/ios/App/App.xcodeproj" "$PROBE_DIR/ios/App/App" "$PROBE_DIR/android/app/src/main"
 cp package.json vite.mobile.config.ts capacitor.config.ts "$PROBE_DIR/"
 cp scripts/check-release-provenance.sh scripts/check-mobile-release-provenance.sh "$PROBE_DIR/scripts/"
 cp src/mobile/store.ts "$PROBE_DIR/src/mobile/"
+cp src/components/PlainRead.tsx src/components/ErrorBoundary.tsx "$PROBE_DIR/src/components/"
+cp src/types/phrasing.ts "$PROBE_DIR/src/types/"
+cp src/assets/b-icon.png "$PROBE_DIR/src/assets/"
 cp server/src/iap-products.json "$PROBE_DIR/server/src/"
 cp store/metadata.json "$PROBE_DIR/store/"
 cp ios/App/App.xcodeproj/project.pbxproj "$PROBE_DIR/ios/App/App.xcodeproj/"
@@ -33,6 +36,14 @@ printf '\n// deliberate release-input mutation\n' >> "$PROBE_DIR/src/mobile/stor
 tail -n 1 "$PROBE_DIR/src/mobile/store.ts"
 if bash "$PROBE_DIR/scripts/check-mobile-release-provenance.sh" >/dev/null 2>&1; then
   echo "mobile provenance guard accepted a modified release input" >&2
+  exit 1
+fi
+
+git -C "$PROBE_DIR" checkout -q -- src/mobile/store.ts
+printf '\n// deliberate formerly-uncovered import mutation\n' >> "$PROBE_DIR/src/components/PlainRead.tsx"
+tail -n 1 "$PROBE_DIR/src/components/PlainRead.tsx"
+if bash "$PROBE_DIR/scripts/check-mobile-release-provenance.sh" >/dev/null 2>&1; then
+  echo "mobile provenance guard accepted a modified imported bundle input" >&2
   exit 1
 fi
 

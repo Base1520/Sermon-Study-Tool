@@ -210,6 +210,44 @@ const withEnv = async (url, fn) => {
     })
   }
 
+  // A missing aiConsentVersion is refused by the server with 400 before it ever
+  // reaches a model, and the desktop shipped without it — so asking about a study
+  // was dead on a hosted build while running one worked, because /v1/analyze does
+  // not require consent and /v1/ask does. The failure is silent on this side: the
+  // request looks well-formed and the field is simply absent. Assert the wire
+  // body, not the source, and pin it to the server's own constant so the two
+  // cannot drift apart again.
+  console.log('\nCONSENT TRAVELS ON EVERY GENERATING REQUEST')
+  {
+    const serverConstant = (
+      require('fs').readFileSync(require('path').join(__dirname, '../../server/src/index.js'), 'utf8')
+        .match(/AI_PROCESSING_CONSENT_VERSION\s*=\s*'([^']+)'/) || []
+    )[1]
+    ok('the server still declares a consent version to match', Boolean(serverConstant))
+
+    await withEnv('https://api.example.com', async () => {
+      let body = null
+      await withFetch(
+        async (_u, opts) => { body = JSON.parse(opts.body); return jsonResponse({ answer: 'x' }) },
+        () => client.ask(fakeStore(), { doc: {}, analysis: {}, studyId: 's1', question: 'q', history: [] }),
+      )
+      ok('ask sends aiConsentVersion', body?.aiConsentVersion === serverConstant,
+        `sent ${JSON.stringify(body?.aiConsentVersion)}, server wants ${JSON.stringify(serverConstant)}`)
+    })
+
+    await withEnv('https://api.example.com', async () => {
+      let body = null
+      await withFetch(
+        async (_u, opts) => { body = JSON.parse(opts.body); return jsonResponse({ answer: 'x' }) },
+        () => client.sermonAssist(fakeStore(), { studyId: 's1', agent: 'scholar', question: 'q', history: [] }),
+      )
+      ok('the Scholar sends aiConsentVersion', body?.aiConsentVersion === serverConstant,
+        `sent ${JSON.stringify(body?.aiConsentVersion)}, server wants ${JSON.stringify(serverConstant)}`)
+      ok('the Scholar asks for the scholar agent', body?.agent === 'scholar')
+      ok('the Scholar carries the studyId the answer is grounded in', body?.studyId === 's1')
+    })
+  }
+
   console.log('\nOFFLINE IS NOT A DOWNGRADE')
   {
     await withEnv('https://api.example.com', async () => {

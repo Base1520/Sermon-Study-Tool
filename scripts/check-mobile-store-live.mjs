@@ -62,7 +62,10 @@ try {
   check(health.releaseStage === 'full', 'Production release stage is full')
   check(health.ok === true, 'Production core readiness passes')
   check(health.capabilities?.account_recovery_email === true, 'Account recovery email is operational')
-  if (platform === 'all' || platform === 'apple') check(health.capabilities?.apple_iap === true, 'Apple purchase verification is operational')
+  if (platform === 'all' || platform === 'apple') {
+    check(health.capabilities?.apple_iap === true, 'Apple purchase verification is operational')
+    check(health.capabilities?.apple_iap_sandbox_review === true, 'Apple sandbox reviewer allowlist is configured')
+  }
   if (platform === 'all' || platform === 'google') check(health.capabilities?.google_iap === true, 'Google purchase verification is operational')
   if (health.capabilities?.marketing_sync !== true) warn('Marketing sync is degraded; account creation must still remain functional')
 } catch (error) {

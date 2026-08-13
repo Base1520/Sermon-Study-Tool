@@ -1906,6 +1906,60 @@ ipcMain.handle('fetch-bible', async (_, { reference, translation = 'kjv' }) => {
 // ── Scholar Chat ──────────────────────────────────────────────────────────────
 ipcMain.handle('scholar-chat', async (event, { messages, passageContext, streamId }) => {
   requireFeature('gen.scholar')
+
+  // ── HOSTED ────────────────────────────────────────────────────────────────
+  // The Scholar used to demand the reader's own Anthropic key. On a hosted build
+  // that is a dead end: Settings has no key field, because the entire promise is
+  // that he never needs one. A comped beta reader hit that wall while his own
+  // account page read "No API key needed." The server already answers this —
+  // /v1/sermon-assist has accepted the 'scholar' role all along — so this is a
+  // wiring gap, not a missing feature, and nothing new had to be deployed.
+  //
+  // The local branch below is untouched and still runs when OPERATOR_API_URL is
+  // unset, so a man with his own key notices no change.
+  if (hosted.hostedBaseUrl()) {
+    const reference = passageContext?.reference || ''
+    const studyId = recallStudy(reference)
+    // The route reads the document and analysis from the study row it owns and
+    // ignores anything we claim about them, so without a finished study there is
+    // nothing to ground an answer in. Say that plainly instead of surfacing a 404.
+    if (!studyId) {
+      throw asRendererError(new Error(
+        'Open a finished study from your library, then ask the Scholar from that reading.',
+      ))
+    }
+
+    const list = Array.isArray(messages)
+      ? messages.filter((m) => m && typeof m.content === 'string')
+      : []
+    let lastUserIdx = -1
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].role === 'user') { lastUserIdx = i; break }
+    }
+    if (lastUserIdx === -1) {
+      throw asRendererError(new Error('Ask the Scholar a question first.'))
+    }
+
+    // The server takes one question plus prior turns as history — the newest user
+    // turn is the question, everything before it is context.
+    const question = list[lastUserIdx].content.trim()
+    const history = list.slice(0, lastUserIdx).map((m) => ({ role: m.role, content: m.content }))
+
+    try {
+      const reply = await hosted.sermonAssist(store, {
+        studyId,
+        agent: 'scholar',
+        question,
+        history,
+      })
+      // The renderer assigns this straight into message content, so it must be a
+      // string — /v1/sermon-assist answers with { answer }.
+      return String(reply?.answer ?? '')
+    } catch (e) {
+      throw asRendererError(e)
+    }
+  }
+
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)

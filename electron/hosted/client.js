@@ -279,6 +279,21 @@ async function checkout(store, { plan, email }) {
  * Not a study and not billed as one — see the route. A 429 is a real answer the
  * reader should see plainly, so it comes back as a refusal rather than an error.
  */
+/**
+ * The AI-processing disclosure version the server demands before it will spend a
+ * generation on a question.
+ *
+ * MUST equal AI_PROCESSING_CONSENT_VERSION in server/src/index.js. Four routes
+ * enforce it — /v1/quick-study, /v1/guided-study, /v1/ask and /v1/sermon-assist —
+ * and reject a request without it with 400 AI_CONSENT_REQUIRED. /v1/analyze and
+ * /v1/plain-read do NOT, which is exactly why running a study kept working on the
+ * desktop while asking about one did not: the study path never needed this and the
+ * ask path silently did. The mobile client has always sent it (src/mobile/api.ts);
+ * this file did not, so every hosted desktop question was refused by the server
+ * before it reached a model.
+ */
+const AI_PROCESSING_CONSENT_VERSION = 'operator-ai-processing-v1'
+
 async function ask(store, { doc, analysis, studyId, question, history, vaultNotes }) {
   const base = hostedBaseUrl()
   if (!base) throw new Error('ask: OPERATOR_API_URL is not set')
@@ -290,12 +305,62 @@ async function ask(store, { doc, analysis, studyId, question, history, vaultNote
     res = await fetch(`${base}/v1/ask`, {
       method: 'POST',
       headers: headers(store),
-      body: JSON.stringify({ doc, analysis, studyId, question, history, vaultNotes }),
+      body: JSON.stringify({
+        doc, analysis, studyId, question, history, vaultNotes,
+        aiConsentVersion: AI_PROCESSING_CONSENT_VERSION,
+      }),
       signal: ctl.signal,
     })
   } finally { clearTimeout(timer) }
 
   const body = await readJsonOrText(res)
+  if (res.status === 402 || res.status === 429 || res.status === 503) {
+    throw new HostedRefusal(body, res.status)
+  }
+  if (!res.ok) throw new Error(body?.message || `that question could not be answered (${res.status})`)
+  return body
+}
+
+/**
+ * A specialist agent answering from a finished study — the hosted path for the
+ * Scholar in Residence.
+ *
+ * WHY: the Scholar called Anthropic directly and demanded the reader's own API
+ * key. On a hosted build that is a dead end — Settings has no key field, because
+ * the whole promise is that he never needs one. A comped beta reader hit exactly
+ * that wall while his account page told him "No API key needed."
+ *
+ * The server already speaks this: /v1/sermon-assist accepts agent roles
+ * 'exegetical' | 'theological' | 'homiletical' | 'scholar', grounds the answer in
+ * the study row it owns server-side, and meters it as an ask. Nothing new had to
+ * be deployed for this to work.
+ *
+ * studyId is required and must be a FINISHED study owned by this account — the
+ * route reads the document and analysis from its own row and ignores anything the
+ * client claims about them.
+ */
+async function sermonAssist(store, { studyId, agent, question, history }) {
+  const base = hostedBaseUrl()
+  if (!base) throw new Error('sermonAssist: OPERATOR_API_URL is not set')
+
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), ANALYZE_TIMEOUT_MS)
+  let res
+  try {
+    res = await fetch(`${base}/v1/sermon-assist`, {
+      method: 'POST',
+      headers: headers(store),
+      body: JSON.stringify({
+        studyId, agent, question, history,
+        aiConsentVersion: AI_PROCESSING_CONSENT_VERSION,
+      }),
+      signal: ctl.signal,
+    })
+  } finally { clearTimeout(timer) }
+
+  const body = await readJsonOrText(res)
+  // Same shape as ask(): a 402/429/503 is an offer or a limit, not a crash, and
+  // must reach the reader as the server worded it.
   if (res.status === 402 || res.status === 429 || res.status === 503) {
     throw new HostedRefusal(body, res.status)
   }
@@ -406,6 +471,7 @@ module.exports = {
   analyze,
   plainRead,
   ask,
+  sermonAssist,
   me,
   checkout,
   topup,

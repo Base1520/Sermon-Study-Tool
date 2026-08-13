@@ -25,7 +25,7 @@ const READY_ENV = {
   STRIPE_PRICE_HEAVY_ANNUAL: 'price_heavy_annual',
   STRIPE_PRICE_TOPUP: 'price_topup',
   APPLE_APP_ID: '1234567890',
-  IAP_SANDBOX_ACCOUNT_EMAILS: 'reviewer@example.com',
+  IAP_SANDBOX_ACCOUNT_EMAILS: 'reviewer@base1520.com',
   GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: JSON.stringify({
     client_email: 'play@example.iam.gserviceaccount.com',
     private_key: '-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----',
@@ -187,7 +187,7 @@ test('one unavailable store or marketing provider does not take down another pla
   assert.equal(result.capabilities.google_iap, false)
 })
 
-test('production store capabilities do not depend on retaining a sandbox reviewer allowlist', async () => {
+test('production verification stays available while missing sandbox reviewer access is reported separately', async () => {
   const db = { async query() { return { rows: [schemaChecks()] } } }
   const result = await probeReadiness(db, {
     ...READY_ENV,
@@ -196,9 +196,27 @@ test('production store capabilities do not depend on retaining a sandbox reviewe
 
   assert.equal(result.ok, true)
   assert.equal(result.capabilities.apple_iap, true)
+  assert.equal(result.capabilities.apple_iap_sandbox_review, false)
   assert.equal(result.capabilities.google_iap, true)
   assert.ok(!result.degraded.includes('apple_iap'))
+  assert.ok(result.degraded.includes('apple_iap_sandbox_review'))
   assert.ok(!result.degraded.includes('google_iap'))
+})
+
+test('sandbox reviewer readiness rejects malformed and placeholder-only allowlists', async () => {
+  const db = { async query() { return { rows: [schemaChecks()] } } }
+  for (const allowlist of ['', 'not-an-email', 'reviewer@example.com', 'real@base1520.com, reviewer@example.org']) {
+    const result = await probeReadiness(db, { ...READY_ENV, IAP_SANDBOX_ACCOUNT_EMAILS: allowlist })
+    assert.equal(result.capabilities.apple_iap_sandbox_review, false, `expected ${allowlist || 'blank'} to be rejected`)
+    assert.ok(result.degraded.includes('apple_iap_sandbox_review'))
+  }
+
+  const result = await probeReadiness(db, {
+    ...READY_ENV,
+    IAP_SANDBOX_ACCOUNT_EMAILS: 'primary@base1520.com, backup@base1520.com',
+  })
+  assert.equal(result.capabilities.apple_iap_sandbox_review, true)
+  assert.ok(!result.degraded.includes('apple_iap_sandbox_review'))
 })
 
 test('Apple capability requires a positive integer app id', async () => {
@@ -253,12 +271,14 @@ test('core readiness is explicit and reports unavailable providers without adver
     'account_recovery_email',
     'marketing_sync',
     'apple_iap',
+    'apple_iap_sandbox_review',
     'google_iap',
   ])
   assert.deepEqual(result.capabilities, {
     account_recovery_email: false,
     marketing_sync: false,
     apple_iap: false,
+    apple_iap_sandbox_review: false,
     google_iap: false,
     esv_mobile: false,
   })

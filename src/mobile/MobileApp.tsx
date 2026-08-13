@@ -617,7 +617,10 @@ export default function MobileApp() {
         if (!plans.length) setStoreNote('Store plans are not available yet. Try again after the store finishes loading.')
       })
       .catch((caught) => {
-        if (!cancelled) setStoreNote(errorMessage(caught))
+        if (!cancelled) {
+          setStorePlans([])
+          setStoreNote(errorMessage(caught))
+        }
       })
     return () => { cancelled = true }
   }, [tab])
@@ -1674,19 +1677,21 @@ export default function MobileApp() {
               <p>Every plan unlocks {tablet ? 'COVENANT Guided Study, the Infinite Sermon Desk, recording, Preach Mode,' : 'Quick Studies here'} and the full preparation workflow on desktop. Annual billing costs less, while the allowance still resets each month.</p>
               <div className="mobile-segment"><button className={billingCycle === 'month' ? 'active' : ''} onClick={() => setBillingCycle('month')}>MONTHLY</button><button className={billingCycle === 'year' ? 'active' : ''} onClick={() => setBillingCycle('year')}>ANNUAL</button></div>
               {nativeStore ? <>
-                <div className="mobile-plans">
-                  {visibleStorePlans.map((plan) => <button className="mobile-plan" key={`${plan.plan}:${plan.androidBasePlanId}`} onClick={() => { void buyStorePlan(plan) }} disabled={Boolean(storeBusy)}>
-                    <span>{plan.plan.replace('_annual', '').toUpperCase()}</span>
-                    <strong>{plan.priceString}<small>/{billingCycle === 'year' ? 'year' : 'month'}</small></strong>
-                    <em>{PLAN_USAGE[plan.plan]} studies every month</em>
-                    <b>{storeBusy === plan.plan ? 'CONFIRMING…' : 'SUBSCRIBE IN APP'}</b>
-                  </button>)}
-                </div>
-                <div className="mobile-subscription-disclosure">
-                  <strong>AUTO-RENEWING SUBSCRIPTION</strong>
-                  <p>Tap a plan and confirm with the App Store or Google Play. On iPhone, Apple may ask for Face ID and a double-click of the side button. You will not be sent to a website checkout. Your store account is charged when you confirm. The subscription renews automatically at the displayed price and billing period unless you cancel before renewal. Manage or cancel in your store account. Annual plans are billed for the year, while the study allowance resets every month; unused studies do not roll over.</p>
-                  <div><button onClick={() => { void openExternal(TERMS_URL) }}>TERMS OF USE ↗</button><button onClick={() => { void openExternal(PRIVACY_URL) }}>PRIVACY POLICY ↗</button></div>
-                </div>
+                {storePlans.length > 0 ? <>
+                  <div className="mobile-plans">
+                    {visibleStorePlans.map((plan) => <button className="mobile-plan" key={`${plan.plan}:${plan.androidBasePlanId}`} onClick={() => { void buyStorePlan(plan) }} disabled={Boolean(storeBusy)}>
+                      <span>{plan.plan.replace('_annual', '').toUpperCase()}</span>
+                      <strong>{plan.priceString}<small>/{billingCycle === 'year' ? 'year' : 'month'}</small></strong>
+                      <em>{PLAN_USAGE[plan.plan]} studies every month</em>
+                      <b>{storeBusy === plan.plan ? 'CONFIRMING…' : 'SUBSCRIBE IN APP'}</b>
+                    </button>)}
+                  </div>
+                  <div className="mobile-subscription-disclosure">
+                    <strong>AUTO-RENEWING SUBSCRIPTION</strong>
+                    <p>Tap a plan and confirm with the App Store or Google Play. On iPhone, Apple may ask for Face ID and a double-click of the side button. You will not be sent to a website checkout. Your store account is charged when you confirm. The subscription renews automatically at the displayed price and billing period unless you cancel before renewal. Manage or cancel in your store account. Annual plans are billed for the year, while the study allowance resets every month; unused studies do not roll over.</p>
+                    <div><button onClick={() => { void openExternal(TERMS_URL) }}>TERMS OF USE ↗</button><button onClick={() => { void openExternal(PRIVACY_URL) }}>PRIVACY POLICY ↗</button></div>
+                  </div>
+                </> : <div className="mobile-store-staged"><strong>STORE PLANS ARE TEMPORARILY UNAVAILABLE.</strong><p>The App Store or Google Play did not return the complete Operator plan catalog. Try again after the store finishes loading.</p></div>}
               </> : <>
                 <div className="mobile-plans mobile-plan-preview">
                   {Object.entries(PLAN_PRICING).map(([family, plan]) => <article className={`mobile-plan ${family === 'standard' ? 'featured' : ''}`} key={family}>

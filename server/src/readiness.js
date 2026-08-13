@@ -56,6 +56,20 @@ function authFromEmailConfigured(value) {
   return domain !== 'resend.dev'
 }
 
+function sandboxReviewerAllowlistConfigured(value) {
+  const addresses = String(value || '')
+    .split(',')
+    .map((address) => address.trim().toLowerCase())
+    .filter(Boolean)
+  if (addresses.length === 0) return false
+
+  return addresses.every((address) => {
+    const match = address.match(/^[^\s@]+@([^\s@]+\.[^\s@]+)$/)
+    if (!match) return false
+    return !['example.com', 'example.net', 'example.org'].includes(match[1])
+  })
+}
+
 function releaseStage(env = process.env) {
   const stage = String(env.OPERATOR_RELEASE_STAGE || '').trim().toLowerCase()
   return ['core', 'full'].includes(stage) ? stage : null
@@ -88,6 +102,7 @@ function capabilityChecks(env = process.env) {
     // The sandbox allowlist gates test transactions inside iap.js; production
     // receipt verification does not depend on a reviewer account remaining set.
     apple_iap: full && available('APPLE_APP_ID'),
+    apple_iap_sandbox_review: full && sandboxReviewerAllowlistConfigured(env.IAP_SANDBOX_ACCOUNT_EMAILS),
     google_iap: full &&
       available('GOOGLE_PLAY_SERVICE_ACCOUNT_JSON') &&
       available('GOOGLE_RTDN_AUDIENCE') &&
@@ -190,6 +205,7 @@ module.exports = {
   releaseStage,
   configurationChecks,
   authFromEmailConfigured,
+  sandboxReviewerAllowlistConfigured,
   capabilityChecks,
   probeReadiness,
   runtimeIdentity,

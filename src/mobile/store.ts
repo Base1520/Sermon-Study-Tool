@@ -9,6 +9,7 @@ import {
 import catalog from '../../server/src/iap-products.json'
 import { getReleaseStatus, verifyStorePurchase } from './api'
 import { getAccountId } from './storage'
+import { requireCompleteStoreCatalog } from './storeCatalog'
 
 export interface StorePlan {
   plan: string
@@ -71,15 +72,6 @@ function definitionForTransaction(transaction: Transaction) {
       : item.appleProductId === productId) || null
 }
 
-function productForDefinition(products: Product[], definition: (typeof catalog.products)[number]) {
-  if (Capacitor.getPlatform() === 'android') {
-    return products.find((product) =>
-      product.planIdentifier === definition.googleProductId &&
-      product.identifier === definition.androidBasePlanId)
-  }
-  return products.find((product) => product.identifier === definition.appleProductId)
-}
-
 export async function loadStorePlans(): Promise<StorePlan[]> {
   const platform = nativePlatform()
   if (!platform) return []
@@ -92,15 +84,16 @@ export async function loadStorePlans(): Promise<StorePlan[]> {
       platform === 'android' ? product.googleProductId : product.appleProductId))],
     productType: PURCHASE_TYPE.SUBS,
   })
-  return definitions.flatMap((definition) => {
-    const product = productForDefinition(products, definition)
-    return product ? [{
+  const productIndexes = requireCompleteStoreCatalog(definitions, products, platform)
+  return definitions.map((definition, index) => {
+    const product = products[productIndexes[index]]
+    return {
       ...definition,
       title: product.title,
       description: product.description,
       priceString: product.priceString,
       product,
-    }] : []
+    }
   })
 }
 

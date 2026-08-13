@@ -2,10 +2,14 @@ import fs from 'node:fs'
 import crypto from 'node:crypto'
 import path from 'node:path'
 import process from 'node:process'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
+import { mobileVersionContract } from './mobile-version-contract.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const require = createRequire(import.meta.url)
+const { PLANS } = require('../server/src/entitlement.js')
 const failures = []
 const warnings = []
 const passes = []
@@ -151,15 +155,49 @@ const mobileSource = fs.readdirSync(path.join(root, 'src/mobile'), { withFileTyp
   .map((entry) => read(path.relative(root, path.join(entry.parentPath, entry.name))))
   .join('\n')
 const readiness = read('server/src/readiness.js')
+const liveStoreGate = read('scripts/check-mobile-store-live.mjs')
 const screenshotPlan = read('store/screenshots.md')
 const productPlan = read('store/products.md')
+const consoleActionPacket = read('store/console-action-packet.md')
+
+const usd = (value) => `$${Number(value).toLocaleString('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})}`
+const appleConsoleRows = catalog.products.map((product) => {
+  const plan = PLANS[product.plan]
+  const cadence = plan.billingInterval === 'year' ? '1 year' : '1 month'
+  const suffix = product.plan === 'heavy_annual'
+    ? ' ⛔ **DO NOT make purchasable on iOS** — Android/web mapping only'
+    : ''
+  return `| \`${product.appleProductId}\` | ${plan.label} ${plan.billingInterval === 'year' ? 'Annual' : 'Monthly'} | ${usd(plan.priceUsd)} | ${cadence} | ${plan.studiesPerMonth} studies/mo |${suffix}`
+})
+const googleConsoleRows = catalog.products.map((product) => {
+  const plan = PLANS[product.plan]
+  const period = plan.billingInterval === 'year' ? 'P1Y' : 'P1M'
+  return `| \`${product.androidBasePlanId}\` | ${usd(plan.priceUsd)} | ${period} | ${plan.studiesPerMonth} studies/mo |`
+})
 
 check(
   /platform === ['"]ios['"]\s*\?\s*catalog\.products\.filter\(\(product\) => product\.plan !== ['"]heavy_annual['"]\)\s*:\s*catalog\.products/.test(mobileStore) &&
     /const definitions = catalogForPlatform\(platform\)/.test(mobileStore) &&
     /productIdentifiers: \[\.\.\.new Set\(definitions\.map/.test(mobileStore) &&
-    /return definitions\.flatMap/.test(mobileStore),
+    /const productIndexes = requireCompleteStoreCatalog\(definitions, products, platform\)/.test(mobileStore) &&
+    /return definitions\.map/.test(mobileStore),
   'iOS excludes the uneconomic Heavy Annual plan from both StoreKit requests and rendered plans',
+)
+
+check(
+  readiness.includes('apple_iap_sandbox_review: full && sandboxReviewerAllowlistConfigured') &&
+    liveStoreGate.includes("health.capabilities?.apple_iap_sandbox_review === true"),
+  'Apple live gate requires a non-placeholder sandbox reviewer allowlist',
+)
+
+check(
+  appleConsoleRows.every((row) => consoleActionPacket.includes(row)) &&
+    googleConsoleRows.every((row) => consoleActionPacket.includes(row)) &&
+    consoleActionPacket.includes('**Only FIVE are purchasable on iOS.**'),
+  'Console transcription packet matches canonical store prices, allowances, periods, and iOS scope',
 )
 
 check(metadata.app.name.length <= 30, 'App name fits both stores')
@@ -169,16 +207,20 @@ check(metadata.apple.keywords.length <= 100, 'Apple keywords are 100 characters 
 check(metadata.apple.description.length <= 4000, 'Apple description is 4,000 characters or fewer')
 check(metadata.google.shortDescription.length <= 80, 'Google short description is 80 characters or fewer')
 check(metadata.google.fullDescription.length <= 4000, 'Google full description is 4,000 characters or fewer')
-check(packageJson.version === metadata.app.version, 'Package and store versions match')
-check(serverPackageJson.version === metadata.app.version, 'Server and store versions match')
-check(serverPackageLock.version === serverPackageJson.version && serverPackageLock.packages?.['']?.version === serverPackageJson.version, 'Server lockfile version matches its package')
+for (const result of mobileVersionContract({
+  desktopVersion: packageJson.version,
+  storeVersion: metadata.app.version,
+  serverVersion: serverPackageJson.version,
+  serverLockVersion: serverPackageLock.version,
+  serverLockRootVersion: serverPackageLock.packages?.['']?.version,
+  xcodeReleaseSettings: xcodeRelease,
+  androidBuild,
+})) check(result.ok, result.message)
 
 check(catalog.bundleId === metadata.app.bundleId, 'Apple catalog bundle ID matches metadata')
 check(catalog.androidPackage === metadata.app.bundleId, 'Android catalog package matches metadata')
 check(xcodeRelease.includes(`PRODUCT_BUNDLE_IDENTIFIER = ${metadata.app.bundleId};`), 'Xcode Release bundle ID matches metadata')
 check(androidBuild.includes(`applicationId "${metadata.app.bundleId}"`), 'Android application ID matches metadata')
-check(xcodeRelease.includes(`MARKETING_VERSION = ${metadata.app.version};`), 'Xcode Release marketing version matches metadata')
-check(androidBuild.includes(`versionName "${metadata.app.version}"`), 'Android version name matches metadata')
 check(/CURRENT_PROJECT_VERSION = [1-9][0-9]*;/.test(xcodeRelease), 'Apple Release build number is positive')
 check(/versionCode [1-9][0-9]*/.test(androidBuild), 'Android version code is positive')
 check(/compileSdkVersion = 36/.test(androidVariables), 'Android compiles with API 36')

@@ -8,8 +8,10 @@ if ! grep -Fq 'bash scripts/check-mobile-release-provenance.sh' package.json; th
   exit 1
 fi
 
-PROBE_DIR=$(mktemp -d)
-trap 'rm -rf "$PROBE_DIR"' EXIT
+PROBE_ROOT=$(mktemp -d)
+PROBE_DIR="$PROBE_ROOT/project"
+REMOTE_DIR="$PROBE_ROOT/remote.git"
+trap 'rm -rf "$PROBE_ROOT"' EXIT
 mkdir -p "$PROBE_DIR/scripts" "$PROBE_DIR/mobile" "$PROBE_DIR/src/mobile" "$PROBE_DIR/src/components" "$PROBE_DIR/src/types" "$PROBE_DIR/src/assets" "$PROBE_DIR/server/src" "$PROBE_DIR/store" "$PROBE_DIR/ios/App/App.xcodeproj" "$PROBE_DIR/ios/App/App" "$PROBE_DIR/android/app/src/main"
 cp package.json package-lock.json vite.mobile.config.ts capacitor.config.ts "$PROBE_DIR/"
 cp scripts/check-release-provenance.sh scripts/check-mobile-release-provenance.sh "$PROBE_DIR/scripts/"
@@ -31,6 +33,10 @@ git -C "$PROBE_DIR" config user.email test@example.invalid
 git -C "$PROBE_DIR" config user.name "Release Guard Test"
 git -C "$PROBE_DIR" add .
 git -C "$PROBE_DIR" commit -qm baseline
+git init --bare -q "$REMOTE_DIR"
+git -C "$PROBE_DIR" branch -M main
+git -C "$PROBE_DIR" remote add origin "$REMOTE_DIR"
+git -C "$PROBE_DIR" push -qu origin main
 
 bash "$PROBE_DIR/scripts/check-mobile-release-provenance.sh" >/dev/null
 

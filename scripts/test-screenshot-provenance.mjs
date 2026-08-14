@@ -3,8 +3,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  APPLE_IPAD_LANDSCAPE_DIMENSIONS,
+  STORE_SCREENSHOT_SETS,
   appleScreenshotProvenanceIsConsistent,
   hasAppleScreenshotSubmissionHold,
+  screenshotDimensionsMatch,
 } from './screenshot-provenance.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -14,8 +17,24 @@ const readinessSource = fs.readFileSync(path.join(root, 'scripts/check-mobile-st
 
 const tests = [
   {
-    name: 'canonical Apple screenshot hold remains active while the iPad captures predate build 4',
+    name: 'canonical Apple screenshot hold remains active until the build-5 iPad set is complete',
     run: () => assert.equal(hasAppleScreenshotSubmissionHold(screenshotPlan), true),
+  },
+  {
+    name: 'native build-5 iPad landscape captures match the checker dimensions',
+    run: () => {
+      const iPadSpec = STORE_SCREENSHOT_SETS.find(({ label }) => label === 'Apple iPad')
+      assert.ok(iPadSpec)
+      assert.deepEqual(APPLE_IPAD_LANDSCAPE_DIMENSIONS, { width: 2732, height: 2048 })
+      assert.equal(
+        screenshotDimensionsMatch({ width: 2732, height: 2048 }, iPadSpec.dimensions),
+        true,
+      )
+      assert.equal(
+        screenshotDimensionsMatch({ width: 2731, height: 2048 }, iPadSpec.dimensions),
+        false,
+      )
+    },
   },
   {
     name: 'canonical stale-capture requirement and screenshot plan agree',
@@ -50,6 +69,13 @@ const tests = [
       readinessSource,
       /appleScreenshotProvenanceIsConsistent\(screenshotPlan, releaseChecklist\)/,
     ),
+  },
+  {
+    name: 'the mobile readiness gate consumes the shared screenshot dimension contract',
+    run: () => {
+      assert.match(readinessSource, /for \(const \{ label, directory, dimensions,[^\n]+STORE_SCREENSHOT_SETS\)/)
+      assert.match(readinessSource, /screenshotDimensionsMatch\(image, dimensions\)/)
+    },
   },
 ]
 

@@ -419,7 +419,7 @@ const NODE_TYPES: NodeTypes = {
   commentaryTile: CommentaryTileNode,
 }
 
-function TabletSermonDeskInner({
+export function TabletSermonDeskInner({
   studyId,
   analysis,
   workspaceKey,
@@ -571,6 +571,14 @@ function TabletSermonDeskInner({
   const manuscript = nodes.find((node) => node.data.kind === 'manuscript')?.data.content || ''
   const manuscriptBody = manuscript.includes('\nMANUSCRIPT\n') ? manuscript.split('\nMANUSCRIPT\n').pop()?.trim() || '' : manuscript.trim()
   const preachReady = manuscriptBody.length >= 40
+  const openPreach = () => {
+    if (!preachReady) {
+      setDeskNotice('PREACH MODE NEEDS AT LEAST 40 CHARACTERS UNDER THE MANUSCRIPT HEADING · THE OUTLINE ABOVE IT DOES NOT COUNT')
+      return
+    }
+    setDeskNotice(null)
+    setPreachOpen(true)
+  }
   const syncCopy = syncState === 'saving' ? 'SAVING…'
     : syncState === 'saved' ? `SYNCED TO DEVICES · R${syncRevision}`
     : syncState === 'local-only' ? syncAvailable ? 'SAVED ON THIS TABLET · SYNC PENDING' : 'SAVED ON THIS TABLET'
@@ -611,7 +619,7 @@ function TabletSermonDeskInner({
               {recorder.status === 'recording' ? '● RECORDING' : '● RECORD'}
             </button>
             <button className="tablet-manuscript-button" onClick={() => setManuscriptOpen(true)}>{preachReady ? 'EDIT MANUSCRIPT' : 'WRITE MANUSCRIPT'}</button>
-            <button className="tablet-preach-button" onClick={() => setPreachOpen(true)} disabled={!preachReady}>PREACH →</button>
+            <button className="tablet-preach-button" onClick={openPreach}>PREACH →</button>
           </div>
         </div>
 

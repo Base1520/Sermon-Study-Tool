@@ -3,12 +3,16 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import process from 'node:process'
 import { createRequire } from 'node:module'
+import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { mobileVersionContract } from './mobile-version-contract.mjs'
 import {
+  formatScreenshotDimensions,
   appleScreenshotProvenanceIsConsistent,
   hasAppleScreenshotSubmissionHold,
+  screenshotDimensionsMatch,
+  STORE_SCREENSHOT_SETS,
 } from './screenshot-provenance.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -60,6 +64,17 @@ const read = (relative) => {
   return /\.(?:[cm]?[jt]sx?)$/.test(relative) ? stripSourceComments(contents) : contents
 }
 const exists = (relative) => fs.existsSync(path.join(root, relative))
+const gitRef = (ref) => {
+  try {
+    return execFileSync('git', ['rev-parse', ref], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return ''
+  }
+}
 const xcodeTargetReleaseSettings = (project) => {
   const match = project.match(/\/\* Release \*\/ = \{[\s\S]*?Pods-App\.release\.xcconfig[\s\S]*?buildSettings = \{([\s\S]*?)\n\s*\};\n\s*name = Release;/)
   return match?.[1] || ''
@@ -300,16 +315,81 @@ check(
   'Apple completion packet records App Review contact as an explicit approval-bound console gap',
 )
 
+const parseStoreGateCounts = (row, platform) => {
+  const verbose = row.match(
+    /(\d+)\s+passed\s*(?:·|,)\s*(\d+)\s+warnings\s*(?:·|,)\s*(\d+)\s+failed/i,
+  )
+  const compact = row.match(
+    new RegExp(`${platform} is \\*\\*(\\d+)\\/(\\d+)\\/(\\d+)\\*\\*`, 'i'),
+  )
+  const counts = verbose || compact
+  return counts ? counts.slice(1, 4).map(Number) : []
+}
+const currentGoogleLiveBoundary = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('Fresh Google-scoped production measurement')) || ''
+const currentGoogleLedgerPreflight = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Live production preflight |')) || ''
+const googlePurchaseVerificationRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Google production purchase verification |')) || ''
+const currentGoogleLiveCounts = parseStoreGateCounts(currentGoogleLiveBoundary, 'Google')
+const ledgerGoogleLiveCounts = parseStoreGateCounts(currentGoogleLedgerPreflight, 'Google')
+const googleVerificationCounts = parseStoreGateCounts(googlePurchaseVerificationRow, 'Google')
+const currentGoogleLiveStamp = currentGoogleLiveBoundary
+  .match(/at \*\*([^*]+)\*\* returns/)?.[1] || ''
+const currentGoogleLiveFailure = currentGoogleLiveBoundary
+  .match(/solely `([^`]+)`/)?.[1] || ''
+check(
+  currentGoogleLiveCounts.length === 3 &&
+    currentGoogleLiveCounts.every((count, index) => count === ledgerGoogleLiveCounts[index]) &&
+    currentGoogleLiveCounts.every((count, index) => count === googleVerificationCounts[index]) &&
+    Boolean(currentGoogleLiveStamp) &&
+    googlePurchaseVerificationRow.includes(`on ${currentGoogleLiveStamp}`) &&
+    Boolean(currentGoogleLiveFailure) &&
+    googlePurchaseVerificationRow.includes(`solely \`${currentGoogleLiveFailure}\``) &&
+    !/privacy(?:-disclosure)? failures|plus all three named public privacy/i.test(googlePurchaseVerificationRow),
+  'Release records agree Google live preflight is blocked only on purchase verification',
+)
+
+const nativePackageArtifactParityRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Native package artifact parity |')) || ''
+check(
+  nativePackageArtifactParityRow.includes('PASS FOR BUILD-5 BYTES / CURRENT WORKING SOURCE NEWER') &&
+    nativePackageArtifactParityRow.includes('Build 5 does not contain the local next-build PREACH affordance fix') &&
+    nativePackageArtifactParityRow.includes('package-age assertion is intentionally red') &&
+    nativePackageArtifactParityRow.includes('screenshot hold remains separately red') &&
+    !/static gate is red only because|only failure is[^|]*screenshot/i.test(nativePackageArtifactParityRow),
+  'Release ledger separates build-5 artifact parity from newer working source',
+)
+
+const currentStaticGateBoundary = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('- [ ] 🔴 **`npm run mobile:store:check`')) || ''
+check(
+  currentStaticGateBoundary.includes(
+    'complete three-slot iPad set is staged after one remaining clean active-Preach capture',
+  ) &&
+    currentStaticGateBoundary.includes(
+      'two clean build-5 landscape slots are locally ready and one active-Preach original remains missing',
+    ) &&
+    !currentStaticGateBoundary.includes('three remaining iPad screenshots'),
+  'Release checklist preserves the one-capture iPad screenshot completion boundary',
+)
+
 const externalReleaseGates = releaseLedger
   .split('## External release gates\n')[1]?.split('\n## ')[0] || ''
 const signingEvidence = releaseLedger
   .split('## Signing evidence still required\n')[1]?.split('\n## ')[0] || ''
 check(
-  externalReleaseGates.includes('build `1.4.2 (5)`') &&
+  externalReleaseGates.includes('Build `1.4.2 (5)`') &&
     externalReleaseGates.includes('Build 4 must not be attached or selected for final submission') &&
     externalReleaseGates.includes('build-5 captures') &&
-    signingEvidence.includes('receipts for build 5') &&
-    signingEvidence.includes('Build 4 is historical upload evidence only') &&
+    signingEvidence.includes('processing/selectability and listing-selection receipts for build 5') &&
+    signingEvidence.includes('The build-5 upload receipt is present') &&
+    signingEvidence.includes('build 4 is historical upload evidence only') &&
     !/\b(?:attach|select)[^\n]*\bbuild(?: |-)?4\b/i.test(externalReleaseGates) &&
     !/listing-selection receipt for build 4/i.test(signingEvidence),
   'Release ledger forward actions preserve the build-5 candidate boundary',
@@ -319,13 +399,51 @@ const historicalBuild4ProcessingBoundary = releaseChecklist
   .split(/\r?\n/)
   .find((line) => line.includes('Processing/selectability remains unverified.')) || ''
 check(
-  historicalBuild4ProcessingBoundary.includes('Build 4 may still be read for upload history only') &&
+  historicalBuild4ProcessingBoundary.includes('Build 5 upload is accepted') &&
+    historicalBuild4ProcessingBoundary.includes('Build 4 remains upload history only') &&
     historicalBuild4ProcessingBoundary.includes('must not be selected or submitted') &&
-    historicalBuild4ProcessingBoundary.includes('provenance-clean build 5') &&
     historicalBuild4ProcessingBoundary.includes('attach/select build 5 under fresh action-time approval') &&
+    !/wait for (?:provenance-clean )?build 5 to appear/i.test(historicalBuild4ProcessingBoundary) &&
     !/until build 4 appears/i.test(historicalBuild4ProcessingBoundary) &&
     !/listing is explicitly switched/i.test(historicalBuild4ProcessingBoundary),
   'Release checklist keeps historical build 4 out of the final selection path',
+)
+
+const currentMobileSourceBoundary = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('The uploaded build contains the current mobile source')) || ''
+const currentCandidateBoundary = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('**The current uploaded App Store candidate artifact is build')) || ''
+const releaseSourceBoundary = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('Mobile-source lineage, verified')) || ''
+const canonicalReleaseSource = releaseSourceBoundary
+  .match(/canonical release source is `([0-9a-f]{40})`/)?.[1] || ''
+const canonicalCandidateBuild = Number(
+  releaseSourceBoundary.match(/candidate build number is `(\d+)`/)?.[1] || 0,
+)
+const xcodeBuildNumbers = [...pbxproj.matchAll(/CURRENT_PROJECT_VERSION = (\d+);/g)]
+  .map((match) => Number(match[1]))
+const canonicalBuildPattern = canonicalCandidateBuild
+  ? new RegExp(`\\bbuild\\s+${canonicalCandidateBuild}\\b`, 'i')
+  : /$a/
+check(
+  Boolean(canonicalReleaseSource) &&
+    canonicalReleaseSource === gitRef('HEAD') &&
+    canonicalReleaseSource === gitRef('origin/main') &&
+    canonicalCandidateBuild > 0 &&
+    xcodeBuildNumbers.length >= 2 &&
+    xcodeBuildNumbers.every((buildNumber) => buildNumber === canonicalCandidateBuild) &&
+    canonicalBuildPattern.test(currentMobileSourceBoundary) &&
+    currentMobileSourceBoundary.includes('canonical mobile-source lineage row') &&
+    canonicalBuildPattern.test(currentCandidateBoundary) &&
+    currentCandidateBoundary.includes('canonical mobile-source lineage row') &&
+    currentCandidateBoundary.includes('processing/selectability remains unverified') &&
+    releaseSourceBoundary.includes('archive payload exactly matches the clean committed iOS public payload') &&
+    releaseSourceBoundary.includes('upload receipt records success with no errors') &&
+    releaseSourceBoundary.includes('processing completion remains unproven'),
+  'Release records bind the uploaded Apple build to current pushed source and Xcode build number',
 )
 
 check(metadata.app.name.length <= 30, 'App name fits both stores')
@@ -503,15 +621,7 @@ for (const [relative, width, height, bitDepth, colorType, encoding] of expectedS
   check(size?.bitDepth === bitDepth && size?.colorType === colorType, `${relative} is ${encoding}`)
 }
 
-const screenshotSets = [
-  { label: 'Apple iPhone', directory: 'store/assets/screenshots/ios-iphone-submission', width: 1284, height: 2778, minCount: 1, maxCount: 10, ios: true },
-  { label: 'Apple iPad', directory: 'store/assets/screenshots/ios-ipad-submission', width: 2064, height: 2752, minCount: 1, maxCount: 10, ios: true },
-  { label: 'Google Play phone', directory: 'store/assets/screenshots/android-phone', width: 1080, height: 1920, minCount: 2, maxCount: 8, ios: false },
-  { label: 'Google Play 7-inch tablet', directory: 'store/assets/screenshots/android-tablet-7', width: 1200, height: 1920, minCount: 2, maxCount: 8, ios: false },
-  { label: 'Google Play 10-inch tablet', directory: 'store/assets/screenshots/android-tablet-10', width: 1600, height: 2560, minCount: 2, maxCount: 8, ios: false },
-]
-
-for (const { label, directory, width, height, minCount, maxCount, ios } of screenshotSets) {
+for (const { label, directory, dimensions, minCount, maxCount, ios } of STORE_SCREENSHOT_SETS) {
   if (!exists(directory)) {
     fail(`${label} screenshot directory exists`)
     continue
@@ -532,7 +642,11 @@ for (const { label, directory, width, height, minCount, maxCount, ios } of scree
     const image = pngMetadata(relative)
     check(Boolean(image), `${relative} is a valid PNG`)
     if (!image) continue
-    check(image.width === width && image.height === height, `${relative} is exactly ${width} × ${height}`)
+    const acceptedDimensions = formatScreenshotDimensions(dimensions)
+    check(
+      screenshotDimensionsMatch(image, dimensions),
+      `${relative} is exactly ${acceptedDimensions}`,
+    )
     check(image.bitDepth === 8, `${relative} uses 8-bit PNG samples`)
     check(image.colorType === 2, `${relative} uses 24-bit RGB PNG color type 2`)
     if (ios) check(!image.hasAlpha, `${relative} contains no alpha channel or transparency chunk`)

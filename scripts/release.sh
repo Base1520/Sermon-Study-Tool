@@ -56,6 +56,7 @@ echo "--- tests (the gate) ---"
 bash scripts/test-windows-update-manifest.sh
 bash scripts/test-windows-release-workflow.sh
 bash scripts/test-release-provenance.sh
+bash scripts/test-desktop-release-verification.sh
 node server/src/test-stripe-topup.js
 npm run test:release >/tmp/rel-gate.log 2>&1 || { echo "TESTS FAILED — not releasing"; tail -20 /tmp/rel-gate.log; exit 1; }
 echo "    $(grep -cE '^  ok' /tmp/rel-gate.log 2>/dev/null || echo '?') checks passed"
@@ -67,7 +68,11 @@ echo "--- staging release names ---"
 rm -rf dist-electron/rel && mkdir -p dist-electron/rel
 cp "dist-electron/The Operator-$V-arm64.dmg"     "dist-electron/rel/The-Operator-mac-apple-silicon.dmg"
 cp "dist-electron/The Operator-$V.dmg"           "dist-electron/rel/The-Operator-mac-intel.dmg"
-# Versioned copies + the Mac update manifest, for electron-updater.
+# Versioned DMGs are also named in latest-mac.yml. Stage them rather than
+# publishing a manifest with secondary links that 404.
+cp "dist-electron/The Operator-$V-arm64.dmg"     "dist-electron/rel/The-Operator-$V-arm64.dmg"
+cp "dist-electron/The Operator-$V.dmg"           "dist-electron/rel/The-Operator-$V.dmg"
+# Versioned zip archives + the Mac update manifest, for electron-updater.
 cp "dist-electron/The Operator-$V-arm64-mac.zip" "dist-electron/rel/The-Operator-$V-arm64-mac.zip"
 cp "dist-electron/The Operator-$V-mac.zip"       "dist-electron/rel/The-Operator-$V-mac.zip"
 cp dist-electron/latest-mac.yml                   dist-electron/rel/
@@ -90,10 +95,6 @@ gh release upload "$TAG" dist-electron/rel/* --repo "$REPO" --clobber
 gh release edit "$TAG" --repo "$REPO" --verify-tag --draft=false --latest \
   --title "The Operator $V" --notes "Specialist agent chats now explain clearly when a tool still needs your own key, instead of showing a raw error. Windows auto-update is restored — this is the first release since 1.4.0 that Windows installs can actually receive."
 
-echo "--- verifying the buttons a stranger clicks ---"
-for f in The-Operator-mac-apple-silicon.dmg The-Operator-mac-intel.dmg The-Operator-windows.exe latest.yml; do
-  printf "    %-40s HTTP %s\n" "$f" \
-    "$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 90 -r 0-255 \
-       "https://github.com/$REPO/releases/latest/download/$f")"
-done
+echo "--- verifying customer downloads and updater channels ---"
+bash scripts/verify-desktop-release-assets.sh "$REPO" "$V"
 echo "=== done ==="

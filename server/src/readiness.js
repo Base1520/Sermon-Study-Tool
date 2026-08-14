@@ -1,6 +1,6 @@
 const { version } = require('../package.json')
 
-const SCHEMA_VERSION = 'operator-account-bound-auth-v7'
+const SCHEMA_VERSION = 'operator-account-bound-auth-v8'
 
 const CORE_CONFIGURATION = [
   'ANTHROPIC_API_KEY',
@@ -162,6 +162,10 @@ async function probeReadiness(db, env = process.env) {
         SELECT 1 FROM information_schema.columns
          WHERE table_schema = 'public' AND table_name = 'account' AND column_name = 'deleting_at'
       ) AS account_deleting_column,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'device' AND column_name = 'install_data_claimed_at'
+      ) AS device_install_data_claimed_column,
       EXISTS (
         SELECT 1 FROM information_schema.columns
          WHERE table_schema = 'public' AND table_name = 'billing_subscription' AND column_name = 'billing_anchor_at'

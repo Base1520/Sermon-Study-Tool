@@ -27,9 +27,9 @@ test('every unavailable-code class receives the same non-oracle response', () =>
   })
 })
 
-test('the redeem route applies the policy before reinstall lookup', () => {
-  const route = fs.readFileSync(require.resolve('./index'), 'utf8')
-  const guard = route.indexOf('if (accessCodeUnavailable(code)) return refuse()')
+test('the redeem transaction applies the policy before reinstall lookup', () => {
+  const route = fs.readFileSync(require.resolve('./redeem'), 'utf8')
+  const guard = route.indexOf('if (accessCodeUnavailable(code)) return null')
   const priorUse = route.indexOf('SELECT account_id FROM access_code_use')
   assert.ok(guard >= 0, 'redeem must invoke the shared access-code policy')
   assert.ok(priorUse >= 0, 'redeem reinstall lookup must remain identifiable')
@@ -47,7 +47,7 @@ test('comp account email never embeds the access code or install id', () => {
   assert.equal(compAccountEmail(code, installId), email)
   assert.notEqual(compAccountEmail(code, `${installId}-other`), email)
 
-  const route = fs.readFileSync(require.resolve('./index'), 'utf8')
-  assert.ok(route.includes('compAccountEmail(raw, installId)'), 'redeem must derive a non-secret synthetic email')
+  const route = fs.readFileSync(require.resolve('./redeem'), 'utf8')
+  assert.ok(route.includes('compAccountEmail(codeValue, installId)'), 'redeem must derive a non-secret synthetic email')
   assert.equal(route.includes('`${raw.toLowerCase()}.${installId}@comp.invalid`'), false)
 })

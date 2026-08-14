@@ -75,14 +75,18 @@ async function test(name, operation) {
     assert.deepStrictEqual(labels, ['sermon-assist.homiletical'])
   })
 
-  await test('the route reads the owned server study and enforces current consent', () => {
+  await test('the route resolves the owned server study through the shared document gate', () => {
     const source = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
     const start = source.indexOf("app.post('/v1/sermon-assist'")
     const end = source.indexOf("app.get('/v1/studies/:id/commentary'", start)
     const route = source.slice(start, end)
     assert.ok(start >= 0)
     assert.match(route, /AI_CONSENT_REQUIRED/)
-    assert.match(route, /SELECT analysis, document/)
+    assert.match(route, /resolveOwnedStudyDocument/)
+    assert.match(route, /surface: 'specialist'/)
+    assert.match(route, /access\.status/)
+    assert.match(route, /doc: access\.study\.document/)
+    assert.doesNotMatch(route, /document IS NOT NULL/)
     assert.match(route, /engine\.runSermonAssist/)
     assert.doesNotMatch(route, /doc: req\.body/)
   })

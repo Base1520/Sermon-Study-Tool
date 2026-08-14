@@ -48,7 +48,8 @@ async function identify(db, { authorization, installId }) {
   }
 
   const { rows } = await db.query(
-    `SELECT d.id AS device_id, d.revoked_at,
+    `SELECT d.id AS device_id, d.install_id AS device_install_id,
+            d.install_data_claimed_at, d.revoked_at,
             a.id, a.email, a.plan, a.status, a.paid_through, a.usage_anchor_at, a.is_admin,
             a.free_studies_used, a.free_asks_used,
             a.stripe_customer_id, a.stripe_subscription_id
@@ -72,8 +73,11 @@ async function identify(db, { authorization, installId }) {
 
   return {
     anonymous: false,
-    installId: installId || null,
+    // A bearer-authenticated install is the one bound to the device row. The
+    // request header is caller-controlled and must not select data to adopt.
+    installId: r.device_install_id || null,
     deviceId: r.device_id,
+    installDataClaimedAt: r.install_data_claimed_at || null,
     account: {
       id: r.id,
       email: r.email,

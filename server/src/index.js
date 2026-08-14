@@ -26,10 +26,13 @@ const {
   annualSavingsUsd,
 } = require('./entitlement')
 const meter = require('./meter')
-const { accessCodeUnavailable, invalidCodeResponse, compAccountEmail } = require('./access-code-policy')
+const { invalidCodeResponse } = require('./access-code-policy')
 const engine = require('./engine')
 const { checkGenerationInput } = require('../../electron/plainread/runtime')
-const { isPurchaseCode, claimPurchasedAccount } = require('./web-purchase')
+const { redeemAccessCode } = require('./redeem')
+const installDataAdoption = require('./install-data-adoption')
+const { resolveOwnedStudyDocument } = require('./study-ai-access')
+const { buildStudyCommentaryHandler } = require('./study-commentary')
 const mobile = require('./mobile')
 const stripeApi = require('./stripe')
 const iap = require('./iap')
@@ -38,7 +41,6 @@ const { billingPeriodFor } = require('./billing-period')
 const { processMarketingDeletionOutbox } = require('./mailchimp')
 const { trialIdentitySecret, trialIdentityHash } = require('./mobile-account')
 const { probeReadiness, releaseStage, runtimeIdentity } = require('./readiness')
-const { retrieveCommentary } = require('./commentary')
 const { purgeExpiredRegistrationCodes } = require('./account-registration')
 
 // Trial tombstones are a security boundary, not an optional feature. Starting
@@ -94,6 +96,7 @@ app.patch('/v1/studies/:id/workspace', express.json({ limit: '520kb' }), (_req, 
 app.use(express.json({ limit: '256kb' }))   // a passage is small; anything larger is abuse
 app.use(express.urlencoded({ extended: false, limit: '16kb' }))
 app.use(auth.middleware(db))
+app.use(installDataAdoption.middleware(db))
 
 // ── Health ──────────────────────────────────────────────────────────────────
 app.get('/health', route(async (_req, res) => {
@@ -988,23 +991,11 @@ app.post('/v1/ask', route(async (req, res) => {
 
   const accountId = req.identity.account?.id ?? null
   const installId = req.identity.installId
-  const owned = await db.query(
-    `SELECT analysis, document
-       FROM study
-      WHERE id = $1 AND document IS NOT NULL
-        AND (($2::uuid IS NOT NULL AND account_id = $2)
-          OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
-      LIMIT 1`,
-    [studyId, accountId, installId || ''],
-  )
-  if (!owned.rows.length) {
-    return res.status(404).json({
-      error: 'STUDY_NOT_FOUND',
-      message: 'Open a finished study from your library, then ask from that reading.',
-    })
-  }
-  const doc = owned.rows[0].document
-  const analysis = owned.rows[0].analysis
+  const access = await resolveOwnedStudyDocument(db, {
+    studyId, accountId, installId, surface: 'ask',
+  })
+  if (!access.ok) return res.status(access.status).json(access.body)
+  const { document: doc, analysis } = access.study
 
   // The document and analysis now come from the owned server row, not from the
   // request. History and optional grounding notes are still client-supplied and
@@ -1092,21 +1083,10 @@ app.post('/v1/sermon-assist', route(async (req, res) => {
 
   const accountId = req.identity.account?.id ?? null
   const installId = req.identity.installId
-  const owned = await db.query(
-    `SELECT analysis, document
-       FROM study
-      WHERE id = $1 AND document IS NOT NULL
-        AND (($2::uuid IS NOT NULL AND account_id = $2)
-          OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
-      LIMIT 1`,
-    [studyId, accountId, installId || ''],
-  )
-  if (!owned.rows.length) {
-    return res.status(404).json({
-      error: 'STUDY_NOT_FOUND',
-      message: 'Open a finished study from your library, then ask a specialist from that study.',
-    })
-  }
+  const access = await resolveOwnedStudyDocument(db, {
+    studyId, accountId, installId, surface: 'specialist',
+  })
+  if (!access.ok) return res.status(access.status).json(access.body)
 
   const ent = entitlementFor(req.identity.account)
   const recurringAskAccess = Boolean(req.identity.account && ent.paying)
@@ -1147,8 +1127,8 @@ app.post('/v1/sermon-assist', route(async (req, res) => {
   try {
     const result = await engine.runSermonAssist(db, {
       agent,
-      doc: owned.rows[0].document,
-      analysis: owned.rows[0].analysis,
+      doc: access.study.document,
+      analysis: access.study.analysis,
       question,
       history,
       accountId,
@@ -1167,26 +1147,7 @@ app.post('/v1/sermon-assist', route(async (req, res) => {
   }
 }))
 
-app.get('/v1/studies/:id/commentary', route(async (req, res) => {
-  const accountId = req.identity.account?.id
-  if (!accountId) {
-    return res.status(401).json({ error: 'ACCOUNT_REQUIRED', message: 'Link or activate this device first.' })
-  }
-  const { rows } = await db.query(
-    `SELECT reference, analysis
-       FROM study
-      WHERE id = $1 AND account_id = $2 AND document IS NOT NULL
-      LIMIT 1`,
-    [req.params.id, accountId],
-  )
-  if (!rows.length) return res.status(404).json({ error: 'STUDY_NOT_FOUND' })
-  const analysis = rows[0].analysis || {}
-  res.json(await retrieveCommentary({
-    reference: rows[0].reference,
-    passageText: analysis.passageText || '',
-    mainTheme: analysis.mainTheme || '',
-  }))
-}))
+app.get('/v1/studies/:id/commentary', route(buildStudyCommentaryHandler({ db })))
 
 // ── Beta feedback ───────────────────────────────────────────────────────────
 /**
@@ -1321,70 +1282,9 @@ app.post('/v1/redeem', route(async (req, res) => {
 
   const refuse = () => res.status(404).json(invalidCodeResponse())
 
-  if (isPurchaseCode(raw)) {
-    const purchased = await claimPurchasedAccount(db, { code: raw, installId })
-    if (!purchased) return refuse()
-    const { token } = await auth.issueDeviceToken(db, {
-      accountId: purchased.id, installId, label: 'Website purchase',
-    })
-    return res.json({
-      token,
-      accountId: purchased.id,
-      ...entitlementFor(purchased),
-      label: `${PLANS[purchased.plan]?.label || 'Paid'} subscription`,
-    })
-  }
-
-  const { rows } = await db.query(
-    `SELECT code, plan, label, uses_max, uses_count, revoked_at
-       FROM access_code WHERE code = $1`, [raw])
-  const code = rows[0]
-
-  // One message for "wrong" and "revoked" and "used up", on purpose: a distinct
-  // reply for each turns this endpoint into an oracle for guessing codes.
-  if (accessCodeUnavailable(code)) return refuse()
-
-  // Already redeemed on this install — hand back a token rather than refusing,
-  // so reinstalling the app is not a dead end.
-  const prior = await db.query(
-    `SELECT account_id FROM access_code_use WHERE code = $1 AND install_id = $2`,
-    [raw, installId])
-
-  let accountId = prior.rows[0]?.account_id ?? null
-
-  if (!accountId) {
-    // Claim a use FIRST, conditionally, so two simultaneous redemptions of a
-    // single-use code cannot both succeed.
-    const claimed = await db.query(
-      `UPDATE access_code SET uses_count = uses_count + 1
-        WHERE code = $1 AND revoked_at IS NULL
-          AND (uses_max IS NULL OR uses_count < uses_max)
-        RETURNING uses_count`,
-      [raw])
-    if (claimed.rows.length === 0) return refuse()
-
-    const created = await db.query(
-      `INSERT INTO account (email, plan, status, install_id)
-            VALUES ($1, $2, 'active', $3)
-       ON CONFLICT (email) DO UPDATE SET plan = EXCLUDED.plan, status = 'active'
-        RETURNING id`,
-      [compAccountEmail(raw, installId), code.plan, installId],
-    )
-    accountId = created.rows[0].id
-    await db.query(
-      `INSERT INTO access_code_use (code, install_id, account_id) VALUES ($1,$2,$3)
-       ON CONFLICT (code, install_id) DO NOTHING`,
-      [raw, installId, accountId])
-  }
-
-  // DESTRUCTURED. issueDeviceToken returns { token, deviceId }; assigning the
-  // whole object made the response `token: {token, deviceId}`, the client stored
-  // the object, and the header went out as "Bearer [object Object]" — so a
-  // redeemed comp code produced a perfectly valid account that then read as
-  // anonymous on every request. Caught end to end, not by a unit test.
-  const { token } = await auth.issueDeviceToken(db, { accountId, installId, label: code.label || 'Comp' })
-  const { rows: acct } = await db.query(`SELECT plan, status FROM account WHERE id = $1`, [accountId])
-  res.json({ token, accountId, ...entitlementFor(acct[0]), label: code.label ?? null })
+  const redeemed = await redeemAccessCode(db, { code: raw, installId, auth })
+  if (!redeemed) return refuse()
+  res.json(redeemed)
 }))
 
 // ── Stripe + mobile account surfaces ────────────────────────────────────────

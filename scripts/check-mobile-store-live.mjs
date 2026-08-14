@@ -9,6 +9,7 @@ const readinessSource = fs.readFileSync(path.join(root, 'server/src/readiness.js
 const expectedSchema = readinessSource.match(/const SCHEMA_VERSION = '([^']+)'/)?.[1] || ''
 const apiUrl = String(process.env.OPERATOR_API_URL || 'https://api-production-15e5e.up.railway.app').replace(/\/+$/, '')
 const platform = String(process.env.OPERATOR_STORE_PLATFORM || 'all').toLowerCase()
+const allowedPlatforms = new Set(['all', 'apple', 'google'])
 const failures = []
 const warnings = []
 const passes = []
@@ -17,6 +18,8 @@ const pass = (message) => passes.push(message)
 const fail = (message) => failures.push(message)
 const warn = (message) => warnings.push(message)
 const check = (condition, message) => condition ? pass(message) : fail(message)
+
+check(allowedPlatforms.has(platform), 'Store platform scope is valid')
 
 async function request(url, options = {}) {
   const controller = new AbortController()
@@ -28,7 +31,7 @@ async function request(url, options = {}) {
   }
 }
 
-async function probePage(label, url, expectedText, expectedPath) {
+async function probePage(label, url, expectedText, expectedPath, requiredContent = []) {
   try {
     const response = await request(url)
     const body = await response.text()
@@ -36,6 +39,7 @@ async function probePage(label, url, expectedText, expectedPath) {
     check(response.status === 200, `${label} returns HTTP 200`)
     check(finalUrl.pathname.replace(/\/+$/, '') === expectedPath.replace(/\/+$/, ''), `${label} stays on its product-specific URL`)
     check(expectedText.test(body), `${label} contains Operator-specific content`)
+    for (const requirement of requiredContent) check(requirement.pattern.test(body), requirement.message)
   } catch (error) {
     fail(`${label} could not be reached: ${error.message}`)
   }
@@ -85,7 +89,28 @@ await probeRoute('Store verification route', '/v1/iap/verify', emptyPost)
 await probeRoute('Commentary route', '/v1/studies/00000000-0000-4000-8000-000000000000/commentary', { headers: { 'x-install-id': '00000000-0000-4000-8000-000000000000' } })
 await probeRoute('Workspace sync route', '/v1/studies/00000000-0000-4000-8000-000000000000/workspace', { ...emptyPost, method: 'PATCH' })
 
-await probePage('Privacy policy', metadata.app.privacyUrl, /The Operator|operator-privacy/i, '/operator/privacy')
+const privacyDisclosureRequirements = [
+  {
+    pattern: /keyed one-way hash of the registration request IP address/i,
+    message: 'Public privacy policy discloses the registration-request IP hash',
+  },
+  {
+    pattern: /raw IP address is not stored/i,
+    message: 'Public privacy policy discloses that the raw registration IP is not stored',
+  },
+  {
+    pattern: /no more than 48 hours/i,
+    message: 'Public privacy policy discloses the IP-hash retention boundary',
+  },
+]
+
+await probePage(
+  'Privacy policy',
+  metadata.app.privacyUrl,
+  /The Operator|operator-privacy/i,
+  '/operator/privacy',
+  privacyDisclosureRequirements,
+)
 await probePage('Terms of use', metadata.app.termsUrl, /The Operator|Operator Terms/i, '/operator/terms')
 await probePage('Account deletion page', metadata.app.accountDeletionUrl, /Delete Your Account|Delete.*Operator Account/i, '/operator/account-deletion')
 await probePage('Support page', metadata.app.supportUrl, /contact|support|info@base1520\.com/i, '/contact')

@@ -6,6 +6,10 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { mobileVersionContract } from './mobile-version-contract.mjs'
+import {
+  appleScreenshotProvenanceIsConsistent,
+  hasAppleScreenshotSubmissionHold,
+} from './screenshot-provenance.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(import.meta.url)
@@ -135,11 +139,14 @@ const terms = read('website/operator-terms.html')
 const privacy = read('website/operator-privacy-addendum.html')
 const serverIndex = read('server/src/index.js')
 const serverAuth = read('server/src/auth.js')
+const studyAiAccess = read('server/src/study-ai-access.js')
+const studyCommentary = read('server/src/study-commentary.js')
 const serverSchema = read('server/src/schema.sql')
 const accountRecovery = read('server/src/account-recovery.js')
 const privacyManifest = read('ios/App/App/PrivacyInfo.xcprivacy')
 const mobileApi = read('src/mobile/api.ts')
 const mobileStore = read('src/mobile/store.ts')
+const serverIap = read('server/src/iap.js')
 const mobileAccount = read('server/src/mobile-account.js')
 const accountRegistration = read('server/src/account-registration.js')
 const mobileRoutes = read('server/src/mobile.js')
@@ -157,8 +164,12 @@ const mobileSource = fs.readdirSync(path.join(root, 'src/mobile'), { withFileTyp
 const readiness = read('server/src/readiness.js')
 const liveStoreGate = read('scripts/check-mobile-store-live.mjs')
 const screenshotPlan = read('store/screenshots.md')
+const releaseChecklist = read('store/release-checklist.md')
+const releaseLedger = read('store/release-ledger.md')
 const productPlan = read('store/products.md')
 const consoleActionPacket = read('store/console-action-packet.md')
+const appleConsoleCompletionPacket = read('store/apple-console-completion-packet.md')
+const reviewNotes = read('store/review-notes.md')
 
 const usd = (value) => `$${Number(value).toLocaleString('en-US', {
   minimumFractionDigits: 2,
@@ -198,6 +209,123 @@ check(
     googleConsoleRows.every((row) => consoleActionPacket.includes(row)) &&
     consoleActionPacket.includes('**Only FIVE are purchasable on iOS.**'),
   'Console transcription packet matches canonical store prices, allowances, periods, and iOS scope',
+)
+
+const reviewerIdentityInstructions = `${consoleActionPacket}\n${reviewNotes}`
+check(
+  /SELECT email FROM account WHERE id = \$1/.test(serverIap) &&
+    /appAccountToken:\s*accountId/.test(mobileStore) &&
+    consoleActionPacket.includes('Add the dedicated Operator reviewer account email to `IAP_SANDBOX_ACCOUNT_EMAILS`') &&
+    /Separately\s+configure and use Apple's sandbox tester identity/.test(consoleActionPacket) &&
+    reviewNotes.includes('add its exact email to `IAP_SANDBOX_ACCOUNT_EMAILS`') &&
+    reviewNotes.includes('Separately configure and use the appropriate Apple/Google sandbox or test purchaser identity') &&
+    reviewNotes.includes('Do not assume or require those identities to use the same email') &&
+    !/exact (?:account )?email (?:is|must be) (?:also )?present in both/i.test(reviewerIdentityInstructions),
+  'Reviewer instructions separate the Operator allowlist identity from the store purchaser identity',
+)
+
+const appleIdentityInstruction = consoleActionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('**SKU and Primary Language:**')) || ''
+check(
+  appleIdentityInstruction.includes('Read the existing values in App Store Connect') &&
+    /Neither has an\s+independently verified current value in canonical metadata or this packet/.test(consoleActionPacket) &&
+    /Do not infer, overwrite,\s+or transcribe either value from an older packet/.test(consoleActionPacket) &&
+    !consoleActionPacket.includes('**SKU:**'),
+  'Console action packet requires console-read SKU and Primary Language instead of an asserted value',
+)
+
+const appleReviewNotesRow = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| App Review notes |')) || ''
+check(
+  appleReviewNotesRow.includes('store/review-notes.md') &&
+    appleReviewNotesRow.includes('device-link code') &&
+    !/\b(?:access|comp) code\b/i.test(appleReviewNotesRow),
+  'Apple completion packet requires a device-link code for App Review',
+)
+
+const appleContentRightsRow = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Content Rights |')) || ''
+check(
+  appleContentRightsRow.includes('store/review-notes.md') &&
+    appleContentRightsRow.includes('website/operator-terms.html') &&
+    appleContentRightsRow.includes('live console declaration not proved') &&
+    reviewNotes.includes('initial store build includes public-domain translations only') &&
+    terms.includes('only Bible translations BASE1520 is authorized to distribute'),
+  'Apple completion packet records a sourced Content Rights basis without claiming console completion',
+)
+
+const appleSkuGapRow = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| SKU |')) || ''
+check(
+  appleSkuGapRow.includes('No exact SKU is locally recorded') &&
+    appleSkuGapRow.includes('bundle ID is not evidence of the SKU') &&
+    appleSkuGapRow.includes('Do not infer or replace it'),
+  'Apple completion packet records SKU as an explicit non-inferable console gap',
+)
+
+const applePrimaryLanguageGapRow = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Primary Language |')) || ''
+check(
+  applePrimaryLanguageGapRow.includes('No exact Primary Language is locally recorded') &&
+    applePrimaryLanguageGapRow.includes('English copy does not prove the console selection') &&
+    applePrimaryLanguageGapRow.includes('Do not infer it from the listing text'),
+  'Apple completion packet records Primary Language as an explicit non-inferable console gap',
+)
+
+const appleAgeRatingGapRow = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Age-rating questionnaire |')) || ''
+check(
+  appleAgeRatingGapRow.includes('Neither questionnaire answers nor the resulting rating exists') &&
+    appleAgeRatingGapRow.includes('current questionnaire against the current build') &&
+    appleAgeRatingGapRow.includes('record the answers and resulting rating') &&
+    !/\b(?:complete|completed|saved|ready)\b/i.test(appleAgeRatingGapRow),
+  'Apple completion packet records age rating as an unresolved questionnaire-derived console gap',
+)
+
+const appleReviewContactGapRow = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| App Review contact |')) || ''
+check(
+  appleReviewContactGapRow.includes('No explicit review-contact name, email, or phone block exists') &&
+    appleReviewContactGapRow.includes('general support email is not evidence of the intended App Review contact') &&
+    appleReviewContactGapRow.includes('Cole supplies/approves the name, email, and phone for App Review') &&
+    appleReviewContactGapRow.includes('record only the approved non-secret contact fields') &&
+    !/\b(?:complete|completed|configured|entered|provided|saved|ready)\b/i.test(appleReviewContactGapRow),
+  'Apple completion packet records App Review contact as an explicit approval-bound console gap',
+)
+
+const externalReleaseGates = releaseLedger
+  .split('## External release gates\n')[1]?.split('\n## ')[0] || ''
+const signingEvidence = releaseLedger
+  .split('## Signing evidence still required\n')[1]?.split('\n## ')[0] || ''
+check(
+  externalReleaseGates.includes('build `1.4.2 (5)`') &&
+    externalReleaseGates.includes('Build 4 must not be attached or selected for final submission') &&
+    externalReleaseGates.includes('build-5 captures') &&
+    signingEvidence.includes('receipts for build 5') &&
+    signingEvidence.includes('Build 4 is historical upload evidence only') &&
+    !/\b(?:attach|select)[^\n]*\bbuild(?: |-)?4\b/i.test(externalReleaseGates) &&
+    !/listing-selection receipt for build 4/i.test(signingEvidence),
+  'Release ledger forward actions preserve the build-5 candidate boundary',
+)
+
+const historicalBuild4ProcessingBoundary = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('Processing/selectability remains unverified.')) || ''
+check(
+  historicalBuild4ProcessingBoundary.includes('Build 4 may still be read for upload history only') &&
+    historicalBuild4ProcessingBoundary.includes('must not be selected or submitted') &&
+    historicalBuild4ProcessingBoundary.includes('provenance-clean build 5') &&
+    historicalBuild4ProcessingBoundary.includes('attach/select build 5 under fresh action-time approval') &&
+    !/until build 4 appears/i.test(historicalBuild4ProcessingBoundary) &&
+    !/listing is explicitly switched/i.test(historicalBuild4ProcessingBoundary),
+  'Release checklist keeps historical build 4 out of the final selection path',
 )
 
 check(metadata.app.name.length <= 30, 'App name fits both stores')
@@ -253,6 +381,12 @@ check(
 check(!terms.includes("ESV text requires the user's own authorized ESV API key"), 'Terms do not promise the unlicensed ESV-key path')
 check(!privacy.includes('<strong>ESV API key:</strong>'), 'Privacy notice matches the initial no-ESV store build')
 check(privacy.includes("Anthropic's API") && privacy.includes('asks for permission'), 'Privacy notice discloses third-party AI processing and permission')
+check(
+  privacy.includes('keyed one-way hash of the registration request IP address') &&
+    privacy.includes('for no more than 48 hours') &&
+    privacy.includes('the raw IP address is not stored'),
+  'Public privacy notice discloses registration IP hashing and the 48-hour retention boundary',
+)
 check(serverIndex.includes("app.post('/v1/sermon-assist'") && serverIndex.includes('engine.runSermonAssist'), 'Visible tablet specialist agents have a server route')
 check(mobileApp.includes('releaseStatus.capabilities.account_recovery_email'), 'Mobile registration follows the live recovery-email capability')
 check(mobileRoutes.includes("app.post('/v1/mobile/register/confirm'") && accountRegistration.includes('confirmRegistrationCode'), 'New accounts require a verified email code before bearer issuance')
@@ -273,7 +407,15 @@ check(recordings.includes('moveSermonRecordings') && mobileApp.includes('moveSer
 check(localStudies.includes('workspaceDirty') && localStudies.includes('notesDirty') && mobileApp.includes('localChanged'), 'Cloud refreshes cannot overwrite dirty local notes or sermon-desk work')
 check(!/if \(reachedServer && state\?\.anonymous\)[\s\S]{0,500}deleteLocalStudies/.test(mobileApp), 'A revoked device token hides account work instead of deleting its local studies')
 check(/await signOutDevice\(\)[\s\S]{0,240}clearActiveReading\(\)/.test(mobileApp), 'Sign-out clears former account content from the active reading surface')
-check(serverAuth.includes('installId: null') && serverIndex.match(/account_id IS NULL AND install_id = \$3/g)?.length === 4, 'Revoked bearers cannot reuse a caller-controlled install ID to read claimed studies')
+check(
+  serverAuth.includes('installId: null')
+    && serverIndex.match(/account_id IS NULL AND install_id = \$3/g)?.length === 2
+    && studyAiAccess.match(/account_id IS NULL AND install_id = \$3/g)?.length === 1
+    && serverIndex.match(/resolveOwnedStudyDocument\(db,/g)?.length === 2
+    && studyCommentary.match(/resolveOwnedStudyDocument\(db,/g)?.length === 1
+    && studyCommentary.includes("surface: 'commentary'"),
+  'Revoked bearers cannot reuse a caller-controlled install ID to read claimed studies',
+)
 check(serverIndex.includes("releaseStage() !== 'full'") && serverIndex.match(/requireGeneratedStudyAccount\(req, res\)/g)?.length === 5, 'The full store backend requires a verified account before generated spend')
 check(accountRecovery.includes('account_recovery_request') && serverSchema.includes('CREATE TABLE IF NOT EXISTS account_recovery_request'), 'Known and unknown recovery emails share the same persistent cooldown ledger')
 check(accountRegistration.includes('SET account_id = $2') && mobileAccount.includes('DELETE FROM account_registration_code'), 'Registration metadata is account-bound and removed during explicit deletion')
@@ -397,7 +539,11 @@ for (const { label, directory, width, height, minCount, maxCount, ios } of scree
   }
 }
 
-check(!/^> Apple submission hold:/m.test(screenshotPlan), 'Apple screenshot set has no unresolved visual submission hold')
+check(!hasAppleScreenshotSubmissionHold(screenshotPlan), 'Apple screenshot set has no unresolved visual submission hold')
+check(
+  appleScreenshotProvenanceIsConsistent(screenshotPlan, releaseChecklist),
+  'Apple screenshot hold matches the canonical build-provenance state',
+)
 if (/^> Android creative hold:/m.test(screenshotPlan)) warn('Android screenshots remain on a documented creative hold')
 check(!/^> PRICE HOLD:/m.test(productPlan), 'Store subscription prices have Cole approval')
 
@@ -406,6 +552,7 @@ for (const relative of [
   'store/products.md',
   'store/privacy-data.md',
   'store/review-notes.md',
+  'store/apple-console-completion-packet.md',
   'store/screenshots.md',
   'store/release-checklist.md',
   'store/release-ledger.md',

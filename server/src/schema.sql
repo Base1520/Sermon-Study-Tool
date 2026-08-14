@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS device (
 );
 CREATE INDEX IF NOT EXISTS device_account_idx ON device(account_id);
 ALTER TABLE device ADD COLUMN IF NOT EXISTS platform text;
+ALTER TABLE device ADD COLUMN IF NOT EXISTS install_data_claimed_at timestamptz;
 
 CREATE TABLE IF NOT EXISTS device_link (
   code_hash             text PRIMARY KEY,

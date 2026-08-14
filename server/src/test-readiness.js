@@ -59,6 +59,7 @@ function schemaChecks(overrides = {}) {
     account_registration_account_column: true,
     account_registration_source_ip_column: true,
     account_deleting_column: true,
+    device_install_data_claimed_column: true,
     billing_anchor_column: true,
     provider_event_column: true,
     study_workspace_column: true,
@@ -138,6 +139,18 @@ test('readiness fails closed when recovery throttles cannot treat unknown emails
   const result = await probeReadiness(db, READY_ENV)
   assert.equal(result.ok, false)
   assert.deepEqual(result.missing, ['account_recovery_request_table'])
+})
+
+test('readiness fails closed before the one-time install adoption marker exists', async () => {
+  const db = {
+    async query() {
+      return { rows: [schemaChecks({ device_install_data_claimed_column: false })] }
+    },
+  }
+
+  const result = await probeReadiness(db, READY_ENV)
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.missing, ['device_install_data_claimed_column'])
 })
 
 test('readiness passes only when the complete mobile billing schema exists', async () => {

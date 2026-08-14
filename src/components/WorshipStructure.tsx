@@ -839,10 +839,14 @@ export default function WorshipStructure({ width, height }: Props) {
           {/* Subtle horizontal rule at equator */}
           <line x1={0} y1={DIAGRAM_H*0.5} x2={width} y2={DIAGRAM_H*0.5}
             stroke={`${GOLD}06`} strokeWidth={80}/>
-          {/* Scene with drop shadow — zoom scales around viewport center */}
+          {/* Scene with drop shadow — zoom scales around viewport center.
+              The structures were tuned around a 620×500 canvas (ox 310, oy 250);
+              the inner translate re-centers that tuned origin for the actual tile size. */}
           <g transform={`translate(${width/2},${DIAGRAM_H/2}) scale(${zoom}) translate(${-width/2},${-DIAGRAM_H/2})`}>
-            <g filter="url(#softShadow)">
-              {cfg.render(selZone, onZone)}
+            <g transform={`translate(${width/2 - 310},${DIAGRAM_H/2 - 250})`}>
+              <g filter="url(#softShadow)">
+                {cfg.render(selZone, onZone)}
+              </g>
             </g>
           </g>
           {/* Vignette overlay (non-interactive) */}

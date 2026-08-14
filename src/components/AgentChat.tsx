@@ -71,7 +71,7 @@ const AGENT_META: Record<AgentType, {
   theological: {
     label: 'Theological Agent',
     subtitle: 'Canon · Doctrine · Redemptive History',
-    icon: '✝',
+    icon: '†',
     accentColor: BASE.gold,
     bgColor: `${BASE.bgCard}cc`,
     greeting: (ref, _) => ref

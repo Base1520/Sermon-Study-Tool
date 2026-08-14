@@ -602,7 +602,7 @@ function TabletSermonDeskInner({
             <button onClick={() => addNode('note')} disabled={locked}>+ NOTE</button>
             <button onClick={() => addNode('illustration')} disabled={locked}>+ ILLUSTRATION</button>
             <button onClick={() => addNode('ink')} disabled={locked}>✎ PENCIL</button>
-            <button className={tilesOpen ? 'active' : ''} onClick={() => setTilesOpen((open) => !open)}>TILES {hiddenNodes.length ? `· ${hiddenNodes.length}` : ''}</button>
+            <button className={tilesOpen ? 'active' : ''} onClick={() => setTilesOpen((open) => !open)}>+ TILES {hiddenNodes.length ? `· ${hiddenNodes.length}` : ''}</button>
             <button onClick={fitDesk}>FIT</button>
             <button className={locked ? 'active' : ''} onClick={() => setLocked((value) => !value)}>{locked ? '🔒 LOCKED' : 'LOCK DESK'}</button>
           </div>
@@ -624,7 +624,7 @@ function TabletSermonDeskInner({
         {deskNotice && <div className="tablet-desk-notice" role="alert"><span>{deskNotice}</span><button aria-label="Dismiss desk notice" onClick={() => setDeskNotice(null)}>×</button></div>}
 
         {tilesOpen && <div className="tablet-tile-library">
-          <header><div><span>DESK TILES</span><strong>{hiddenNodes.length ? 'RESTORE A CLOSED TILE' : 'EVERY CORE TILE IS OPEN'}</strong></div><button onClick={() => setTilesOpen(false)}>×</button></header>
+          <header><div><span>DESK TILES</span><strong>{hiddenNodes.length ? 'ADD A TILE TO THE DESK' : 'EVERY TILE IS ON THE DESK'}</strong></div><button onClick={() => setTilesOpen(false)}>×</button></header>
           {hiddenNodes.map((node) => <button key={node.id} onClick={() => { restoreNode(node.id); setTilesOpen(false) }}><span>+</span><div><strong>{node.data.title}</strong><small>{node.data.eyebrow}</small></div></button>)}
         </div>}
 

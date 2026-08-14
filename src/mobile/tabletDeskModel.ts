@@ -237,8 +237,9 @@ function node(
   width: number,
   height: number,
   data: TabletDeskTileData,
+  hidden = false,
 ): TabletDeskNode {
-  return { id, type, position: { x, y }, width, height, data }
+  return { id, type, position: { x, y }, width, height, hidden, data }
 }
 
 export function createTabletSermonWorkspace(document: GuidedStudyDoc, passage: PassageResult): TabletSermonWorkspace {
@@ -284,30 +285,32 @@ export function createTabletSermonWorkspace(document: GuidedStudyDoc, passage: P
         content: manuscriptScaffold(document), editable: true,
         sourceRefs: document.mainClaimSources, accent: 'gold',
       }),
+      // Secondary tiles start hidden — the desk opens with the core study set
+      // and everything below is one tap away in ADD TILES.
       node('ink-1', 'inkTile', 80, 1240, 500, 430, {
         kind: 'ink', eyebrow: 'STYLUS', title: 'PENCIL NOTES',
         content: '', editable: true, sourceRefs: [], accent: 'gold', strokes: [],
-      }),
+      }, true),
       node('map', 'referenceTile', 1950, 80, 760, 600, {
         kind: 'map', eyebrow: 'BIBLICAL WORLD', title: 'PASSAGE MAP',
         content: '', editable: false, sourceRefs: [], accent: 'blue',
-      }),
+      }, true),
       node('lineage', 'referenceTile', 1950, 730, 620, 640, {
         kind: 'lineage', eyebrow: 'REFERENCE', title: 'LINEAGE',
         content: '', editable: false, sourceRefs: [], accent: 'khaki',
-      }),
+      }, true),
       node('timeline', 'referenceTile', 80, 1780, 1200, 620, {
         kind: 'timeline', eyebrow: 'HISTORICAL FRAME', title: 'BIBLICAL TIMELINE',
         content: '', editable: false, sourceRefs: [], accent: 'khaki',
-      }),
+      }, true),
       node('temple', 'referenceTile', 1340, 1780, 760, 680, {
         kind: 'temple', eyebrow: 'TABERNACLE + TEMPLES', title: 'WORSHIP STRUCTURES',
         content: '', editable: false, sourceRefs: [], accent: 'gold',
-      }),
+      }, true),
       node('commentary', 'commentaryTile', 2150, 1420, 650, 650, {
         kind: 'commentary', eyebrow: 'CITATION FIRST', title: 'COMMENTARIES',
         content: '', editable: false, sourceRefs: [], accent: 'gold',
-      }),
+      }, true),
     ],
   }
 }

@@ -17,7 +17,7 @@ export const TABLET_AGENT_META: Record<TabletAgentRole, {
     starters: ['Show me the controlling structure.', 'Where am I most likely to overclaim?', 'Which words carry the argument?'],
   },
   theological: {
-    icon: '✝',
+    icon: '†',
     label: 'THEOLOGICAL',
     promise: 'Canonical placement, doctrine, covenant, Christ, and redemptive history.',
     starters: ['Trace the canonical arc.', 'What doctrine is actually at stake?', 'Show me the already / not yet tension.'],

@@ -797,7 +797,7 @@ export default function App() {
         }}>
           {([
             { type: 'exegetical'  as const, icon: 'α',  label: 'EXEGETICAL',  color: BASE.khaki },
-            { type: 'theological' as const, icon: '✝',  label: 'THEOLOGICAL', color: BASE.gold },
+            { type: 'theological' as const, icon: '†',  label: 'THEOLOGICAL', color: BASE.gold },
             { type: 'homiletical' as const, icon: '◈',  label: 'HOMILETICAL', color: BASE.moss },
             // None of the three agent desks appear in PLAIN. The homiletical one
             // is preaching apparatus outright, and ALL THREE run through the

@@ -1,7 +1,7 @@
 {
   "name": "the-operator",
-  "version": "1.4.4",
-  "description": "Study any passage of Scripture in its own context — what the author meant, how you know, and what to do with it.",
+  "version": "1.4.5",
+  "description": "Study any passage of Scripture in its own context \u2014 what the author meant, how you know, and what to do with it.",
   "main": "electron/main.js",
   "featureFlags": {
     "theologyRetrieval": false

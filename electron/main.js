@@ -18,6 +18,8 @@ const { createRecorder, summarize } = require('./plainread/usage')
 const { analyzePassage, analysisCacheKey, explicitGeoReferences, forGeneration } = require('./plainread/analyze')
 // The hosted path. Inert unless OPERATOR_API_URL is set — see hosted/client.js.
 const hosted = require('./hosted/client')
+const { resumeDecision, createSingleFlight } = require('./hosted/resume-policy')
+const hostedPlainReadFlights = createSingleFlight()
 
 /**
  * studyId carried from the analysis to the reading, keyed by reference.
@@ -42,10 +44,22 @@ const studyKey = (reference) => String(reference ?? '').trim().toLowerCase()
  * paywall for the second half of a study he already bought, with no way to
  * recover it. For a subscriber it is the same event billed as a second study.
  */
-const rememberStudy = (reference, studyId) => {
+const rememberStudy = (reference, studyId, { finished = false } = {}) => {
   if (!reference || !studyId || !store) return
   const all = store.get(STUDY_ID_KEY, {})
-  all[studyKey(reference)] = { studyId, at: Date.now() }
+  const key = studyKey(reference)
+  const previous = all[key]
+  all[key] = {
+    // The newest analysis claim is what Plain Read must try to ride. It may be
+    // analyzed, reading, done, or stranded; the server remains authoritative.
+    studyId,
+    // Scholar grounding is stricter. An analysis id is not evidence that a
+    // document exists, so preserve the last id that actually returned a done
+    // frame and promote only at that boundary. Legacy entries have neither
+    // field and therefore fail visibly to general mode until reopened.
+    finishedStudyId: finished ? studyId : (previous?.finishedStudyId ?? null),
+    at: Date.now(),
+  }
   // Bounded, oldest first, so a long-lived install does not grow this forever.
   const keys = Object.keys(all)
   if (keys.length > 50) {
@@ -74,11 +88,19 @@ const recallStudy = (reference) => {
   return entry.studyId
 }
 
-const forgetStudy = (reference) => {
-  if (!store) return
-  const all = store.get(STUDY_ID_KEY, {})
-  delete all[studyKey(reference)]
-  store.set(STUDY_ID_KEY, all)
+const recallFinishedStudy = (reference) => {
+  const entry = store?.get(STUDY_ID_KEY, {})?.[studyKey(reference)]
+  return entry?.finishedStudyId ?? null
+}
+
+/** Resolve the Scholar mode from the same private state used at send time. */
+const resolveScholarChatContext = (passageContext) => {
+  const reference = String(passageContext?.reference ?? '').trim()
+  if (hosted.hostedBaseUrl()) {
+    const studyId = recallFinishedStudy(reference)
+    return { reference, studyId, mode: studyId ? 'grounded' : 'general' }
+  }
+  return { reference, studyId: null, mode: reference ? 'grounded' : 'general' }
 }
 
 /**
@@ -1074,7 +1096,9 @@ const { plainRead, cacheKeyFor } = require('./plainread/pipeline')
 //   * MATCH BEFORE YOU RENDER, same as 'plain-read-verified' above: compare
 //     requestId against the request in flight and drop anything stale. Two
 //     passages in quick succession produce two streams.
-ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force, level, requestId }) => {
+ipcMain.handle('plain-read', async (event, {
+  analysis, requestedReference, force, level, requestId, resumeOnly = false,
+}) => {
   // Ties this document, its retries and its verify pass to one study in the
   // ledger, so summarize() reports cost per STUDY rather than per API call.
   const __studyId = newStudyId()
@@ -1096,10 +1120,45 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
   // back toward the total, streaming has quietly broken.
   let __firstSection = 0
 
+  /**
+   * A RESTORE IS NOT A NEW STUDY.
+   *
+   * Launch and history-open use this handler with resumeOnly=true. The main
+   * process owns the only trustworthy evidence: the verified local cache and
+   * the persisted analysis study id. A restore may return the former or finish
+   * the latter. It must never fall through to local generation or ask the
+   * hosted server to reserve a fresh study merely because the renderer opened.
+   */
+  if (resumeOnly && !analysis) {
+    __done('restore skipped (no analysis)')
+    return null
+  }
+
+  const hostedEnabled = Boolean(hosted.hostedBaseUrl())
+  const cleanAnalysis = forGeneration(analysis)
+  const localKey = cacheKeyFor(cleanAnalysis, level)
+  const cachedDoc = store?.get(localKey, null)
+  const reference = requestedReference ?? analysis?.reference
+  const priorStudyId = hostedEnabled ? recallStudy(reference) : null
+  const restore = resumeDecision({
+    cachedDocument: cachedDoc,
+    hostedEnabled,
+    studyId: priorStudyId,
+  })
+
+  if (restore === 'cached' && (!force || resumeOnly)) {
+    __done('served from local cache')
+    return cachedDoc
+  }
+  if (resumeOnly && restore === 'none') {
+    __done('restore skipped (nothing resumable)')
+    return null
+  }
+
   // ── HOSTED ────────────────────────────────────────────────────────────────
   // Same streaming contract as the local path: onSection(key, value) forwarded
   // to the same renderer event, so the desk cannot tell the two apart.
-  if (hosted.hostedBaseUrl()) {
+  if (hostedEnabled) {
     /**
      * THE LOCAL CACHE IS CHECKED FIRST, and that is not an optimisation.
      *
@@ -1109,45 +1168,42 @@ ipcMain.handle('plain-read', async (event, { analysis, requestedReference, force
      * a free user could not re-open his one study at all. The desktop already
      * keeps every document it has generated; hand it back.
      */
-    const cleanAnalysis = forGeneration(analysis)
-    const localKey = cacheKeyFor(cleanAnalysis, level)
-    const cachedDoc = store?.get(localKey, null)
-    if (cachedDoc && cachedDoc.verification?.status === 'ok' && !force) {
-      __done('served from local cache')
-      return cachedDoc
-    }
-
-    const priorStudyId = recallStudy(requestedReference ?? analysis?.reference)
     try {
-      const doc = await hosted.plainRead(store, {
-        analysis: forGeneration(analysis),
-        reference: requestedReference ?? analysis?.reference,
-        level,
-        studyId: priorStudyId,
-        // NOT aborted when the window closes. The server finishes a study it
-        // has started — that is rule 4 of meter.js — and the document is cached
-        // on arrival, so closing the app mid-reading now costs nothing and the
-        // finished reading is waiting when he comes back. Dropping the request
-        // instead would have burned the claim and lost the document.
-        onSection: (key, value) => {
-          try {
-            if (!event.sender || event.sender.isDestroyed()) return
-            if (!__firstSection && key !== '__reset__') {
-              __firstSection = Date.now()
-              console.log(`[plain-read] FIRST SECTION '${key}' in ${((__firstSection - __t0) / 1000).toFixed(1)}s (hosted)`)
-            }
-            event.sender.send('plain-read-section', {
-              requestId: requestId ?? null,
-              requestedReference: requestedReference ?? null,
-              key,
-              value,
-            })
-          } catch {}
-        },
-      })
-      // The claim is spent. Holding the id would make a re-read of the same
-      // passage try to ride a study the server has already closed.
-      forgetStudy(requestedReference ?? analysis?.reference)
+      const flightKey = `${localKey}|${priorStudyId ?? 'fresh'}`
+      const { document: doc, studyId: completedStudyId } = await hostedPlainReadFlights.run(
+        flightKey,
+        () => hosted.plainRead(store, {
+          analysis: cleanAnalysis,
+          reference,
+          level,
+          studyId: priorStudyId,
+          resumeOnly,
+          // NOT aborted when the window closes. The server finishes a study it
+          // has started — that is rule 4 of meter.js — and the document is cached
+          // on arrival, so closing the app mid-reading now costs nothing and the
+          // finished reading is waiting when he comes back. Dropping the request
+          // instead would have burned the claim and lost the document.
+          onSection: (key, value) => {
+            try {
+              if (!event.sender || event.sender.isDestroyed()) return
+              if (!__firstSection && key !== '__reset__') {
+                __firstSection = Date.now()
+                console.log(`[plain-read] FIRST SECTION '${key}' in ${((__firstSection - __t0) / 1000).toFixed(1)}s (hosted)`)
+              }
+              event.sender.send('plain-read-section', {
+                requestId: requestId ?? null,
+                requestedReference: requestedReference ?? null,
+                key,
+                value,
+              })
+            } catch {}
+          },
+        }),
+      )
+      // Scholar and Ask read this same association. The server may replace a
+      // stranded reservation while finishing the reading, so retain/re-bind
+      // the authoritative id from the done frame instead of deleting it.
+      if (completedStudyId) rememberStudy(reference, completedStudyId, { finished: true })
       /**
        * ONLY A VERIFIED DOCUMENT MAY BE CACHED.
        *
@@ -1904,7 +1960,14 @@ ipcMain.handle('fetch-bible', async (_, { reference, translation = 'kjv' }) => {
 })
 
 // ── Scholar Chat ──────────────────────────────────────────────────────────────
-ipcMain.handle('scholar-chat', async (event, { messages, passageContext, streamId }) => {
+ipcMain.handle('scholar-chat-context', async (_event, { passageContext } = {}) => {
+  const { mode } = resolveScholarChatContext(passageContext)
+  return { mode }
+})
+
+ipcMain.handle('scholar-chat', async (event, {
+  messages, passageContext, streamId, contextReceipt = false,
+}) => {
   requireFeature('gen.scholar')
 
   // ── HOSTED ────────────────────────────────────────────────────────────────
@@ -1918,16 +1981,12 @@ ipcMain.handle('scholar-chat', async (event, { messages, passageContext, streamI
   // The local branch below is untouched and still runs when OPERATOR_API_URL is
   // unset, so a man with his own key notices no change.
   if (hosted.hostedBaseUrl()) {
-    const reference = passageContext?.reference || ''
-    const studyId = recallStudy(reference)
-    // The route reads the document and analysis from the study row it owns and
-    // ignores anything we claim about them, so without a finished study there is
-    // nothing to ground an answer in. Say that plainly instead of surfacing a 404.
-    if (!studyId) {
-      throw asRendererError(new Error(
-        'Open a finished study from your library, then ask the Scholar from that reading.',
-      ))
-    }
+    const { studyId, mode } = resolveScholarChatContext(passageContext)
+    // A remembered id grounds the answer in the study row the server owns. No
+    // id is no longer a wall (Cole's call, 2026-08-15): the server's scholar
+    // answers as a standing conversation, ungrounded and saying so, metered as
+    // the same one Ask. Legacy cached studies and mid-stream readings land here
+    // until adoption gives them server rows.
 
     const list = Array.isArray(messages)
       ? messages.filter((m) => m && typeof m.content === 'string')
@@ -1947,14 +2006,22 @@ ipcMain.handle('scholar-chat', async (event, { messages, passageContext, streamI
 
     try {
       const reply = await hosted.sermonAssist(store, {
-        studyId,
+        studyId: studyId ?? null,
         agent: 'scholar',
         question,
         history,
       })
       // The renderer assigns this straight into message content, so it must be a
       // string — /v1/sermon-assist answers with { answer }.
-      return String(reply?.answer ?? '')
+      // Return the exact mode used for this answer. The desktop can promote a
+      // same-reference reading from analyzed to done while Scholar is mounted;
+      // an answer without this receipt could be grounded while the badge kept
+      // saying general (or the reverse) until the component remounted.
+      const answer = String(reply?.answer ?? '')
+      // HymnSelector and SlideDeck also use this IPC and still consume its
+      // legacy string/JSON contract. Only ScholarChat opts into the richer
+      // receipt; widening the shared default breaks those generators.
+      return contextReceipt ? { answer, mode } : answer
     } catch (e) {
       throw asRendererError(e)
     }

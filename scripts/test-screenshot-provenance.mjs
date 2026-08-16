@@ -6,6 +6,7 @@ import {
   APPLE_IPAD_LANDSCAPE_DIMENSIONS,
   STORE_SCREENSHOT_SETS,
   appleScreenshotProvenanceIsConsistent,
+  hasAndroidScreenshotCreativeHold,
   hasAppleScreenshotSubmissionHold,
   screenshotDimensionsMatch,
 } from './screenshot-provenance.mjs'
@@ -17,8 +18,19 @@ const readinessSource = fs.readFileSync(path.join(root, 'scripts/check-mobile-st
 
 const tests = [
   {
-    name: 'canonical Apple screenshot hold remains active until the build-5 iPad set is complete',
+    name: 'canonical Apple screenshot hold remains active until a build-6-proven iPad set is complete',
     run: () => assert.equal(hasAppleScreenshotSubmissionHold(screenshotPlan), true),
+  },
+  {
+    name: 'canonical Android screenshot hold remains active until the tablet set is recaptured',
+    run: () => assert.equal(hasAndroidScreenshotCreativeHold(screenshotPlan), true),
+  },
+  {
+    name: 'a screenshot plan without the Android creative hold is locally clear',
+    run: () => assert.equal(
+      hasAndroidScreenshotCreativeHold('> Android tablet set ready: corrected release-candidate captures.'),
+      false,
+    ),
   },
   {
     name: 'native build-5 iPad landscape captures match the checker dimensions',
@@ -68,6 +80,13 @@ const tests = [
     run: () => assert.match(
       readinessSource,
       /appleScreenshotProvenanceIsConsistent\(screenshotPlan, releaseChecklist\)/,
+    ),
+  },
+  {
+    name: 'the mobile readiness gate fails on the shared Android creative hold',
+    run: () => assert.match(
+      readinessSource,
+      /check\(!hasAndroidScreenshotCreativeHold\(screenshotPlan\), 'Android screenshot set has no unresolved visual submission hold'\)/,
     ),
   },
   {

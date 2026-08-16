@@ -121,6 +121,7 @@ async function redeemDeviceLink(db, auth, { code, installId, label, platform }) 
   }
 
   const client = await db.connect()
+  let capacityWarning = null
   try {
     await client.query('BEGIN')
     const linkResult = await client.query(
@@ -147,7 +148,7 @@ async function redeemDeviceLink(db, auth, { code, installId, label, platform }) 
       throw new MobileRouteError(409, 'ACCOUNT_NOT_ACTIVE', 'That account is not active right now.')
     }
 
-    await client.query(
+    const sameInstallRevoke = await client.query(
       `UPDATE device SET revoked_at = now()
         WHERE account_id = $1 AND install_id = $2 AND revoked_at IS NULL`,
       [accountId, installId],
@@ -158,7 +159,9 @@ async function redeemDeviceLink(db, auth, { code, installId, label, platform }) 
         WHERE account_id = $1 AND revoked_at IS NULL`,
       [accountId],
     )
-    if (Number(countResult.rows[0]?.count || 0) >= MAX_ACTIVE_DEVICES) {
+    const activeDeviceCount = Number(countResult.rows[0]?.count || 0)
+    if (activeDeviceCount >= MAX_ACTIVE_DEVICES) {
+      capacityWarning = `[device-link] capacity refused same_install_match=${sameInstallRevoke.rowCount > 0 ? 'yes' : 'no'} active_after_tentative_revoke=${activeDeviceCount}`
       throw new MobileRouteError(
         409,
         'DEVICE_LIMIT',
@@ -190,6 +193,9 @@ async function redeemDeviceLink(db, auth, { code, installId, label, platform }) 
     throw error
   } finally {
     client.release()
+    if (capacityWarning) {
+      try { console.warn(capacityWarning) } catch {}
+    }
   }
 }
 

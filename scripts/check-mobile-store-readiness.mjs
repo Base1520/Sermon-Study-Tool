@@ -10,10 +10,27 @@ import { mobileVersionContract } from './mobile-version-contract.mjs'
 import {
   formatScreenshotDimensions,
   appleScreenshotProvenanceIsConsistent,
+  hasAndroidScreenshotCreativeHold,
   hasAppleScreenshotSubmissionHold,
   screenshotDimensionsMatch,
   STORE_SCREENSHOT_SETS,
 } from './screenshot-provenance.mjs'
+import {
+  ANDROID_UPLOAD_ENV_NAMES,
+  ANDROID_UPLOAD_JKS_PATH,
+  ANDROID_UPLOAD_KEYSTORE_PATH,
+  ANDROID_UPLOAD_PROPERTIES_PATH,
+  DESKTOP_LICENSE_PRIVATE_REPO_PATH,
+  DESKTOP_LICENSE_PUBLIC_REPO_PATH,
+  THEOLOGY_DATABASE_PATH,
+  androidUploadSigningRecordsAreCanonical,
+  desktopLicenseSigningRecordsAreCanonical,
+  theologyExternalArtifactIsCanonical,
+} from './theology-external-artifact.mjs'
+import {
+  CONSOLE_PACKET_PATHS,
+  consolePacketRetentionRecordsAreVerified,
+} from './console-packet-retention.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(import.meta.url)
@@ -75,6 +92,39 @@ const gitRef = (ref) => {
     return ''
   }
 }
+const binaryEvidence = (relative) => {
+  try {
+    const contents = fs.readFileSync(path.join(root, relative))
+    return {
+      size: contents.byteLength,
+      sha256: crypto.createHash('sha256').update(contents).digest('hex'),
+    }
+  } catch {
+    return { size: -1, sha256: '' }
+  }
+}
+const gitTracks = (relative) => {
+  try {
+    execFileSync('git', ['ls-files', '--error-unmatch', '--', relative], {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return true
+  } catch (error) {
+    return error?.status === 1 ? false : null
+  }
+}
+const gitIgnores = (relative) => {
+  try {
+    execFileSync('git', ['check-ignore', '--quiet', '--', relative], {
+      cwd: root,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return true
+  } catch (error) {
+    return error?.status === 1 ? false : null
+  }
+}
 const xcodeTargetReleaseSettings = (project) => {
   const match = project.match(/\/\* Release \*\/ = \{[\s\S]*?Pods-App\.release\.xcconfig[\s\S]*?buildSettings = \{([\s\S]*?)\n\s*\};\n\s*name = Release;/)
   return match?.[1] || ''
@@ -83,6 +133,37 @@ const pass = (message) => passes.push(message)
 const fail = (message) => failures.push(message)
 const warn = (message) => warnings.push(message)
 const check = (condition, message) => condition ? pass(message) : fail(message)
+
+function hasUnmatchedInlineCode(text) {
+  return (text.match(/`/g) || []).length % 2 !== 0
+}
+
+function hasBuild5CurrentCandidateLabel(text) {
+  if (hasUnmatchedInlineCode(text)) return false
+  const normalized = text
+    .replace(/`[^`\r\n]*`/g, ' ')
+    .replace(/\b1\.4\.2\s*\(5\)(?!\w)/gi, 'build 5')
+  const build5 = /\bbuild(?:\s+|-)5\b/i
+  const currentCandidate = /(?:\b(?:current(?:ly)?|now|today|at present)\b[^.!?;\n]{0,96}\bcandidate(?:\s+artifact)?\b|\bcandidate(?:\s+artifact)?\b[^.!?;\n]{0,96}\b(?:currently|now|today|at present)\b)/i
+  const labelVerb = /\b(?:is|are|remains|stays|becomes)\b/i
+  const negation = /\b(?:not|never|cannot|must not|may not|should not|will not|do not|does not|did not|neither|no longer)\b/i
+  const noncurrent = /\b(?:historical|historically|previously|formerly|prior|archived|superseded|retroactive|until|once|later|future|pending|could|might|would)\b/i
+
+  const sentences = normalized
+    .split(/[.!?;]+/)
+    .map((sentence) => sentence.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+
+  return sentences.some((sentence) => {
+    let subjectSeen = false
+    return sentence.split(/\b(?:but|however|yet)\b/i).some((segment) => {
+      if (build5.test(segment)) subjectSeen = true
+      if (!subjectSeen || !currentCandidate.test(segment) || !labelVerb.test(segment)) return false
+      if (negation.test(segment) || noncurrent.test(segment)) return false
+      return true
+    })
+  })
+}
 
 function directoryDigest(relative, ignored = new Set()) {
   const directory = path.join(root, relative)
@@ -153,6 +234,7 @@ const mobileApp = read('src/mobile/MobileApp.tsx')
 const terms = read('website/operator-terms.html')
 const privacy = read('website/operator-privacy-addendum.html')
 const serverIndex = read('server/src/index.js')
+const generationRoutes = read('server/src/routes/generation.js')
 const serverAuth = read('server/src/auth.js')
 const studyAiAccess = read('server/src/study-ai-access.js')
 const studyCommentary = read('server/src/study-commentary.js')
@@ -181,9 +263,14 @@ const liveStoreGate = read('scripts/check-mobile-store-live.mjs')
 const screenshotPlan = read('store/screenshots.md')
 const releaseChecklist = read('store/release-checklist.md')
 const releaseLedger = read('store/release-ledger.md')
+const externalArtifacts = read('store/external-artifacts.md')
+const theologyRightsNotice = read('resources/theology-retrieval/RIGHTS-NOTICE.txt')
+const theologyBundleManifest = read('resources/theology-retrieval/bundle-manifest.json')
+const serverDockerfile = read('server/Dockerfile')
 const productPlan = read('store/products.md')
 const consoleActionPacket = read('store/console-action-packet.md')
 const appleConsoleCompletionPacket = read('store/apple-console-completion-packet.md')
+const googleConsoleCompletionPacket = read('store/google-console-completion-packet.md')
 const reviewNotes = read('store/review-notes.md')
 
 const usd = (value) => `$${Number(value).toLocaleString('en-US', {
@@ -222,8 +309,11 @@ check(
 check(
   appleConsoleRows.every((row) => consoleActionPacket.includes(row)) &&
     googleConsoleRows.every((row) => consoleActionPacket.includes(row)) &&
-    consoleActionPacket.includes('**Only FIVE are purchasable on iOS.**'),
-  'Console transcription packet matches canonical store prices, allowances, periods, and iOS scope',
+    consoleActionPacket.includes('**Only FIVE are purchasable on iOS.**') &&
+    consoleActionPacket.includes('Use the existing **one** subscription group `The Operator Access`; do not create a second group.') &&
+    consoleActionPacket.includes('Re-read its live membership before any approved edit.') &&
+    !consoleActionPacket.includes('Create **one** group.'),
+  'Console transcription packet preserves the existing Apple group and matches canonical store prices, allowances, periods, and iOS scope',
 )
 
 const reviewerIdentityInstructions = `${consoleActionPacket}\n${reviewNotes}`
@@ -253,10 +343,25 @@ check(
 const appleReviewNotesRow = appleConsoleCompletionPacket
   .split(/\r?\n/)
   .find((line) => line.startsWith('| App Review notes |')) || ''
+const appleReviewerSignInGapRow = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Reviewer sign-in path |')) || ''
 check(
   appleReviewNotesRow.includes('store/review-notes.md') &&
     appleReviewNotesRow.includes('device-link code') &&
-    !/\b(?:access|comp) code\b/i.test(appleReviewNotesRow),
+    !/\b(?:access|comp) code\b/i.test(appleReviewNotesRow) &&
+    appleReviewerSignInGapRow.includes('2026-08-13 existence-only scan') &&
+    appleReviewerSignInGapRow.includes('No unused device-link code is recorded in the checked-in non-secret sources') &&
+    appleReviewerSignInGapRow.includes('current account existence and code availability were not re-queried') &&
+    appleReviewerSignInGapRow.includes('Under fresh action-time approval, confirm the account, issue one code') &&
+    appleReviewerSignInGapRow.includes('Never write it to Git, chat, logs, or this packet') &&
+    !appleReviewerSignInGapRow.includes('no retrievable unused device-link code is locally available') &&
+    /App Review notes \+ \*\*one unused reviewer DEVICE-LINK code \(`OPR-…`\)\*\*, issued only under fresh\s+action-time approval/.test(consoleActionPacket) &&
+    /The 2026-08-13 existence-only scan found the recorded 2026-08-10 temporary\s+code artifacts absent/.test(consoleActionPacket) &&
+    /No unused code is recorded in checked-in non-secret sources, and current\s+account existence and code availability were not re-queried/.test(consoleActionPacket) &&
+    /Confirm the account, issue one code,\s+and place it only in App Review Information/.test(consoleActionPacket) &&
+    consoleActionPacket.includes('Never write it to Git, chat, logs, or this packet') &&
+    !consoleActionPacket.includes('are no longer present at their temporary local path'),
   'Apple completion packet requires a device-link code for App Review',
 )
 
@@ -303,6 +408,20 @@ check(
   'Apple completion packet records age rating as an unresolved questionnaire-derived console gap',
 )
 
+const appleCopyrightGapRow = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Copyright |')) || ''
+check(
+  appleCopyrightGapRow.includes('The ledger says a copyright was previously saved') &&
+    appleCopyrightGapRow.includes('its exact string is absent') &&
+    appleCopyrightGapRow.includes('locally unverifiable and non-transcribable') &&
+    appleCopyrightGapRow.includes('Read the current console value') &&
+    appleCopyrightGapRow.includes('correct year and rights-holder text') &&
+    appleCopyrightGapRow.includes('record the exact non-secret value locally') &&
+    !/(?:\b(?:complete|completed|configured|entered|provided|ready|done)\b|live console (?:saved|verified))/i.test(appleCopyrightGapRow),
+  'Apple completion packet records copyright as an unresolved exact-value console gap',
+)
+
 const appleReviewContactGapRow = appleConsoleCompletionPacket
   .split(/\r?\n/)
   .find((line) => line.startsWith('| App Review contact |')) || ''
@@ -315,6 +434,18 @@ check(
   'Apple completion packet records App Review contact as an explicit approval-bound console gap',
 )
 
+check(
+  consolePacketRetentionRecordsAreVerified({
+    releaseChecklist,
+    releaseLedger,
+    actualPacketDigests: Object.fromEntries(CONSOLE_PACKET_PATHS.map((relative) => [
+      relative,
+      binaryEvidence(relative).sha256,
+    ])),
+  }),
+  'Console completion/action packets lack synchronized verified retention evidence',
+)
+
 const parseStoreGateCounts = (row, platform) => {
   const verbose = row.match(
     /(\d+)\s+passed\s*(?:·|,)\s*(\d+)\s+warnings\s*(?:·|,)\s*(\d+)\s+failed/i,
@@ -325,6 +456,9 @@ const parseStoreGateCounts = (row, platform) => {
   const counts = verbose || compact
   return counts ? counts.slice(1, 4).map(Number) : []
 }
+const parseStoreGateFailure = (row) =>
+  row.match(/(?:solely|failing only) `([^`]+)`/i)?.[1] || ''
+const expectedGoogleLiveFailure = 'Google purchase verification is operational'
 const currentGoogleLiveBoundary = releaseChecklist
   .split(/\r?\n/)
   .find((line) => line.includes('Fresh Google-scoped production measurement')) || ''
@@ -334,23 +468,100 @@ const currentGoogleLedgerPreflight = releaseLedger
 const googlePurchaseVerificationRow = releaseLedger
   .split(/\r?\n/)
   .find((line) => line.startsWith('| Google production purchase verification |')) || ''
+const googleChecklistAccessRow = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('Correct BASE1520 Play Console account access is restored')) || ''
+const googlePlayOwnershipRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Google Play record ownership |')) || ''
+const googleConsolePacketRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Google console completion packet |')) || ''
 const currentGoogleLiveCounts = parseStoreGateCounts(currentGoogleLiveBoundary, 'Google')
 const ledgerGoogleLiveCounts = parseStoreGateCounts(currentGoogleLedgerPreflight, 'Google')
 const googleVerificationCounts = parseStoreGateCounts(googlePurchaseVerificationRow, 'Google')
 const currentGoogleLiveStamp = currentGoogleLiveBoundary
   .match(/at \*\*([^*]+)\*\* returns/)?.[1] || ''
-const currentGoogleLiveFailure = currentGoogleLiveBoundary
-  .match(/solely `([^`]+)`/)?.[1] || ''
+const currentGoogleLiveFailure = parseStoreGateFailure(currentGoogleLiveBoundary)
+const ledgerGoogleLiveFailure = parseStoreGateFailure(currentGoogleLedgerPreflight)
+const googleVerificationFailure = parseStoreGateFailure(googlePurchaseVerificationRow)
 check(
   currentGoogleLiveCounts.length === 3 &&
     currentGoogleLiveCounts.every((count, index) => count === ledgerGoogleLiveCounts[index]) &&
     currentGoogleLiveCounts.every((count, index) => count === googleVerificationCounts[index]) &&
     Boolean(currentGoogleLiveStamp) &&
     googlePurchaseVerificationRow.includes(`on ${currentGoogleLiveStamp}`) &&
-    Boolean(currentGoogleLiveFailure) &&
-    googlePurchaseVerificationRow.includes(`solely \`${currentGoogleLiveFailure}\``) &&
+    currentGoogleLiveFailure === expectedGoogleLiveFailure &&
+    ledgerGoogleLiveFailure === expectedGoogleLiveFailure &&
+    googleVerificationFailure === expectedGoogleLiveFailure &&
+    googleChecklistAccessRow.includes('on 2026-08-14') &&
+    googlePlayOwnershipRow.includes('DATED ACCESS EVIDENCE / OWNERSHIP + DEVELOPER VERIFICATION CLOSED; CURRENT IAB WRONG-IDENTITY SIGNUP BOUNDARY') &&
+    googleConsolePacketRow.includes('The 2026-08-14 authenticated session established the real verified organization account') &&
+    googleConsolePacketRow.includes('The fresh developer-root read resolved the available in-app browser to `/console/signup` under the personal browser identity') &&
+    googleConsoleCompletionPacket.includes('does not prove that the current browser session remains authenticated') &&
+    googleConsoleCompletionPacket.includes('A fresh read-only developer-root check on 2026-08-16 02:18 CDT resolved the available in-app browser to `/console/signup`') &&
+    googleConsoleCompletionPacket.includes('no account type, `Get started`, signup, or account switch was used') &&
+    !googlePlayOwnershipRow.includes('CURRENT BROWSER SESSION NOT RE-READ') &&
+    !googleConsolePacketRow.includes('Current browser-session authentication was not re-read in this reconciliation.') &&
+    !/\bCole is signed in(?:to)?\b/i.test(`${googlePlayOwnershipRow}\n${googleConsolePacketRow}`) &&
     !/privacy(?:-disclosure)? failures|plus all three named public privacy/i.test(googlePurchaseVerificationRow),
   'Release records agree Google live preflight is blocked only on purchase verification',
+)
+
+const migrationDiagnosticChecklistRow = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('server/src/migrate.js') && line.includes('server/src/test-migrate.js')) || ''
+const migrationDiagnosticLedgerRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| Leaked-code remediation migration diagnostics |')) || ''
+const migrationDiagnosticRecordPair = `${migrationDiagnosticChecklistRow}\n${migrationDiagnosticLedgerRow}`
+check(
+  migrationDiagnosticChecklistRow.includes('AUDIT CONFIRMED') &&
+    migrationDiagnosticChecklistRow.includes('Claude 21:02 CDT HANDOFF entry') &&
+    migrationDiagnosticChecklistRow.includes('DIRTY-CLI DEPLOYMENT RECONCILED') &&
+    migrationDiagnosticChecklistRow.includes('0973e6a3') &&
+    migrationDiagnosticChecklistRow.includes('f9702bb2') &&
+    migrationDiagnosticChecklistRow.includes('current source remains uncommitted') &&
+    migrationDiagnosticChecklistRow.includes('no changed-row production event is claimed') &&
+    migrationDiagnosticLedgerRow.includes('AUDIT CONFIRMED (Claude 2026-08-14 21:02 CDT HANDOFF') &&
+    migrationDiagnosticLedgerRow.includes('/ DEPLOYED VIA DIRTY CLI SNAPSHOT / CURRENT SOURCE UNCOMMITTED') &&
+    migrationDiagnosticLedgerRow.includes('0973e6a3') &&
+    migrationDiagnosticLedgerRow.includes('f9702bb2') &&
+    migrationDiagnosticLedgerRow.includes('no reproducible Git-source receipt') &&
+    migrationDiagnosticLedgerRow.includes('No changed-row production event is claimed') &&
+    !/(?:CLAUDE )?AUDIT PENDING|no `?AUDIT CONFIRMED`? promotion|no audit confirmation|\bUNDEPLOYED\b|No migration (?:or deployment )?ran|production logs were not queried|clean committed deployment|Git-provenanced deployment|changed-row production (?:behavior|effect|result) (?:confirmed|verified|proved)/i.test(migrationDiagnosticRecordPair),
+  'Release records preserve the migration-diagnostic audit and dirty-CLI deployment boundary',
+)
+
+const authorityAuditChecklistRow = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('Submission-target authority reconciled')) || ''
+const authorityAuditLedgerRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('> **CURRENT AUTHORITY AUDIT RECORD —')) || ''
+const authorityAuditLatestReconciliationRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('> **LATEST RECONCILIATION —')) || ''
+const authorityAuditRecordSet = `${authorityAuditChecklistRow}\n${authorityAuditLedgerRow}\n${authorityAuditLatestReconciliationRow}`
+  .replace(/`[^`\r\n]*`/g, ' ')
+  .replace(/\b1\.4\.2\s*\(6\)(?!\w)/gi, 'build 6')
+check(
+  authorityAuditChecklistRow.includes('alias/adversative follow-up AUDIT CONFIRMED by Claude at 02:05 CDT') &&
+    authorityAuditChecklistRow.includes("Claude's independent 7/7 battery") &&
+    authorityAuditChecklistRow.includes('focused control is **14/0**') &&
+    authorityAuditChecklistRow.includes('No build, upload, console, screenshot, or submission state changed') &&
+    authorityAuditChecklistRow.includes('the complete static gate remains intentionally red on its five recorded blockers') &&
+    authorityAuditLedgerRow.includes('Authority-parser alias/adversative follow-up remains AUDIT CONFIRMED (Claude 2026-08-15 02:05 CDT HANDOFF; independent 7/7 battery; focused 14/0).') &&
+    authorityAuditLedgerRow.includes('No build, upload, console, screenshot, or submission state changed') &&
+    authorityAuditLedgerRow.includes('Static checks do not establish submission readiness') &&
+    authorityAuditLatestReconciliationRow.includes('The five static failures remain: synchronized console-packet retention, current-source/uploaded-build lineage, packaged-bundle age, the Apple screenshot hold, and the Android screenshot hold') &&
+    authorityAuditLatestReconciliationRow.includes('The complete checker independently reproduces **174/1/5**.') &&
+    authorityAuditLatestReconciliationRow.includes('Static checks do not establish submission readiness') &&
+    !hasUnmatchedInlineCode(authorityAuditLatestReconciliationRow) &&
+    !hasBuild5CurrentCandidateLabel(authorityAuditLatestReconciliationRow) &&
+    !/(?:alias\/adversative follow-up LOCAL|CLAUDE AUDIT PENDING|local and unreviewed)/i.test(authorityAuditRecordSet) &&
+    !/\bbuild(?:\s+|-)6\b[^.!?;\n]*\b(?:ready for submission|ready to submit|submission-ready)\b/i.test(authorityAuditRecordSet),
+  'Release records preserve authority-parser audit confirmation without claiming submission readiness',
 )
 
 const nativePackageArtifactParityRow = releaseLedger
@@ -379,50 +590,187 @@ check(
   'Release checklist preserves the one-capture iPad screenshot completion boundary',
 )
 
+const releaseSourceBoundary = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('Mobile-source lineage, verified')) || ''
+const archivedReleaseMatch = releaseSourceBoundary
+  .match(/canonical release source for uploaded build (\d+) is `([0-9a-f]{40})`/)
+const canonicalCandidateBuild = Number(archivedReleaseMatch?.[1] || 0)
+const canonicalReleaseSource = archivedReleaseMatch?.[2] || ''
+const currentPushedSource = releaseSourceBoundary
+  .match(/Local `HEAD` and `origin\/main` now resolve to descendant `([0-9a-f]{40})`/)?.[1] || ''
+const nextCandidateBuild = canonicalCandidateBuild > 0 ? canonicalCandidateBuild + 1 : 0
+
 const externalReleaseGates = releaseLedger
   .split('## External release gates\n')[1]?.split('\n## ')[0] || ''
 const signingEvidence = releaseLedger
   .split('## Signing evidence still required\n')[1]?.split('\n## ')[0] || ''
+const externalReleaseGatesLower = externalReleaseGates.toLowerCase()
+const signingEvidenceLower = signingEvidence.toLowerCase()
+const preachAffordanceLedgerRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| PREACH not-ready affordance (next build) |')) || ''
+const ipadScreenshotLedgerRow = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('| iPad screenshots |')) || ''
+const currentAppleOpenBoundary = releaseLedger
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('**Still open in App Store Connect:**')) || ''
+const appleConsoleBuildBoundary = appleConsoleCompletionPacket
+  .split(/\r?\n/)
+  .find((line) => line.includes('Build boundary updated')) || ''
+const appleScreenshotHoldBoundary = screenshotPlan
+  .split(/\r?\n/)
+  .find((line) => line.startsWith('> Apple submission hold:')) || ''
+const preachAffordanceLedgerRowLower = preachAffordanceLedgerRow.toLowerCase()
+const ipadScreenshotLedgerRowLower = ipadScreenshotLedgerRow.toLowerCase()
+const currentAppleOpenBoundaryLower = currentAppleOpenBoundary.toLowerCase()
+const appleConsoleBuildBoundaryLower = appleConsoleBuildBoundary.toLowerCase()
+const appleScreenshotHoldBoundaryLower = appleScreenshotHoldBoundary.toLowerCase()
 check(
-  externalReleaseGates.includes('Build `1.4.2 (5)`') &&
-    externalReleaseGates.includes('Build 4 must not be attached or selected for final submission') &&
-    externalReleaseGates.includes('build-5 captures') &&
-    signingEvidence.includes('processing/selectability and listing-selection receipts for build 5') &&
-    signingEvidence.includes('The build-5 upload receipt is present') &&
-    signingEvidence.includes('build 4 is historical upload evidence only') &&
-    !/\b(?:attach|select)[^\n]*\bbuild(?: |-)?4\b/i.test(externalReleaseGates) &&
-    !/listing-selection receipt for build 4/i.test(signingEvidence),
-  'Release ledger forward actions preserve the build-5 candidate boundary',
+  canonicalCandidateBuild > 0 &&
+    nextCandidateBuild === canonicalCandidateBuild + 1 &&
+    externalReleaseGates.includes(`\`${metadata.app.version} (${canonicalCandidateBuild})\``) &&
+    externalReleaseGates.includes(`\`${metadata.app.version} (${nextCandidateBuild})\``) &&
+    externalReleaseGatesLower.includes(
+      `build ${canonicalCandidateBuild} is historical upload evidence only`,
+    ) &&
+    externalReleaseGatesLower.includes(
+      `build ${canonicalCandidateBuild} must not be attached, selected, or submitted`,
+    ) &&
+    externalReleaseGatesLower.includes(`provenance-clean build ${nextCandidateBuild}`) &&
+    externalReleaseGatesLower.includes(`build-${nextCandidateBuild} processing/selectability`) &&
+    externalReleaseGatesLower.includes(`attach build ${nextCandidateBuild}`) &&
+    externalReleaseGatesLower.includes(`build-${nextCandidateBuild}-proven screenshot set`) &&
+    externalReleaseGatesLower.includes('pixel-equivalence proof') &&
+    signingEvidenceLower.includes(
+      `processing/selectability and listing-selection receipts for build ${nextCandidateBuild}`,
+    ) &&
+    signingEvidenceLower.includes(
+      `build-${canonicalCandidateBuild} upload receipt is historical evidence only`,
+    ) &&
+    preachAffordanceLedgerRowLower.includes(
+      `screenshot from build ${canonicalCandidateBuild} remains a valid visual draft`,
+    ) &&
+    preachAffordanceLedgerRowLower.includes(
+      `pixel-equivalence proof against packaged build ${nextCandidateBuild}`,
+    ) &&
+    ipadScreenshotLedgerRowLower.includes(`build-${canonicalCandidateBuild} visual drafts`) &&
+    ipadScreenshotLedgerRowLower.includes(`after build ${nextCandidateBuild} exists`) &&
+    ipadScreenshotLedgerRowLower.includes(
+      `pixel-equivalence against packaged build ${nextCandidateBuild}`,
+    ) &&
+    ipadScreenshotLedgerRowLower.includes(`build-${nextCandidateBuild}-proven set`) &&
+    currentAppleOpenBoundaryLower.includes(
+      `provenance-clean build ${nextCandidateBuild} creation and upload`,
+    ) &&
+    currentAppleOpenBoundaryLower.includes(
+      `build-${nextCandidateBuild} processing/selectability and selection`,
+    ) &&
+    currentAppleOpenBoundaryLower.includes(
+      `build-${nextCandidateBuild}-proven ipad screenshots`,
+    ) &&
+    currentAppleOpenBoundaryLower.includes(
+      `build-${canonicalCandidateBuild} frames are visual drafts only`,
+    ) &&
+    appleConsoleBuildBoundaryLower.includes(
+      `build \`${metadata.app.version} (${canonicalCandidateBuild})\` is uploaded/receipted but superseded`,
+    ) &&
+    appleConsoleBuildBoundaryLower.includes('must not be attached, selected, or submitted') &&
+    appleConsoleBuildBoundaryLower.includes(`provenance-clean build **${nextCandidateBuild}**`) &&
+    appleConsoleBuildBoundaryLower.includes('processed/selectable') &&
+    appleScreenshotHoldBoundaryLower.includes(
+      `these are build-${canonicalCandidateBuild} visual drafts only`,
+    ) &&
+    appleScreenshotHoldBoundaryLower.includes(`after build ${nextCandidateBuild} exists`) &&
+    appleScreenshotHoldBoundaryLower.includes(
+      `pixel-equivalence against packaged build ${nextCandidateBuild}`,
+    ) &&
+    appleScreenshotHoldBoundaryLower.includes(`build-${nextCandidateBuild}-proven replacements`) &&
+    !externalReleaseGatesLower.includes(`build-${canonicalCandidateBuild} captures`) &&
+    !new RegExp(`\\b(?:attach|select|submit)\\b[^\\n.]*\\bbuild(?: |-)?${canonicalCandidateBuild}\\b`, 'i')
+      .test(externalReleaseGates) &&
+    !signingEvidenceLower.includes(
+      `listing-selection receipts for build ${canonicalCandidateBuild}`,
+    ) &&
+    !ipadScreenshotLedgerRowLower.includes(
+      `complete three-slot build-${canonicalCandidateBuild} set`,
+    ) &&
+    !appleConsoleBuildBoundaryLower.includes(
+      `provenance-clean build **${canonicalCandidateBuild}** must be`,
+    ) &&
+    !appleScreenshotHoldBoundaryLower.includes(
+      `build-${canonicalCandidateBuild} preach capture completes`,
+    ) &&
+    !currentAppleOpenBoundaryLower.includes(
+      `build-${canonicalCandidateBuild} processing/selectability and selection`,
+    ),
+  'Release ledger forward actions require the next build after the archived Apple candidate',
 )
 
-const historicalBuild4ProcessingBoundary = releaseChecklist
+const supersededAppleBuildProcessingBoundary = releaseChecklist
   .split(/\r?\n/)
   .find((line) => line.includes('Processing/selectability remains unverified.')) || ''
+const supersededAppleBuildProcessingBoundaryLower = supersededAppleBuildProcessingBoundary.toLowerCase()
+const finalAppleScreenshotChecklistBoundary = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('The remaining screenshot provenance failure is fail-closed')) || ''
+const finalAppleScreenshotChecklistBoundaryLower = finalAppleScreenshotChecklistBoundary.toLowerCase()
+const preachAffordanceChecklistBoundary = releaseChecklist
+  .split(/\r?\n/)
+  .find((line) => line.includes('Silent PREACH-gate affordance AUDIT CONFIRMED')) || ''
+const preachAffordanceChecklistBoundaryLower = preachAffordanceChecklistBoundary.toLowerCase()
 check(
-  historicalBuild4ProcessingBoundary.includes('Build 5 upload is accepted') &&
-    historicalBuild4ProcessingBoundary.includes('Build 4 remains upload history only') &&
-    historicalBuild4ProcessingBoundary.includes('must not be selected or submitted') &&
-    historicalBuild4ProcessingBoundary.includes('attach/select build 5 under fresh action-time approval') &&
-    !/wait for (?:provenance-clean )?build 5 to appear/i.test(historicalBuild4ProcessingBoundary) &&
-    !/until build 4 appears/i.test(historicalBuild4ProcessingBoundary) &&
-    !/listing is explicitly switched/i.test(historicalBuild4ProcessingBoundary),
-  'Release checklist keeps historical build 4 out of the final selection path',
+  canonicalCandidateBuild > 0 &&
+    supersededAppleBuildProcessingBoundaryLower.includes(
+      `build ${canonicalCandidateBuild} upload is accepted`,
+    ) &&
+    supersededAppleBuildProcessingBoundaryLower.includes(
+      `build ${canonicalCandidateBuild} is upload history only`,
+    ) &&
+    supersededAppleBuildProcessingBoundaryLower.includes(
+      `build ${canonicalCandidateBuild} must not be selected or submitted`,
+    ) &&
+    supersededAppleBuildProcessingBoundaryLower.includes(
+      `provenance-clean build ${nextCandidateBuild}`,
+    ) &&
+    supersededAppleBuildProcessingBoundaryLower.includes(
+      `attach/select build ${nextCandidateBuild} under fresh action-time approval`,
+    ) &&
+    finalAppleScreenshotChecklistBoundaryLower.includes(
+      `build ${canonicalCandidateBuild} only as a visual draft`,
+    ) &&
+    finalAppleScreenshotChecklistBoundaryLower.includes(
+      `after provenance-clean build ${nextCandidateBuild} exists`,
+    ) &&
+    finalAppleScreenshotChecklistBoundaryLower.includes('pixel-equivalence against its packaged bytes') &&
+    finalAppleScreenshotChecklistBoundaryLower.includes(
+      `build-${nextCandidateBuild}-proven complete set`,
+    ) &&
+    preachAffordanceChecklistBoundaryLower.includes(
+      `build-${canonicalCandidateBuild} preach-mode screenshot remains valid only as a visual draft`,
+    ) &&
+    preachAffordanceChecklistBoundaryLower.includes(
+      `pixel-equivalence proof against packaged build ${nextCandidateBuild}`,
+    ) &&
+    !new RegExp(`\\b(?:attach|select|submit)\\b[^\\n.]*\\bbuild(?: |-)?${canonicalCandidateBuild}\\b`, 'i')
+      .test(supersededAppleBuildProcessingBoundary) &&
+    !/listing is explicitly switched/i.test(supersededAppleBuildProcessingBoundary) &&
+    !finalAppleScreenshotChecklistBoundaryLower.includes(
+      `frame from build ${canonicalCandidateBuild}, then stage`,
+    ) &&
+    !preachAffordanceChecklistBoundaryLower.includes(
+      `build-${canonicalCandidateBuild} preach-mode screenshot remains valid because`,
+    ),
+  'Release checklist keeps every superseded Apple build out of the final selection path',
 )
 
 const currentMobileSourceBoundary = releaseChecklist
   .split(/\r?\n/)
   .find((line) => line.includes('The uploaded build contains the current mobile source')) || ''
-const currentCandidateBoundary = releaseLedger
+const latestUploadedArtifactBoundary = releaseLedger
   .split(/\r?\n/)
-  .find((line) => line.startsWith('**The current uploaded App Store candidate artifact is build')) || ''
-const releaseSourceBoundary = releaseChecklist
-  .split(/\r?\n/)
-  .find((line) => line.includes('Mobile-source lineage, verified')) || ''
-const canonicalReleaseSource = releaseSourceBoundary
-  .match(/canonical release source is `([0-9a-f]{40})`/)?.[1] || ''
-const canonicalCandidateBuild = Number(
-  releaseSourceBoundary.match(/candidate build number is `(\d+)`/)?.[1] || 0,
-)
+  .find((line) => line.startsWith('**The latest uploaded Apple artifact is build')) || ''
 const xcodeBuildNumbers = [...pbxproj.matchAll(/CURRENT_PROJECT_VERSION = (\d+);/g)]
   .map((match) => Number(match[1]))
 const canonicalBuildPattern = canonicalCandidateBuild
@@ -430,6 +778,8 @@ const canonicalBuildPattern = canonicalCandidateBuild
   : /$a/
 check(
   Boolean(canonicalReleaseSource) &&
+    currentPushedSource === gitRef('HEAD') &&
+    currentPushedSource === gitRef('origin/main') &&
     canonicalReleaseSource === gitRef('HEAD') &&
     canonicalReleaseSource === gitRef('origin/main') &&
     canonicalCandidateBuild > 0 &&
@@ -437,9 +787,12 @@ check(
     xcodeBuildNumbers.every((buildNumber) => buildNumber === canonicalCandidateBuild) &&
     canonicalBuildPattern.test(currentMobileSourceBoundary) &&
     currentMobileSourceBoundary.includes('canonical mobile-source lineage row') &&
-    canonicalBuildPattern.test(currentCandidateBoundary) &&
-    currentCandidateBoundary.includes('canonical mobile-source lineage row') &&
-    currentCandidateBoundary.includes('processing/selectability remains unverified') &&
+    canonicalBuildPattern.test(latestUploadedArtifactBoundary) &&
+    latestUploadedArtifactBoundary.includes('no eligible App Store submission candidate currently exists') &&
+    latestUploadedArtifactBoundary.includes(`historical pushed source \`${canonicalReleaseSource}\``) &&
+    latestUploadedArtifactBoundary.includes(`Current pushed source is \`${currentPushedSource}\``) &&
+    latestUploadedArtifactBoundary.includes('processing/selectability remains unverified') &&
+    !latestUploadedArtifactBoundary.includes('current uploaded App Store candidate') &&
     releaseSourceBoundary.includes('archive payload exactly matches the clean committed iOS public payload') &&
     releaseSourceBoundary.includes('upload receipt records success with no errors') &&
     releaseSourceBoundary.includes('processing completion remains unproven'),
@@ -471,13 +824,61 @@ check(/CURRENT_PROJECT_VERSION = [1-9][0-9]*;/.test(xcodeRelease), 'Apple Releas
 check(/versionCode [1-9][0-9]*/.test(androidBuild), 'Android version code is positive')
 check(/compileSdkVersion = 36/.test(androidVariables), 'Android compiles with API 36')
 check(/targetSdkVersion = 36/.test(androidVariables), 'Android targets API 36')
-check(gitignore.includes('android/operator-upload.properties'), 'Android upload credentials are ignored by Git')
-check(gitignore.includes('android/*.jks') && gitignore.includes('android/*.keystore'), 'Android private signing keys are ignored by Git')
-check(!/^resources\/?$/m.test(dockerignore) && !/^resources\/?$/m.test(railwayignore), 'Production deploy archives include the theology-retrieval bundle required by the Dockerfile')
 check(
-  ['.env', '.env.*', '.operator-license-key', '*-license-key', 'electron/embedded-key.js']
-    .every((pattern) => railwayignore.split(/\r?\n/).includes(pattern)),
-  'Railway no-gitignore deploys still exclude environment and license-signing secrets',
+  androidUploadSigningRecordsAreCanonical({
+    externalArtifacts,
+    gitignore,
+    releaseChecklist,
+    releaseLedger,
+    androidBuild,
+    propertiesPresent: exists(ANDROID_UPLOAD_PROPERTIES_PATH),
+    defaultJksPresent: exists(ANDROID_UPLOAD_JKS_PATH),
+    defaultKeystorePresent: exists(ANDROID_UPLOAD_KEYSTORE_PATH),
+    privateKeyCandidatePresent: fs.readdirSync(path.join(root, 'android'), { withFileTypes: true })
+      .some((entry) => entry.isFile() && /\.(?:jks|keystore)$/i.test(entry.name)),
+    environmentNamesPresent: Object.fromEntries(
+      ANDROID_UPLOAD_ENV_NAMES.map((name) => [name, Object.prototype.hasOwnProperty.call(process.env, name)]),
+    ),
+    propertiesIgnored: gitIgnores(ANDROID_UPLOAD_PROPERTIES_PATH),
+    jksIgnored: gitIgnores(ANDROID_UPLOAD_JKS_PATH),
+    keystoreIgnored: gitIgnores(ANDROID_UPLOAD_KEYSTORE_PATH),
+    propertiesTracked: gitTracks(ANDROID_UPLOAD_PROPERTIES_PATH),
+    jksTracked: gitTracks(ANDROID_UPLOAD_JKS_PATH),
+    keystoreTracked: gitTracks(ANDROID_UPLOAD_KEYSTORE_PATH),
+  }),
+  'Android upload identity remains unconfigured, unbacked, and fail-closed without reading credential values',
+)
+check(gitignore.includes('android/*.jks') && gitignore.includes('android/*.keystore'), 'Android private signing keys are ignored by Git')
+check(
+  theologyExternalArtifactIsCanonical({
+    externalArtifacts,
+    databaseEvidence: binaryEvidence(THEOLOGY_DATABASE_PATH),
+    rightsNotice: theologyRightsNotice,
+    bundleManifest: theologyBundleManifest,
+    gitignore,
+    dockerignore,
+    railwayignore,
+    dockerfile: serverDockerfile,
+    releaseChecklist,
+    releaseLedger,
+    databaseIgnored: gitIgnores(THEOLOGY_DATABASE_PATH),
+    databaseTracked: gitTracks(THEOLOGY_DATABASE_PATH),
+  }),
+  'Theology external artifact matches its canonical identity, rights, deploy, and unverified-backup records',
+)
+check(
+  desktopLicenseSigningRecordsAreCanonical({
+    externalArtifacts,
+    gitignore,
+    railwayignore,
+    releaseChecklist,
+    releaseLedger,
+    privateKeyIgnored: gitIgnores(DESKTOP_LICENSE_PRIVATE_REPO_PATH),
+    publicKeyIgnored: gitIgnores(DESKTOP_LICENSE_PUBLIC_REPO_PATH),
+    privateKeyTracked: gitTracks(DESKTOP_LICENSE_PRIVATE_REPO_PATH),
+    publicKeyTracked: gitTracks(DESKTOP_LICENSE_PUBLIC_REPO_PATH),
+  }),
+  'Desktop license-signing backup remains explicitly unverified and secret paths stay excluded',
 )
 
 check(exists('ios/App/App/PrivacyInfo.xcprivacy'), 'Apple privacy manifest exists')
@@ -527,14 +928,21 @@ check(!/if \(reachedServer && state\?\.anonymous\)[\s\S]{0,500}deleteLocalStudie
 check(/await signOutDevice\(\)[\s\S]{0,240}clearActiveReading\(\)/.test(mobileApp), 'Sign-out clears former account content from the active reading surface')
 check(
   serverAuth.includes('installId: null')
-    && serverIndex.match(/account_id IS NULL AND install_id = \$3/g)?.length === 2
+    // Quick and Guided ownership SQL moved verbatim with their route bodies.
+    && generationRoutes.match(/account_id IS NULL AND install_id = \$3/g)?.length === 2
     && studyAiAccess.match(/account_id IS NULL AND install_id = \$3/g)?.length === 1
     && serverIndex.match(/resolveOwnedStudyDocument\(db,/g)?.length === 2
     && studyCommentary.match(/resolveOwnedStudyDocument\(db,/g)?.length === 1
     && studyCommentary.includes("surface: 'commentary'"),
   'Revoked bearers cannot reuse a caller-controlled install ID to read claimed studies',
 )
-check(serverIndex.includes("releaseStage() !== 'full'") && serverIndex.match(/requireGeneratedStudyAccount\(req, res\)/g)?.length === 5, 'The full store backend requires a verified account before generated spend')
+check(
+  serverIndex.includes("releaseStage() !== 'full'")
+    // Declaration + Ask + sermon-assist stay in index; Quick + Guided moved.
+    && (serverIndex.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 3
+    && (generationRoutes.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 2,
+  'The full store backend requires a verified account before generated spend',
+)
 check(accountRecovery.includes('account_recovery_request') && serverSchema.includes('CREATE TABLE IF NOT EXISTS account_recovery_request'), 'Known and unknown recovery emails share the same persistent cooldown ledger')
 check(accountRegistration.includes('SET account_id = $2') && mobileAccount.includes('DELETE FROM account_registration_code'), 'Registration metadata is account-bound and removed during explicit deletion')
 check(mobileApp.includes('useCloudWorkspace') && mobileApp.includes('keepLocalWorkspace') && tabletDesk.includes('USE CLOUD') && tabletDesk.includes('KEEP THIS TABLET'), 'Sermon-desk conflicts have explicit cloud and local resolution paths')
@@ -580,7 +988,7 @@ check(
 check(tabletDeskModel.includes('MAX_TABLET_DESK_NODES = 32') && tabletDesk.includes('DESK FULL') && tabletDesk.includes('NOTHING WAS DELETED'), 'The Infinite Desk refuses excess tiles visibly instead of dropping them')
 check(mobileApi.includes('MAX_STUDY_NOTES_CHARS = 20_000') && mobileApp.includes('maxLength={MAX_STUDY_NOTES_CHARS}') && mobileRoutes.includes('normalizeStudyNotes'), 'Field-note limits match across client and server without silent truncation')
 check(mobileApp.includes('archiveConfirmId') && mobileApp.includes('restoreStudy') && mobileApp.includes("showArchived ? 'HIDE' : 'SHOW'"), 'Archiving requires confirmation and exposes undo and restore controls')
-check(serverIndex.includes('passage: existing.rows[0].passage') && localStudies.includes('syncedPassage?.verses'), 'Cross-device studies preserve verse divisions and copyright when reopening')
+check(generationRoutes.includes('passage: existing.rows[0].passage') && localStudies.includes('syncedPassage?.verses'), 'Cross-device studies preserve verse divisions and copyright when reopening')
 check(!mobileApp.includes('IN-APP CHECKOUT IS WIRED, NOT LIVE IN THIS DEVELOPMENT BUILD'), 'Submitted UI contains no development-build checkout message')
 check(readiness.includes('configurationChecks(env, CORE_CONFIGURATION)'), 'Optional providers degrade independently instead of taking down every store')
 check(!mobileApp.includes("await openExternal(await createBillingPortal())\n      } else") || mobileApp.includes('if (nativePlatform) throw new Error'), 'Native builds do not route digital subscription management into Stripe checkout')
@@ -658,7 +1066,7 @@ check(
   appleScreenshotProvenanceIsConsistent(screenshotPlan, releaseChecklist),
   'Apple screenshot hold matches the canonical build-provenance state',
 )
-if (/^> Android creative hold:/m.test(screenshotPlan)) warn('Android screenshots remain on a documented creative hold')
+check(!hasAndroidScreenshotCreativeHold(screenshotPlan), 'Android screenshot set has no unresolved visual submission hold')
 check(!/^> PRICE HOLD:/m.test(productPlan), 'Store subscription prices have Cole approval')
 
 for (const relative of [

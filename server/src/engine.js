@@ -351,12 +351,12 @@ async function runAsk(db, { doc, analysis, question, history, vaultNotes, accoun
   return answer
 }
 
-async function runSermonAssist(db, { agent, doc, analysis, question, history, accountId, installId }) {
+async function runSermonAssist(db, { agent, doc, analysis, question, history, accountId, installId, general = false }) {
   const pending = []
   const record = makeRecorder(db, {
     accountId,
     studyId: `sermon-assist-${Date.now().toString(36)}`,
-    reference: analysis?.reference || doc?.reference,
+    reference: analysis?.reference || doc?.reference || null,
     installId,
   }, pending)
   const answer = await answerSermonAgent({
@@ -365,6 +365,7 @@ async function runSermonAssist(db, { agent, doc, analysis, question, history, ac
     analysis,
     question,
     history,
+    general,
     apiKey: process.env.ANTHROPIC_API_KEY,
     createClient: (key) => new Anthropic.default({ apiKey: key }),
     retry: withRetry,
@@ -523,6 +524,20 @@ async function resetStudyReadingClaim(db, studyId) {
   return rowCount > 0
 }
 
+// 'stranded', not 'analyzed': when the reservation under this claim is already
+// terminal, putting the study back to 'analyzed' recreates the exact state
+// that failed — claim succeeds, hold fails, reset, forever. Stranding it lets
+// the next request take the fresh-claim path and finish under a new reservation.
+async function strandStudyReadingClaim(db, studyId) {
+  if (!studyId) return false
+  const { rowCount } = await db.query(
+    `UPDATE study SET state = 'stranded', updated_at = now()
+      WHERE id = $1 AND state = 'reading'`,
+    [studyId],
+  )
+  return rowCount > 0
+}
+
 /**
  * Return the state of a study this caller owns.
  *
@@ -542,6 +557,32 @@ async function ownedStudyState(db, { studyId, accountId, installId }) {
     [studyId, identity.param],
   )
   return rows[0]?.state ?? null
+}
+
+/**
+ * Recover the document already delivered for a study this caller owns.
+ *
+ * The shared document cache intentionally contains only verifier-approved
+ * documents. The study row still owns the exact document that was delivered,
+ * including a completed document that was not eligible for that shared cache.
+ * A remembered study id must be able to recover those bytes without buying or
+ * generating a second reading. Do not swallow query failures here: uncertainty
+ * about whether an owned document exists must fail closed before fresh work.
+ */
+async function ownedStudyDocument(db, { studyId, accountId, installId }) {
+  if (!studyId) return null
+  const identity = accountId
+    ? { clause: 'account_id = $2', param: accountId }
+    : { clause: 'install_id = $2 AND account_id IS NULL', param: installId }
+  if (!identity.param) return null
+
+  const { rows } = await db.query(
+    `SELECT document FROM study
+      WHERE id = $1 AND ${identity.clause}
+        AND state = 'done' AND document IS NOT NULL`,
+    [studyId, identity.param],
+  )
+  return rows[0]?.document ?? null
 }
 
 /** The document was delivered. The claim is spent. */
@@ -588,6 +629,7 @@ async function releaseStudyForRetry(db, studyId) {
 module.exports = {
   runPlainRead, runAnalyze, runQuickStudy, runGuidedStudy, makeRecorder, makeCache, preloadCache, writeCache,
   studyCost, openStudy, saveStudyAnalysis, saveStudyDocument,
-  claimStudyForReading, resetStudyReadingClaim, ownedStudyState, finishStudy, releaseStudyForRetry,
+  claimStudyForReading, resetStudyReadingClaim, strandStudyReadingClaim, ownedStudyState, ownedStudyDocument,
+  finishStudy, releaseStudyForRetry,
   runAsk, runSermonAssist, askCountToday, MAX_RETRIES_PER_STUDY, cachedDocument,
 }

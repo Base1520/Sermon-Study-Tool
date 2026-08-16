@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getCrossRefs: (payload) => ipcRenderer.invoke('get-cross-refs', payload),
   wordStudy: (payload) => ipcRenderer.invoke('word-study', payload),
   exportPdf: (payload) => ipcRenderer.invoke('export-pdf', payload),
+  scholarChatContext: (payload) => ipcRenderer.invoke('scholar-chat-context', payload),
   scholarChat: (payload) => ipcRenderer.invoke('scholar-chat', payload),
   fetchBible: (payload) => ipcRenderer.invoke('fetch-bible', payload),
   profileGet: () => ipcRenderer.invoke('profile-get'),

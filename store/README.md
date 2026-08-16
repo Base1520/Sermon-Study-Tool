@@ -7,6 +7,8 @@ This directory is the single submission source of truth for the iPhone, iPad, an
 - `privacy-data.md` — App Privacy and Data safety answers.
 - `review-notes.md` — private reviewer instructions and feature disclosures.
 - `screenshots.md` — required dimensions and shot sequence.
+- `mobile-physical-smoke-matrix.md` — candidate-specific physical execution and visible-control evidence packet.
+- `desktop-restored-study-field-test.md` — two-stage Romans 8:1-4 restore/Scholar field packet with an explicit paid-Ask approval boundary.
 - `release-checklist.md` — local, legal, console, billing, and backend gates.
 - `release-ledger.md` — dated evidence, unresolved blockers, and external-action receipts.
 - `ExportOptions.plist` — reproducible App Store Connect export settings after distribution signing is authorized.

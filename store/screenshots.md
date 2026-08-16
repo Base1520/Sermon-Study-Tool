@@ -1,6 +1,6 @@
 # Store Asset Plan
 
-> Apple submission set ready: the iPhone and iPad files listed below are release-candidate captures with no loading indicator, provider error, personal data, or false sync state visible.
+> Apple submission hold: the two iPhone files pass format, visual, and capture-provenance review. The connected physical iPad reports installed Operator `1.4.2 (5)`, and three new full-screen originals (`IMG_0158.PNG`–`IMG_0160.PNG`) independently measure 2732 × 2048, opaque RGB PNG. Visual review identifies a clean SERMON desk plus two clean PLAIN-study views; none is the required active Preach-Mode frame. These are build-5 visual drafts only. Subsequent candidate evidence proves build 5 fails required C05, so build 6 is the current fail-closed final-screenshot path without inventing a historical Cole choice. After build 6 exists, reproduce the complete three-slot set or prove pixel-equivalence against packaged build 6, then stage and recheck the build-6-proven replacements. Do not clear this hold from the two completed drafts alone.
 
 > Android creative hold: the staged Android tablet Desk images still show the former `SYNC PENDING` and commentary error states. Do not upload the Android tablet set until it is recaptured from the corrected build.
 
@@ -9,7 +9,7 @@ Use real app screens from the release candidate. Do not submit design mockups th
 ## Required exports
 
 - Apple iPhone portrait submission set: `1284 × 2778` 8-bit RGB PNG without alpha or transparency, 1–10 images.
-- Apple iPad 13-inch portrait: `2064 × 2752` 8-bit RGB PNG without alpha or transparency, 1–10 images.
+- Apple iPad 13-inch build-5 visual-draft / build-6 final landscape target: `2732 × 2048` 8-bit RGB PNG without alpha or transparency, 1–10 images. The checker also retains the already-staged `2064 × 2752` portrait form because Apple accepts both exact sizes; the separate provenance hold prevents the stale portrait files or unproven build-5 drafts from being promoted.
 - Google Play phone: `1080 × 1920` 8-bit RGB PNG, 2–8 images.
 - Google Play 7-inch tablet: `1200 × 1920` 8-bit RGB PNG, 2–8 images.
 - Google Play 10-inch tablet: `1600 × 2560` 8-bit RGB PNG, 2–8 images.
@@ -35,7 +35,7 @@ Use real app screens from the release candidate. Do not submit design mockups th
 - `assets/screenshots/ios-ipad-submission/01-infinite-sermon-desk.png`
 - `assets/screenshots/ios-ipad-submission/02-preach-mode.png`
 
-The Apple set is captured from the release candidate and converted to opaque 8-bit RGB PNGs at exact submission dimensions. The iPad Desk shows `SAVED ON THIS IPAD`, working specialist-agent controls, manuscript and preaching actions, recording, Pencil notes, reference tiles, and one reproducibly closed optional tile—without exposing a broken state.
+The iPhone files in commit `ea6eedf` are 1284 × 2778, 8-bit sRGB, opaque, and visually clean: no provider error, personal data, access code, account identifier, or false price claim. Claude disclosed the local Electron capture lineage, and Codex independently verified that `capture-iphone6.js` renders `127.0.0.1:5199` at 428 × 926 CSS, rewrites the capture-only request origin to the shipped `capacitor://localhost` origin, and uses Electron `capturePage()`. Reapplying the disclosed Lanczos conversion to the two 856 × 1852 scratch captures produces zero differing pixels against both committed files (`compare -metric AE = 0`). At capture time, `dist-mobile` and `ios/App/App/public` had no differing common files beyond Capacitor's generated shims and the iOS public tree matched the preserved build-4 archive. That parity is historical: current `ios/App/App/public` was regenerated after `ac04383`, contains the new tile-library copy, and differs from build 4. The three canonical iPad files still have stale provenance and must not be uploaded. Their Desk shows the superseded `SAVED ON THIS IPAD` wording. The newly received build-5 full-screen originals are structurally valid and visually clean for the SERMON desk and PLAIN-study slots, but a true active Preach-Mode original is still absent. Treat all build-5 frames as visual drafts. Stage no partial replacement; after build 6 exists, complete PLAIN study / clean SERMON desk / Preach Mode from build 6 or prove pixel-equivalence against its packaged bytes, then stage and recheck the build-6-proven set for specialist controls, manuscript and preaching actions, recording state, stylus notes, reference tiles, and provider-error absence.
 
 ## Android staging screens
 
@@ -46,7 +46,7 @@ The Apple set is captured from the release candidate and converted to opaque 8-b
 - `assets/screenshots/android-tablet-10/00-guided-study.png`
 - `assets/screenshots/android-tablet-10/01-infinite-sermon-desk.png`
 
-`npm run mobile:store:check` validates every set's count and every PNG's exact dimensions, bit depth, color type, and iOS transparency state. Passing those static checks does not clear the documented Android creative hold.
+`npm run mobile:store:check` validates every set's count and every PNG against the set's accepted exact dimensions, bit depth, color type, and iOS transparency state. Passing those static checks does not clear either documented visual/provenance hold.
 
 ## Overlay rules
 

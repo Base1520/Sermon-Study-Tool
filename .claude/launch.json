@@ -3,9 +3,17 @@
   "configurations": [
     {
       "name": "sermon-tool",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "vite"],
-      "port": 5173
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "npx vite --port ${PORT:-5173} --strictPort"],
+      "port": 5173,
+      "autoPort": true
+    },
+    {
+      "_comment": "Serves dist-mobile — the ALREADY-BUILT production bundle, not a dev server. Store screenshots must come from the same bytes the stores package: a dev server omits the full-release env flags and dead-code-eliminates the purchase UI.",
+      "name": "operator-mobile-dist",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "5199", "--directory", "/Users/colepermenter/DevProjects/sermon-tool/dist-mobile"],
+      "port": 5199
     }
   ]
 }

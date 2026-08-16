@@ -6,12 +6,12 @@
 
 1. Open the app and complete the short introduction.
 2. Choose **I ALREADY HAVE AN ACCOUNT**, then open **LINK EXISTING ACCOUNT**.
-3. Enter the private one-time `OPR-…` device-link code supplied in App Review Information and choose **CONNECT THIS DEVICE**. No inbox, password, card, or API key is required.
+3. Enter the private one-time `OPR-…` device-link code supplied in this store's private reviewer-access field and choose **CONNECT THIS DEVICE**. No inbox, password, card, or API key is required.
 4. Enter a passage such as `Romans 8:1-4` and run the included study.
 5. On a phone, the app opens Quick Study. On a tablet, it opens Guided Study and exposes the PLAIN/SERMON switch.
 6. Open Account to review plans, Restore Purchases, native subscription management, privacy links, account deletion, and linked-device controls.
 
-Before submission, prepare one dedicated empty reviewer account whose exact email is also present in `IAP_SANDBOX_ACCOUNT_EMAILS` and in the appropriate Apple/Google sandbox tester configuration. Put one unused device-link code and these steps only in the private review-information field—not in this repository. Retain the remaining one-time codes privately as replacements if review changes devices. Rehearse link, study, purchase, restore, and deletion from the store-distributed build, and keep the account usable for the entire review window.
+Before submission, prepare one dedicated empty Operator reviewer account and add its exact email to `IAP_SANDBOX_ACCOUNT_EMAILS`. Separately configure and use the appropriate Apple/Google sandbox or test purchaser identity. Do not assume or require those identities to use the same email; verify each identity in its own system. Put one unused device-link code and these steps only in that store's private reviewer-access field—not in this repository. Retain the remaining one-time codes privately as replacements if review changes devices. Rehearse link, study, purchase, restore, and deletion from the store-distributed build, and keep the account usable for the entire review window.
 
 ## Artificial-intelligence processing
 

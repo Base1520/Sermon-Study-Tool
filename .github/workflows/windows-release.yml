@@ -10,7 +10,8 @@ name: Windows release
 # failure entirely.
 #
 # OWNERSHIP IS SPLIT AND MUST STAY SPLIT:
-#   this workflow owns  The-Operator-windows.exe, .exe.blockmap, latest.yml
+#   this workflow owns  The-Operator-windows.exe, .exe.blockmap, latest.yml,
+#                       windows-source.json
 #   scripts/release.sh  owns the .dmg aliases, the versioned mac .zips, latest-mac.yml
 #
 # The release is created as a DRAFT here. It only becomes public when
@@ -59,6 +60,10 @@ jobs:
             v[0-9]*) ;;
             *) echo "::error::Tag must look like v1.2.3 (got '$TAG')"; exit 1 ;;
           esac
+          if [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "::error::Run this workflow from the exact tag refs/tags/$TAG, not $GITHUB_REF."
+            exit 1
+          fi
           echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
@@ -203,6 +208,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          REPO="${{ github.repository }}"
+          RECEIPT_NAME=windows-source.json
+          INSTALLER=dist-electron/rel-win/The-Operator-windows.exe
+          MANIFEST=dist-electron/rel-win/latest.yml
+          BLOCKMAP=dist-electron/rel-win/The-Operator-windows.exe.blockmap
+          RECEIPT=dist-electron/rel-win/$RECEIPT_NAME
+          SOURCE_COMMIT=$(git rev-parse HEAD)
+
+          RECEIPT_ASSETS=("$INSTALLER" "$MANIFEST")
+          if [ -f "$BLOCKMAP" ]; then
+            RECEIPT_ASSETS+=("$BLOCKMAP")
+          fi
+          node scripts/windows-source-receipt.mjs write \
+            "$RECEIPT" "$REPO" "$SOURCE_COMMIT" "$TAG" "$VERSION" \
+            "${RECEIPT_ASSETS[@]}"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
             if [ "$IS_DRAFT" != "true" ]; then
@@ -217,14 +238,50 @@ jobs:
               --notes "Draft. Windows build attached by CI. The Mac build and the real release notes are added by scripts/release.sh, which is what publishes this."
           fi
 
-          gh release upload "$TAG" \
-            "dist-electron/rel-win/The-Operator-windows.exe" \
-            "dist-electron/rel-win/latest.yml" \
-            --clobber
-
-          if [ -f "dist-electron/rel-win/The-Operator-windows.exe.blockmap" ]; then
-            gh release upload "$TAG" "dist-electron/rel-win/The-Operator-windows.exe.blockmap" --clobber
+          RELEASE_INFO=$(gh release view "$TAG" \
+            --json isDraft,databaseId,uploadUrl \
+            --jq '[.isDraft, .databaseId, .uploadUrl] | @tsv')
+          IFS=$'\t' read -r IS_DRAFT RELEASE_ID RELEASE_UPLOAD_URL <<<"$RELEASE_INFO"
+          if [ "$IS_DRAFT" != true ]; then
+            echo "::error::Release $TAG is no longer a draft."
+            exit 1
           fi
+          case "$RELEASE_ID" in
+            ''|*[!0-9]*) echo "::error::Draft $TAG did not provide a numeric release id."; exit 1 ;;
+          esac
+
+          # The receipt is a completion marker. Remove any prior marker by numeric
+          # asset ID before changing payload bytes, so a failed rerun cannot leave a
+          # stale green receipt. Remove an old optional blockmap when this build did
+          # not produce one, too; receipt/payload presence must stay symmetric.
+          EXISTING_ASSETS=$(gh api "repos/$REPO/releases/$RELEASE_ID/assets?per_page=100" \
+            --jq '.[] | [.id, .name] | @tsv')
+          delete_existing_asset() {
+            local wanted=$1
+            while IFS=$'\t' read -r asset_id asset_name; do
+              if [ "$asset_name" = "$wanted" ]; then
+                case "$asset_id" in
+                  ''|*[!0-9]*) echo "::error::Asset $wanted has a non-numeric id."; exit 1 ;;
+                esac
+                gh api --method DELETE "repos/$REPO/releases/assets/$asset_id" --silent
+              fi
+            done <<<"$EXISTING_ASSETS"
+          }
+          delete_existing_asset "$RECEIPT_NAME"
+          if [ ! -f "$BLOCKMAP" ]; then
+            delete_existing_asset "${BLOCKMAP##*/}"
+          fi
+
+          WINDOWS_UPLOADS=("$INSTALLER" "$MANIFEST")
+          if [ -f "$BLOCKMAP" ]; then
+            WINDOWS_UPLOADS+=("$BLOCKMAP")
+          fi
+          # Receipt stays LAST. The immutable-ID helper rechecks draft/tag/upload
+          # identity immediately before it replaces any asset.
+          WINDOWS_UPLOADS+=("$RECEIPT")
+          bash scripts/upload-release-assets-by-id.sh \
+            "$REPO" "$RELEASE_ID" "$TAG" "$RELEASE_UPLOAD_URL" \
+            "${WINDOWS_UPLOADS[@]}"
 
           gh release view "$TAG" --json isDraft,assets \
             --jq '"draft=\(.isDraft)  assets=\([.assets[].name] | join(", "))"'

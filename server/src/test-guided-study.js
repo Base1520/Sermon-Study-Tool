@@ -212,9 +212,11 @@ async function test(name, fn) {
   })
 
   await test('the route refetches canonical text and uses a smaller guided reserve', () => {
-    const source = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+    // Route moved verbatim to routes/generation.js on 2026-08-15. This pin
+    // follows the implementation instead of silently slicing an empty index.js.
+    const source = fs.readFileSync(path.join(__dirname, 'routes/generation.js'), 'utf8')
     const start = source.indexOf("app.post('/v1/guided-study'")
-    const end = source.indexOf('// ── The reading', start)
+    const end = source.indexOf('module.exports = { mount }', start)
     const route = source.slice(start, end)
     assert.match(route, /mobile\.fetchPassage/)
     assert.match(route, /requestId/)

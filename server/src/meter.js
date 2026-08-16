@@ -554,6 +554,18 @@ async function holdStudyReservationForReading(db, reservationId) {
   return rowCount > 0
 }
 
+// 'released' and 'refunded' are terminal (schema.sql) — a reservation in either
+// state can never be re-armed, so a study still pointing at one must not be
+// told to "try again": the identical retry re-arrives at the same dead state.
+async function studyReservationState(db, reservationId) {
+  if (!reservationId) return null
+  const { rows } = await db.query(
+    `SELECT state FROM study_reservation WHERE id = $1 LIMIT 1`,
+    [reservationId],
+  )
+  return rows[0]?.state ?? null
+}
+
 async function heartbeatStudyReservation(db, reservationId) {
   const client = await db.connect()
   try {
@@ -878,6 +890,7 @@ module.exports = {
   releaseStudy,
   settleStudyReservation,
   holdStudyReservationForReading,
+  studyReservationState,
   heartbeatStudyReservation,
   releaseStudyReservation,
   refundStudyReservation,

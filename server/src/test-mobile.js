@@ -33,28 +33,36 @@ function check(name, condition, detail = '') {
   }
 }
 
-function fakePool({ activeDevices = 1 } = {}) {
+function fakePool({ activeDevices = 1, sameInstallMatches = 0, accountExists = true } = {}) {
   const state = {
     codeHash: sha256('OPR-AAAA-AAAA'),
     linkUsed: false,
     activeDevices,
+    sameInstallMatches,
+    accountExists,
     issued: [],
     committed: false,
     rolledBack: false,
+    released: false,
+    transactionEvents: [],
     claimedTables: [],
   }
   const client = {
     async query(sql, params = []) {
-      if (sql === 'BEGIN') return { rows: [] }
-      if (sql === 'COMMIT') { state.committed = true; return { rows: [] } }
-      if (sql === 'ROLLBACK') { state.rolledBack = true; return { rows: [] } }
+      if (sql === 'BEGIN') { state.transactionEvents.push('BEGIN'); return { rows: [] } }
+      if (sql === 'COMMIT') { state.committed = true; state.transactionEvents.push('COMMIT'); return { rows: [] } }
+      if (sql === 'ROLLBACK') { state.rolledBack = true; state.transactionEvents.push('ROLLBACK'); return { rows: [] } }
       if (/SELECT account_id\s+FROM device_link/s.test(sql)) {
         return { rows: params[0] === state.codeHash && !state.linkUsed ? [{ account_id: 'acct-1' }] : [] }
       }
       if (/SELECT id, email, plan, status\s+FROM account/s.test(sql)) {
-        return { rows: [{ id: 'acct-1', email: 'pastor@example.com', plan: 'standard', status: 'active' }] }
+        return { rows: state.accountExists
+          ? [{ id: 'acct-1', email: 'pastor@example.com', plan: 'standard', status: 'active' }]
+          : [] }
       }
-      if (/UPDATE device SET revoked_at/.test(sql)) return { rows: [], rowCount: 0 }
+      if (/UPDATE device SET revoked_at/.test(sql)) {
+        return { rows: [], rowCount: state.sameInstallMatches }
+      }
       if (/SELECT COUNT\(\*\)::int AS count/.test(sql)) return { rows: [{ count: state.activeDevices }] }
       if (/UPDATE device_link SET used_at/.test(sql)) {
         if (state.linkUsed) return { rows: [] }
@@ -77,7 +85,10 @@ function fakePool({ activeDevices = 1 } = {}) {
       }
       throw new Error(`Unhandled SQL: ${sql.slice(0, 80)}`)
     },
-    release() {},
+    release() {
+      state.released = true
+      state.transactionEvents.push('RELEASE')
+    },
   }
   return { state, connect: async () => client }
 }
@@ -213,15 +224,87 @@ function fakePool({ activeDevices = 1 } = {}) {
 
   console.log('\nDEVICE CAP IS ENFORCED BEFORE ISSUE')
   const full = fakePool({ activeDevices: MAX_ACTIVE_DEVICES })
+  const capacityWarnings = []
+  const priorWarn = console.warn
   let capError = null
+  console.warn = (...args) => {
+    capacityWarnings.push(args)
+    full.state.transactionEvents.push('WARN')
+  }
   try {
     await redeemDeviceLink(full, auth, {
       code: 'OPR-AAAA-AAAA', installId: 'phone-3', label: 'Full account', platform: 'ios',
     })
   } catch (error) { capError = error }
+
+  const sameInstallFull = fakePool({
+    activeDevices: MAX_ACTIVE_DEVICES,
+    sameInstallMatches: 1,
+  })
+  let sameInstallCapError = null
+  console.warn = (...args) => {
+    capacityWarnings.push(args)
+    sameInstallFull.state.transactionEvents.push('WARN')
+  }
+  try {
+    await redeemDeviceLink(sameInstallFull, auth, {
+      code: 'OPR-AAAA-AAAA', installId: 'phone-existing', label: 'Existing phone', platform: 'ios',
+    })
+  } catch (error) { sameInstallCapError = error }
+  finally { console.warn = priorWarn }
+
   check('a fourth active device is refused', capError instanceof MobileRouteError && capError.code === 'DEVICE_LIMIT')
   check('no token is issued over the cap', full.state.issued.length === 0)
   check('the failed transaction rolls back', full.state.rolledBack && !full.state.committed)
+  check('capacity telemetry waits for rollback and connection release',
+    full.state.transactionEvents.join(',') === 'BEGIN,ROLLBACK,RELEASE,WARN'
+      && sameInstallFull.state.transactionEvents.join(',') === 'BEGIN,ROLLBACK,RELEASE,WARN')
+  check('same-install over-cap redemption is also refused',
+    sameInstallCapError instanceof MobileRouteError && sameInstallCapError.code === 'DEVICE_LIMIT')
+  check('capacity telemetry emits exactly one scalar-only marker per refusal',
+    capacityWarnings.length === 2 && capacityWarnings.every((args) => args.length === 1))
+  check('capacity telemetry distinguishes a new install without identifiers',
+    capacityWarnings[0]?.[0] === '[device-link] capacity refused same_install_match=no active_after_tentative_revoke=3')
+  check('capacity telemetry distinguishes a same-install match without identifiers',
+    capacityWarnings[1]?.[0] === '[device-link] capacity refused same_install_match=yes active_after_tentative_revoke=3')
+
+  const sensitiveFieldNames = /(?:account_id|device_id|install_id|link_code|token|email|label|ip_address|request_id)/i
+  check('capacity telemetry contains no identifier or credential field names',
+    !sensitiveFieldNames.test(capacityWarnings.flat().join('\n')))
+
+  const loggerFailurePool = fakePool({ activeDevices: MAX_ACTIVE_DEVICES })
+  let loggerFailureError = null
+  console.warn = () => { throw new Error('simulated logger failure') }
+  try {
+    await redeemDeviceLink(loggerFailurePool, auth, {
+      code: 'OPR-AAAA-AAAA', installId: 'phone-logger', label: 'Logger failure', platform: 'ios',
+    })
+  } catch (error) { loggerFailureError = error }
+  finally { console.warn = priorWarn }
+  check('telemetry failure cannot replace the device-limit response',
+    loggerFailureError instanceof MobileRouteError && loggerFailureError.code === 'DEVICE_LIMIT')
+  check('telemetry failure still follows rollback and release',
+    loggerFailurePool.state.transactionEvents.join(',') === 'BEGIN,ROLLBACK,RELEASE')
+
+  const unrelatedWarnings = []
+  console.warn = (...args) => unrelatedWarnings.push(args)
+  try {
+    await redeemDeviceLink(fakePool(), auth, {
+      code: 'OPR-AAAA-AAAA', installId: 'phone-ok', label: 'Allowed phone', platform: 'ios',
+    })
+    try {
+      await redeemDeviceLink(fakePool(), auth, {
+        code: 'not-a-link', installId: 'phone-invalid', label: 'Invalid link', platform: 'ios',
+      })
+    } catch {}
+    try {
+      await redeemDeviceLink(fakePool({ accountExists: false }), auth, {
+        code: 'OPR-AAAA-AAAA', installId: 'phone-inactive', label: 'Inactive account', platform: 'ios',
+      })
+    } catch {}
+  } finally { console.warn = priorWarn }
+  check('success, invalid-link, and account-inactive paths emit no capacity telemetry',
+    unrelatedWarnings.length === 0)
 
   console.log('\nSIGN OUT REVOKES THIS DEVICE')
   let revokedIdentity = null

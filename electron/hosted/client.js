@@ -142,8 +142,13 @@ async function analyze(store, { text, reference, signal }) {
  *
  * onSection is called with (key, value) to match the local engine's contract
  * exactly, so main.js can hand the same callback to either path.
+ * Returns both the document and the authoritative study id from the done frame.
+ * The latter is what keeps Scholar/Ask attached if the server had to replace a
+ * stranded reservation while finishing the reading.
  */
-async function plainRead(store, { analysis, reference, level, studyId, onSection, signal }) {
+async function plainRead(store, {
+  analysis, reference, level, studyId, resumeOnly = false, onSection, signal,
+}) {
   const base = hostedBaseUrl()
   if (!base) throw new Error('plainRead: OPERATOR_API_URL is not set')
 
@@ -153,7 +158,13 @@ async function plainRead(store, { analysis, reference, level, studyId, onSection
   const res = await fetch(`${base}/v1/read`, {
     method: 'POST',
     headers: headers(store),
-    body: JSON.stringify({ analysis, reference, level, studyId }),
+    body: JSON.stringify({
+      analysis,
+      reference,
+      level,
+      studyId,
+      restoreOnly: resumeOnly === true,
+    }),
     signal: ctl.signal,
   })
 
@@ -177,6 +188,7 @@ async function plainRead(store, { analysis, reference, level, studyId, onSection
   const decoder = new TextDecoder()
   let buffer = ''
   let document = null
+  let completedStudyId = studyId ?? null
   let failure = null
 
   try {
@@ -203,6 +215,7 @@ async function plainRead(store, { analysis, reference, level, studyId, onSection
           try { onSection?.(msg.key, msg.value) } catch {}
         } else if (msg.type === 'done') {
           document = msg.document
+          completedStudyId = msg.studyId ?? completedStudyId
         } else if (msg.type === 'error') {
           failure = msg
         }
@@ -221,7 +234,7 @@ async function plainRead(store, { analysis, reference, level, studyId, onSection
   // arrived — a dropped connection looks exactly like this, and silently
   // returning null would render as an empty study.
   if (!document) throw new Error('The reading ended before it finished.')
-  return document
+  return { document, studyId: completedStudyId }
 }
 
 /** What the app may do, according to the server. Never throws; never 401s. */
@@ -335,9 +348,11 @@ async function ask(store, { doc, analysis, studyId, question, history, vaultNote
  * the study row it owns server-side, and meters it as an ask. Nothing new had to
  * be deployed for this to work.
  *
- * studyId is required and must be a FINISHED study owned by this account — the
+ * studyId, when present, must be a FINISHED study owned by this account — the
  * route reads the document and analysis from its own row and ignores anything the
- * client claims about them.
+ * client claims about them. A null studyId is general mode for every specialist
+ * (Cole's expanded call, 2026-08-15): each answers ungrounded in its own
+ * discipline — and says so — for the same one metered Ask.
  */
 async function sermonAssist(store, { studyId, agent, question, history }) {
   const base = hostedBaseUrl()

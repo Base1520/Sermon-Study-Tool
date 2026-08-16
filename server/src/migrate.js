@@ -118,13 +118,17 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
       WHERE code = ANY($1) AND account_id IS NOT NULL`, [BURNED])
   if (burnedAccounts.length) {
     const ids = burnedAccounts.map((r) => r.account_id)
-    await db.query(
+    const { rowCount: devicesRevoked } = await db.query(
       `UPDATE device SET revoked_at = now()
         WHERE account_id = ANY($1) AND revoked_at IS NULL`, [ids])
-    await db.query(
+    const { rowCount: accountsDowngraded } = await db.query(
       `UPDATE account SET plan = 'free', status = 'none'
         WHERE id = ANY($1) AND plan = 'comp'`, [ids])
-    console.log(`revoked ${ids.length} account(s) minted from leaked codes`)
+    if (devicesRevoked || accountsDowngraded) {
+      console.log(
+        `remediated leaked-code grants accounts_downgraded=${accountsDowngraded} devices_revoked=${devicesRevoked}`,
+      )
+    }
   }
 
   await db.end()

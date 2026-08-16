@@ -196,10 +196,13 @@ function responseRecorder() {
 
   await test('the live commentary route mounts the behavior-tested handler', () => {
     const source = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+    // End marker updated 2026-08-15: /v1/feedback moved to routes/community.js,
+    // so the commentary route's next neighbor in index.js is now the community
+    // mount call. Same slice intent: commentary route body only.
     const route = routeSource(
       source,
       "app.get('/v1/studies/:id/commentary'",
-      "app.post('/v1/feedback'",
+      'community.mount(app, db,',
     )
     assert.match(source, /const \{ buildStudyCommentaryHandler \} = require\('\.\/study-commentary'\)/)
     assert.match(route, /route\(buildStudyCommentaryHandler\(\{ db \}\)\)/)

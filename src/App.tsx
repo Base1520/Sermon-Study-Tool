@@ -154,6 +154,9 @@ const STORED_KEY = 'stored'
 
 export default function App() {
   const [apiKey, setApiKey]       = useState('')
+  /* Hosted builds bill the subscription server-side; the local key gates below
+     must not turn away a signed-in hosted reader who never entered one. */
+  const [hostedOn, setHostedOn]   = useState(false)
   const [esvKey, setEsvKey]       = useState('')
   const [showKeyModal, setShowKeyModal] = useState(false)
   const [analysis, setAnalysis]   = useState<PhrasingAnalysis | null>(null)
@@ -240,6 +243,13 @@ export default function App() {
      on screen. A ref, not state: the subscription below is mounted once and
      would otherwise close over the id that was current when it mounted. */
   const plainRequestRef = useRef<string | null>(null)
+  /* Restoring analysis is not permission to buy another study. Launch and
+     history-open set this until the reader deliberately starts/retries PLAIN;
+     the safe background path below may only use a verified cache or the hosted
+     study id already bought by analyze. */
+  const suppressAutomaticRead = useRef(false)
+  const activeStudyToken = useRef(0)
+  const sessionRestoreStarted = useRef(false)
   /* ── THE PASSAGE, HELD BACK NO LONGER ─────────────────────────────────────
      The Scripture text is fetched BEFORE anything is sent to a model — it is
      what gets sent. It was then held in a local variable inside handleAnalyze
@@ -262,15 +272,48 @@ export default function App() {
     const off = (window as any).electronAPI?.onOpenFeedback?.(() => setShowFeedback(true))
     return () => { if (typeof off === 'function') off() }
   }, [])
-  /* True only for the analysis restored at launch. Cleared the moment the reader
-     is opened deliberately, so a restored study still reads normally once the
-     man asks for it — it just never asks for itself. */
-  const restoredOnLaunch = useRef(false)
+  /**
+   * Finish an already-bought hosted reading, or restore its verified local
+   * document. `resumeOnly` is enforced in main, beside the cache and study-id
+   * stores; a missing id therefore returns null instead of creating work.
+   */
+  const resumeStoredStudy = useCallback((entry: HistoryEntry, studyToken: number) => {
+    const api = (window as any).electronAPI
+    if (typeof api?.plainRead !== 'function') return
+
+    const requestId = `resume-${entry.id}-${studyToken}`
+    plainRequestRef.current = requestId
+    setPlainDoc(null); setPlainPartial(null); setPlainError(null); setPlainLoading(true)
+
+    api.plainRead({
+      analysis: entry.analysis,
+      requestedReference: entry.analysis.reference,
+      requestId,
+      resumeOnly: true,
+    })
+      .then((doc: PlainReadDoc | null) => {
+        if (!doc) return
+        if (activeStudyToken.current !== studyToken) return
+        if (plainRequestRef.current !== requestId) return
+        setPlainDoc(doc)
+        setPlainPartial(null)
+      })
+      .catch((e: any) => {
+        if (activeStudyToken.current !== studyToken) return
+        if (plainRequestRef.current !== requestId) return
+        setPlainError(friendlyApiError(e))
+      })
+      .finally(() => {
+        if (activeStudyToken.current !== studyToken) return
+        if (plainRequestRef.current !== requestId) return
+        setPlainLoading(false)
+      })
+  }, [])
 
   useEffect(() => {
     if (!plainMode || !analysis || demoMode) return
-    if (restoredOnLaunch.current) { restoredOnLaunch.current = false; return }
-    if (!apiKey) {
+    if (suppressAutomaticRead.current) return
+    if (!apiKey && !hostedOn) {
       setPlainError({
         headline: 'No API key yet',
         detail: 'Add your key in settings and the study will run.',
@@ -326,7 +369,7 @@ export default function App() {
       if (plainRequestRef.current === requestId) plainRequestRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plainMode, analysis, apiKey, plainNonce, demoMode])
+  }, [plainMode, analysis, apiKey, hostedOn, plainNonce, demoMode])
 
   /* ── THE READING, ARRIVING IN PIECES ───────────────────────────────────────
      The engine writes the document block by block and emits each one on
@@ -427,13 +470,17 @@ export default function App() {
   // The reader view occupies the desk slot, so entering PLAIN leaves any other
   // tab. One control, one obvious result.
   const togglePlain = useCallback(() => {
+    // Entering PLAIN is an explicit request. It is the one moment a restored
+    // analysis with no rideable hosted study may take the normal generation
+    // path; merely launching or selecting History never does.
+    if (!plainMode) suppressAutomaticRead.current = false
     setPlainMode(p => {
       const next = !p
       localStorage.setItem('sermon-tool-view-mode', next ? 'plain' : 'pulpit')
       return next
     })
     setTab('desk')
-  }, [])
+  }, [plainMode])
 
   // Belt on top of the braces. The scholar tab renders on `tab === 'scholar'`
   // alone, and its handler reads the pastor's saved profile. If anything ever
@@ -489,6 +536,7 @@ export default function App() {
     const api = (window as any).electronAPI
     if (!api?.hostedClaim) return
     api.hostedEnabled?.().then((on: boolean) => {
+      setHostedOn(!!on)
       if (!on) return
       api.hostedMe?.().then((state: any) => {
         if (state && !state.anonymous) return   // already carrying a token
@@ -499,6 +547,11 @@ export default function App() {
 
   // Restore last session on launch
   useEffect(() => {
+    // React StrictMode replays mount effects. This guard makes the restore IPC
+    // itself one-shot; main also single-flights the hosted request as the final
+    // cost boundary.
+    if (sessionRestoreStarted.current) return
+    sessionRestoreStarted.current = true
     ;(window as any).electronAPI.sessionLoadLatest().then((entry: HistoryEntry | null) => {
       if (!entry) return
       /* OPENING THE APP MUST NOT SPEND A STUDY.
@@ -507,16 +560,20 @@ export default function App() {
          re-ran the reading. If that document was not cached (a verify pass that
          timed out is never cached anywhere), it was BOUGHT AGAIN, every launch,
          before the user had clicked a thing. On a free install that is the one
-         lifetime credit gone at startup. The restore is allowed to render what
-         is already on disk; generating new work needs a deliberate press. */
-      restoredOnLaunch.current = true
+         lifetime credit gone at startup. The restore may return a verified
+         local copy or finish the remembered study id already bought by analyze;
+         it may never mint fresh work. */
+      const studyToken = ++activeStudyToken.current
+      suppressAutomaticRead.current = true
+      setRequestedRef(null)
       setAnalysis(entry.analysis)
       setAnnotations(entry.annotations ?? {})
       setCurrentHistoryId(entry.id)
       if (entry.draft) setSavedDraft(entry.draft)
       if (entry.scholarMessages?.length) setSavedChat(entry.scholarMessages)
+      resumeStoredStudy(entry, studyToken)
     }).catch(() => {})
-  }, [])
+  }, [resumeStoredStudy])
 
   const culturalPhraseIds = useMemo(
     () => new Set((analysis?.culturalNotes ?? []).map(n => n.phraseId)),
@@ -538,7 +595,11 @@ export default function App() {
   }, [plainMode])
 
   const handleAnalyze = useCallback(async (text: string, reference: string) => {
-    if (!apiKey) { setShowKeyModal(true); return }
+    if (!apiKey && !hostedOn) { setShowKeyModal(true); return }
+    activeStudyToken.current += 1
+    suppressAutomaticRead.current = false
+    plainRequestRef.current = null
+    setPlainLoading(false)
     setDemoMode(false)
     setLoading(true); setError(null); setSelectedPhraseId(null); setWordStudy(null); setAnnotations({})
     setSavedDraft(undefined); setSavedChat(undefined)
@@ -599,9 +660,12 @@ export default function App() {
       setPendingPassage(null)
       setAnalysisStreamId(null)
     } finally { setLoading(false) }
-  }, [apiKey])
+  }, [apiKey, hostedOn])
 
   const handleLoadHistory = useCallback((entry: HistoryEntry) => {
+    const studyToken = ++activeStudyToken.current
+    suppressAutomaticRead.current = true
+    plainRequestRef.current = null
     setAnalysis(entry.analysis)
     setDemoMode(false)
     /* A saved study carries its own passage text. The stand-in from the last
@@ -618,11 +682,13 @@ export default function App() {
     setCurrentHistoryId(entry.id)
     setSavedDraft(entry.draft)
     setSavedChat(entry.scholarMessages?.length ? entry.scholarMessages : undefined)
+    setPlainDoc(null); setPlainPartial(null); setPlainError(null)
     setSelectedPhraseId(null)
     setWordStudy(null)
     setError(null)
     setTab('desk')
-  }, [])
+    resumeStoredStudy(entry, studyToken)
+  }, [resumeStoredStudy])
 
   const handleAnnotate = useCallback(async (phraseId: string, text: string) => {
     const next = { ...annotations, [phraseId]: text }
@@ -1116,7 +1182,10 @@ export default function App() {
                        process doing the work, nothing simulated. */
                     analyzing={loading}
                     progressStreamId={analysisStreamId}
-                    onRetry={() => setPlainNonce(n => n + 1)}
+                    onRetry={() => {
+                      suppressAutomaticRead.current = false
+                      setPlainNonce(n => n + 1)
+                    }}
                     onOpenSettings={() => setShowKeyModal(true)}
                     /* Every study surface stays available to the reader: map,
                        lineage, kings, monarchy timeline, parallel versions,
@@ -1243,8 +1312,12 @@ export default function App() {
         <ApiKeyModal onSave={handleSaveKey} onClose={() => setShowKeyModal(false)} hasExistingKey={Boolean(apiKey)} hasExistingEsvKey={Boolean(esvKey)}
           onDemo={() => {
             import('./data/demoAnalysis').then(m => {
+              activeStudyToken.current += 1
+              suppressAutomaticRead.current = true
+              plainRequestRef.current = null
               setAnalysis(m.DEMO_ANALYSIS as any)
               setPlainDoc(m.DEMO_PLAIN_READ)
+              setPlainPartial(null); setPlainError(null); setPlainLoading(false)
               setPendingPassage(null)
               setAnalysisStreamId(null)
               setPlainMode(true)

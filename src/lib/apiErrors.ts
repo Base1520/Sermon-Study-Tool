@@ -231,6 +231,24 @@ export function friendlyApiError(err: unknown): FriendlyError {
     }
   }
 
+  /* The specialist gate. The server refuses to let a scholar answer over a
+     study whose reading never finished, and its message says to finish the
+     reading first. Falling through to the generic headline below turned that
+     refusal into "Could not finish the reading" — which reads as the reading
+     being broken, when the truth is it was never run. Matched on the message
+     shape (the error code does not survive Electron's IPC serialization). */
+  if (
+    hay.includes('study_reading_required') ||
+    hay.includes('reading and let it finish')
+  ) {
+    return {
+      headline: "This study's reading hasn't finished",
+      detail:
+        'The scholar answers from the finished reading, and this study does not have one yet. ' +
+        'Open Plain Read for this passage and let it stream to the end — the scholar unlocks the moment it completes.',
+    }
+  }
+
   return {
     headline: 'Could not finish the reading',
     detail: msg || 'Something went wrong and the tool did not get a usable answer.',

@@ -63,9 +63,12 @@ async function test(name, fn) {
   })
 
   await test('the route refetches canonical text and carries idempotency', () => {
-    const source = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+    // Route moved verbatim to routes/generation.js on 2026-08-15. Keep this
+    // source pin on the owning file, with a tight boundary so Guided Study
+    // cannot accidentally satisfy a missing Quick Study invariant.
+    const source = fs.readFileSync(path.join(__dirname, 'routes/generation.js'), 'utf8')
     const start = source.indexOf("app.post('/v1/quick-study'")
-    const end = source.indexOf('// ── The reading', start)
+    const end = source.indexOf('// ── Tablet guided study', start)
     const route = source.slice(start, end)
     assert.match(route, /mobile\.fetchPassage/)
     assert.match(route, /req\.get\('x-esv-key'\)/)

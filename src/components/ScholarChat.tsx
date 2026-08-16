@@ -5,6 +5,7 @@ import { BASE } from '../theme'
 import { friendlyApiErrorText } from '../lib/apiErrors'
 
 interface Message { role: 'user' | 'assistant'; content: string }
+type ScholarContextMode = 'checking' | 'grounded' | 'general'
 
 // ── Octagon thinking indicator ─────────────────────────────────────────────────
 function OctagonThinking({ loading }: { loading: boolean }) {
@@ -212,26 +213,57 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [contextMode, setContextMode] = useState<ScholarContextMode>('checking')
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const sendingRef = useRef(false)
+  const initializedChatRef = useRef<string | null>(null)
   const historyIdRef = useRef(historyId)
   useEffect(() => { historyIdRef.current = historyId }, [historyId])
 
-  // Init: restore saved messages or show greeting
-  const initKey = inline ? analysis?.reference ?? 'empty' : isOpen ? analysis?.reference ?? 'empty' : null
+  // An analysis does not prove the hosted server owns a finished study: legacy
+  // local caches have an analysis but no remembered study id. Ask main for the
+  // same mode it will use at send time, and fail visibly to general if the
+  // read-only bridge is unavailable. Never surface the id itself.
   useEffect(() => {
-    if (!initKey) return
+    let current = true
+    setContextMode('checking')
+    const context = (window as any).electronAPI?.scholarChatContext
+    if (typeof context !== 'function') {
+      setContextMode('general')
+      return () => { current = false }
+    }
+    context({ passageContext: analysis ?? null })
+      .then((result: { mode?: string } | null) => {
+        if (!current) return
+        setContextMode(result?.mode === 'grounded' ? 'grounded' : 'general')
+      })
+      .catch(() => { if (current) setContextMode('general') })
+    return () => { current = false }
+  }, [analysis?.reference])
+
+  // Init: restore saved messages or show greeting
+  const initKey = inline
+    ? analysis?.reference ?? 'empty'
+    : isOpen ? analysis?.reference ?? 'empty' : null
+  useEffect(() => {
+    if (!initKey) {
+      initializedChatRef.current = null
+      return
+    }
+    if (contextMode === 'checking' || initializedChatRef.current === initKey) return
+    initializedChatRef.current = initKey
     if (initialMessages && initialMessages.length > 0) {
       setMessages(initialMessages)
     } else {
       setMessages([{
         role: 'assistant',
-        content: analysis
+        content: contextMode === 'grounded' && analysis
           ? `I've worked through ${analysis.reference}. Here is something really cool — I can already see ${analysis.culturalNotes?.length ?? 0} cultural pressure point${(analysis.culturalNotes?.length ?? 0) !== 1 ? 's' : ''} worth unpacking before you step in the pulpit. What do you want to dig into?`
-          : "Load a passage and let's go. I want to help you see what the text is actually doing — not just what it says, but what it demands. Think of it like this: good exegesis changes how you see everything else.",
+          : "I'm ready. Ask me about a passage, a theological question, or a reading you want pressure-tested. If no finished study is attached, I'll answer from general knowledge and say so plainly.",
       }])
     }
-  }, [initKey])
+  }, [initKey, contextMode, initialMessages])
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
   useEffect(() => { if (inline || isOpen) setTimeout(() => inputRef.current?.focus(), 200) }, [inline, isOpen])
@@ -244,12 +276,29 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
 
   async function send(text?: string) {
     const content = (text ?? input).trim()
-    if (!content || loading) return
+    if (!content || sendingRef.current) return
+    sendingRef.current = true
+    setLoading(true)
+
+    // Refresh immediately before the main-process send. A reading can finish
+    // under the same reference after the mount-time check; using only the
+    // effect above would leave the disclosure stale for the next answer.
+    const context = (window as any).electronAPI?.scholarChatContext
+    if (typeof context === 'function') {
+      try {
+        const result = await context({ passageContext: analysis ?? null })
+        setContextMode(result?.mode === 'grounded' ? 'grounded' : 'general')
+      } catch {
+        setContextMode('general')
+      }
+    } else {
+      setContextMode('general')
+    }
+
     const userMsg: Message = { role: 'user', content }
     const newMessages = [...messages, userMsg]
     setMessages(newMessages)
     setInput('')
-    setLoading(true)
     // Streaming: placeholder assistant message fills in as chunks arrive
     const streamId = `sc-${Date.now()}`
     setMessages([...newMessages, { role: 'assistant', content: '' }])
@@ -265,7 +314,21 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
       const apiMessages = newMessages
         .filter(m => !(m.role === 'assistant' && m === messages[0]))
         .map(m => ({ role: m.role, content: m.content }))
-      const reply = await (window as any).electronAPI.scholarChat({ messages: apiMessages, passageContext: analysis ?? null, apiKey, streamId })
+      const response = await (window as any).electronAPI.scholarChat({
+        messages: apiMessages,
+        passageContext: analysis ?? null,
+        apiKey,
+        streamId,
+        contextReceipt: true,
+      })
+      const reply = typeof response === 'string' ? response : String(response?.answer ?? '')
+      // New hosted main processes return the mode actually used. Keep accepting
+      // a string for local/older processes, but let the authoritative receipt
+      // close any completion race that happened after the pre-send check.
+      if (response && typeof response === 'object') {
+        if (response.mode === 'grounded') setContextMode('grounded')
+        else if (response.mode === 'general') setContextMode('general')
+      }
       const updatedMessages = [...newMessages, { role: 'assistant' as const, content: reply }]
       setMessages(updatedMessages)
       persistChat(updatedMessages)
@@ -273,6 +336,7 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
       setMessages([...newMessages, { role: 'assistant', content: friendlyApiErrorText(err) }])
     } finally {
       unsubscribe?.()
+      sendingRef.current = false
       setLoading(false)
     }
   }
@@ -310,13 +374,28 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
             </div>
           )}
         </div>
-        {analysis && (
-          <div style={{
-            fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.08em', color: BASE.gold,
-            background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`,
-            borderRadius: 6, padding: '3px 8px',
-          }}>{analysis.reference}</div>
-        )}
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          data-scholar-context={contextMode}
+          style={{
+            maxWidth: 310,
+            fontFamily: 'JetBrains Mono', fontSize: 8, letterSpacing: '0.04em',
+            color: contextMode === 'general' ? BASE.gold : BASE.boneDim,
+            background: contextMode === 'general' ? BASE.goldDim : `${BASE.green}22`,
+            border: `1px solid ${contextMode === 'general' ? BASE.borderGold : BASE.border}`,
+            borderRadius: 6, padding: '4px 8px', lineHeight: 1.4,
+          }}
+        >
+          {contextMode === 'checking'
+            ? 'Checking study context…'
+            : contextMode === 'grounded'
+              ? `Study attached · ${analysis?.reference ?? 'finished study'}`
+              : analysis?.reference
+                ? `Speaking generally · this chat is not grounded in ${analysis.reference}.`
+                : 'Speaking generally · open a finished study to ground me in its text.'}
+        </div>
         {!inline && onClose && (
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: BASE.steel, fontSize: 16, padding: 4 }}>×</button>
         )}
@@ -385,7 +464,9 @@ export function ScholarChat({ inline = false, isOpen, onClose, analysis, apiKey,
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKey}
-            placeholder="Ask about the passage, a clause, a cultural note…"
+            placeholder={contextMode === 'grounded'
+              ? 'Ask about the passage, a clause, a cultural note…'
+              : 'Ask the Scholar any question…'}
             rows={1}
             style={{
               flex: 1, background: 'none', border: 'none', outline: 'none', resize: 'none',

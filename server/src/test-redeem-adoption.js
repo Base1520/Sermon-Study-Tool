@@ -192,7 +192,21 @@ test('the live stack runs legacy adoption centrally before every route', () => {
   const firstRoute = indexSource.indexOf("app.get('/health'")
   assert.ok(authMiddleware >= 0 && authMiddleware < adoptionMiddleware)
   assert.ok(adoptionMiddleware < firstRoute)
-  const redeemStart = indexSource.indexOf("app.post('/v1/redeem'")
-  const redeemEnd = indexSource.indexOf('// ── Stripe + mobile account surfaces', redeemStart)
-  assert.match(indexSource.slice(redeemStart, redeemEnd), /redeemAccessCode\(db, \{ code: raw, installId, auth \}\)/)
+  // The redeem route moved to routes/community.js (2026-08-15). The guard's
+  // intent is unchanged and now has two halves: (1) the moved route still calls
+  // the central adoption-aware helper with auth; (2) index.js registers the
+  // community mount AFTER the adoption middleware, so the moved route still
+  // sits behind it — mount position IS registration order.
+  const communitySource = fs.readFileSync(path.join(__dirname, 'routes', 'community.js'), 'utf8')
+  const redeemStart = communitySource.indexOf("app.post('/v1/redeem'")
+  assert.ok(redeemStart >= 0, 'routes/community.js must register /v1/redeem')
+  assert.match(communitySource.slice(redeemStart), /redeemAccessCode\(db, \{ code: raw, installId, auth \}\)/)
+  assert.match(communitySource, /Where a tester's report actually lands\./,
+    'the moved feedback route must retain its WHY documentation')
+  assert.doesNotMatch(indexSource, /Where a tester's report actually lands\./,
+    'index.js must not retain orphaned route documentation')
+  const communityMount = indexSource.indexOf('community.mount(app, db,')
+  assert.ok(communityMount > adoptionMiddleware,
+    'community routes must be mounted after the adoption middleware')
+  assert.doesNotMatch(indexSource, /app\.post\('\/v1\/redeem'/)
 })

@@ -9,7 +9,10 @@ const readinessSource = fs.readFileSync(path.join(root, 'server/src/readiness.js
 const expectedSchema = readinessSource.match(/const SCHEMA_VERSION = '([^']+)'/)?.[1] || ''
 const apiUrl = String(process.env.OPERATOR_API_URL || 'https://api-production-15e5e.up.railway.app').replace(/\/+$/, '')
 const platform = String(process.env.OPERATOR_STORE_PLATFORM || 'all').toLowerCase()
+const rawProbeMode = process.env.OPERATOR_LIVE_PROBE_MODE
+const probeMode = rawProbeMode === undefined ? 'full' : String(rawProbeMode).toLowerCase()
 const allowedPlatforms = new Set(['all', 'apple', 'google'])
+const allowedProbeModes = new Set(['full', 'public-get'])
 const failures = []
 const warnings = []
 const passes = []
@@ -22,6 +25,10 @@ const check = (condition, message) => condition ? pass(message) : fail(message)
 check(allowedPlatforms.has(platform), 'Store platform scope is valid')
 
 async function request(url, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase()
+  if (probeMode === 'public-get' && method !== 'GET') {
+    throw new Error(`Public GET-only mode rejected ${method} request`)
+  }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 15_000)
   try {
@@ -55,6 +62,12 @@ async function probeRoute(label, route, options) {
   }
 }
 
+async function runChecks() {
+  if (!allowedProbeModes.has(probeMode)) {
+    fail('Live probe mode is valid')
+    return
+  }
+
 try {
   const response = await request(`${apiUrl}/health`)
   const health = await response.json()
@@ -81,13 +94,17 @@ const emptyPost = {
   headers: { 'content-type': 'application/json', 'x-install-id': '00000000-0000-4000-8000-000000000000' },
   body: '{}',
 }
-await probeRoute('Quick Study route', '/v1/quick-study', emptyPost)
-await probeRoute('Guided Study route', '/v1/guided-study', emptyPost)
-await probeRoute('Ask route', '/v1/ask', emptyPost)
-await probeRoute('Specialist-agent route', '/v1/sermon-assist', emptyPost)
-await probeRoute('Store verification route', '/v1/iap/verify', emptyPost)
-await probeRoute('Commentary route', '/v1/studies/00000000-0000-4000-8000-000000000000/commentary', { headers: { 'x-install-id': '00000000-0000-4000-8000-000000000000' } })
-await probeRoute('Workspace sync route', '/v1/studies/00000000-0000-4000-8000-000000000000/workspace', { ...emptyPost, method: 'PATCH' })
+if (probeMode === 'full') {
+  await probeRoute('Quick Study route', '/v1/quick-study', emptyPost)
+  await probeRoute('Guided Study route', '/v1/guided-study', emptyPost)
+  await probeRoute('Ask route', '/v1/ask', emptyPost)
+  await probeRoute('Specialist-agent route', '/v1/sermon-assist', emptyPost)
+  await probeRoute('Store verification route', '/v1/iap/verify', emptyPost)
+  await probeRoute('Commentary route', '/v1/studies/00000000-0000-4000-8000-000000000000/commentary', { headers: { 'x-install-id': '00000000-0000-4000-8000-000000000000' } })
+  await probeRoute('Workspace sync route', '/v1/studies/00000000-0000-4000-8000-000000000000/workspace', { ...emptyPost, method: 'PATCH' })
+} else if (probeMode === 'public-get') {
+  warn('Public GET-only mode skips unauthenticated API route probes; this is partial evidence, not full live readiness')
+}
 
 const privacyDisclosureRequirements = [
   {
@@ -114,8 +131,16 @@ await probePage(
 await probePage('Terms of use', metadata.app.termsUrl, /The Operator|Operator Terms/i, '/operator/terms')
 await probePage('Account deletion page', metadata.app.accountDeletionUrl, /Delete Your Account|Delete.*Operator Account/i, '/operator/account-deletion')
 await probePage('Support page', metadata.app.supportUrl, /contact|support|info@base1520\.com/i, '/contact')
+}
 
-console.log(`\nThe Operator live store readiness\n${'='.repeat(35)}`)
+await runChecks()
+
+const reportTitle = probeMode === 'public-get'
+  ? 'The Operator public live preflight (GET-only partial evidence)'
+  : probeMode === 'full'
+    ? 'The Operator full live store readiness'
+    : 'The Operator live preflight (invalid probe mode)'
+console.log(`\n${reportTitle}\n${'='.repeat(reportTitle.length)}`)
 for (const message of passes) console.log(`PASS  ${message}`)
 for (const message of warnings) console.log(`WARN  ${message}`)
 for (const message of failures) console.log(`FAIL  ${message}`)

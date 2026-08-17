@@ -9,9 +9,20 @@ import ts from 'typescript'
 import { mobileVersionContract } from './mobile-version-contract.mjs'
 import {
   formatScreenshotDimensions,
+  candidateEvidenceGitLineageIsValid,
+  exactPackageManifestTransitionIsValid,
+  mobilePackageLockLineageIsValid,
+  packagedCandidateTreeDigestsAreValid,
+  iosIpaRuntimeTreeEvidence,
+  appleScreenshotReceiptIsValid,
+  androidScreenshotReceiptIsValid,
+  androidScreenshotProvenanceIsConsistent,
   appleScreenshotProvenanceIsConsistent,
   hasAndroidScreenshotCreativeHold,
   hasAppleScreenshotSubmissionHold,
+  parseAppleScreenshotReceipt,
+  parseAndroidScreenshotReceipt,
+  screenshotReceiptGitCustody,
   screenshotDimensionsMatch,
   STORE_SCREENSHOT_SETS,
 } from './screenshot-provenance.mjs'
@@ -28,11 +39,65 @@ import {
   theologyExternalArtifactIsCanonical,
 } from './theology-external-artifact.mjs'
 import {
+  activeMarkdown,
   CONSOLE_PACKET_PATHS,
   consolePacketRetentionRecordsAreVerified,
+  readConsolePacketInput,
 } from './console-packet-retention.mjs'
+import {
+  authoritySemanticFailures,
+  hasUnmatchedInlineCode,
+  lineContaining as uniqueActiveAuthorityLineContaining,
+  stripInlineCode,
+} from './mobile-release-record-authority.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+function uniqueActiveMarkdownSection(text, heading) {
+  const active = activeMarkdown(text)
+  const lines = active.split(/\r?\n/)
+  const headingLines = stripInlineCode(active).split(/\r?\n/)
+  const marker = `## ${heading}`
+  const starts = headingLines.flatMap((line, index) => line === marker ? [index] : [])
+  if (starts.length !== 1) return ''
+  const start = starts[0] + 1
+  const nextHeadingOffset = headingLines.slice(start).findIndex((line) => /^##\s+/.test(line))
+  const end = nextHeadingOffset === -1 ? lines.length : start + nextHeadingOffset
+  return lines.slice(start, end).join('\n')
+}
+
+const MOBILE_PACKAGE_INPUT_PATHS = Object.freeze([
+  'package.json',
+  'package-lock.json',
+  'vite.mobile.config.ts',
+  'capacitor.config.ts',
+  'mobile',
+  'src',
+  'server/src/iap-products.json',
+  'store/metadata.json',
+  'ios/App/App.xcodeproj/project.pbxproj',
+  'ios/App/App/Info.plist',
+  'ios/App/App/PrivacyInfo.xcprivacy',
+  'android/app/build.gradle',
+  'android/app/src/main/AndroidManifest.xml',
+])
+const MOBILE_RELEASE_LINEAGE_PATHS = Object.freeze([
+  ...MOBILE_PACKAGE_INPUT_PATHS.filter((relative) => relative !== 'package-lock.json'),
+  'ios/App',
+  'android',
+])
+const MOBILE_DESCENDANT_RELEASE_LINEAGE_PATHS = Object.freeze(
+  MOBILE_RELEASE_LINEAGE_PATHS.filter((relative) => relative !== 'package.json'),
+)
+const CANDIDATE_PACKAGE_MANIFEST_SHA256 = 'ba0809a4adaad80f20385a7c8a8b3210f81fd775a07d934583b67632f5c7ce96'
+const PUSHED_PACKAGE_MANIFEST_SHA256 = '93b205f491e7489957fd17f1fa73e9e81bf5fc5f2d18bf5450c9c193c4fed97c'
+const BUILD_6_RUNTIME_TREE_DIGEST = '68fd3aed717cbad04fccf4e52e9d260d34523687c4b4a289a267c5cc3b0d5a57'
+const BUILD_6_IPA_SHA256 = '4771d80d443d3219a1b7734e7cd07084ae791087ee8cac6a214e800c155577be'
+const BUILD_6_IPA_SIZE = 2_193_322
+const BUILD_6_IPA_EVIDENCE_PATH = path.resolve(
+  root,
+  '../../Claude/System/AI-Collaboration/local-release-evidence/ios/1.4.2-build6/TheOperator-1.4.2-build6.ipa',
+)
 const require = createRequire(import.meta.url)
 const { PLANS } = require('../server/src/entitlement.js')
 const failures = []
@@ -92,6 +157,28 @@ const gitRef = (ref) => {
     return ''
   }
 }
+const gitTextAt = (ref, relative) => {
+  try {
+    return execFileSync('git', ['show', `${ref}:${relative}`], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+  } catch {
+    return ''
+  }
+}
+const gitIndexText = (relative) => {
+  try {
+    return execFileSync('git', ['show', `:${relative}`], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+  } catch {
+    return ''
+  }
+}
 const binaryEvidence = (relative) => {
   try {
     const contents = fs.readFileSync(path.join(root, relative))
@@ -133,37 +220,6 @@ const pass = (message) => passes.push(message)
 const fail = (message) => failures.push(message)
 const warn = (message) => warnings.push(message)
 const check = (condition, message) => condition ? pass(message) : fail(message)
-
-function hasUnmatchedInlineCode(text) {
-  return (text.match(/`/g) || []).length % 2 !== 0
-}
-
-function hasBuild5CurrentCandidateLabel(text) {
-  if (hasUnmatchedInlineCode(text)) return false
-  const normalized = text
-    .replace(/`[^`\r\n]*`/g, ' ')
-    .replace(/\b1\.4\.2\s*\(5\)(?!\w)/gi, 'build 5')
-  const build5 = /\bbuild(?:\s+|-)5\b/i
-  const currentCandidate = /(?:\b(?:current(?:ly)?|now|today|at present)\b[^.!?;\n]{0,96}\bcandidate(?:\s+artifact)?\b|\bcandidate(?:\s+artifact)?\b[^.!?;\n]{0,96}\b(?:currently|now|today|at present)\b)/i
-  const labelVerb = /\b(?:is|are|remains|stays|becomes)\b/i
-  const negation = /\b(?:not|never|cannot|must not|may not|should not|will not|do not|does not|did not|neither|no longer)\b/i
-  const noncurrent = /\b(?:historical|historically|previously|formerly|prior|archived|superseded|retroactive|until|once|later|future|pending|could|might|would)\b/i
-
-  const sentences = normalized
-    .split(/[.!?;]+/)
-    .map((sentence) => sentence.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-
-  return sentences.some((sentence) => {
-    let subjectSeen = false
-    return sentence.split(/\b(?:but|however|yet)\b/i).some((segment) => {
-      if (build5.test(segment)) subjectSeen = true
-      if (!subjectSeen || !currentCandidate.test(segment) || !labelVerb.test(segment)) return false
-      if (negation.test(segment) || noncurrent.test(segment)) return false
-      return true
-    })
-  })
-}
 
 function directoryDigest(relative, ignored = new Set()) {
   const directory = path.join(root, relative)
@@ -219,6 +275,7 @@ function pngMetadata(relative) {
 const metadata = JSON.parse(read('store/metadata.json'))
 const catalog = JSON.parse(read('server/src/iap-products.json'))
 const packageJson = JSON.parse(read('package.json'))
+const packageLock = JSON.parse(read('package-lock.json'))
 const serverPackageJson = JSON.parse(read('server/package.json'))
 const serverPackageLock = JSON.parse(read('server/package-lock.json'))
 const pbxproj = read('ios/App/App.xcodeproj/project.pbxproj')
@@ -260,7 +317,22 @@ const mobileSource = fs.readdirSync(path.join(root, 'src/mobile'), { withFileTyp
   .join('\n')
 const readiness = read('server/src/readiness.js')
 const liveStoreGate = read('scripts/check-mobile-store-live.mjs')
+const mobileReleaseProvenanceGate = read('scripts/check-mobile-release-provenance.sh')
 const screenshotPlan = read('store/screenshots.md')
+const appleScreenshotReceiptSource = read('store/apple-screenshot-verification.json')
+const appleScreenshotReceipt = parseAppleScreenshotReceipt(appleScreenshotReceiptSource)
+const appleScreenshotReceiptGitCustody = screenshotReceiptGitCustody({
+  root,
+  receiptPath: 'store/apple-screenshot-verification.json',
+  workingTreeSource: appleScreenshotReceiptSource,
+})
+const androidScreenshotReceiptSource = read('store/android-screenshot-verification.json')
+const androidScreenshotReceipt = parseAndroidScreenshotReceipt(androidScreenshotReceiptSource)
+const androidScreenshotReceiptGitCustody = screenshotReceiptGitCustody({
+  root,
+  receiptPath: 'store/android-screenshot-verification.json',
+  workingTreeSource: androidScreenshotReceiptSource,
+})
 const releaseChecklist = read('store/release-checklist.md')
 const releaseLedger = read('store/release-ledger.md')
 const externalArtifacts = read('store/external-artifacts.md')
@@ -268,10 +340,21 @@ const theologyRightsNotice = read('resources/theology-retrieval/RIGHTS-NOTICE.tx
 const theologyBundleManifest = read('resources/theology-retrieval/bundle-manifest.json')
 const serverDockerfile = read('server/Dockerfile')
 const productPlan = read('store/products.md')
-const consoleActionPacket = read('store/console-action-packet.md')
-const appleConsoleCompletionPacket = read('store/apple-console-completion-packet.md')
-const googleConsoleCompletionPacket = read('store/google-console-completion-packet.md')
+const consolePacketInputs = Object.fromEntries(CONSOLE_PACKET_PATHS.map((relative) => [
+  relative,
+  readConsolePacketInput({ root, relative }),
+]))
+const consoleActionPacket = consolePacketInputs['store/console-action-packet.md'].text
+const appleConsoleCompletionPacket = consolePacketInputs['store/apple-console-completion-packet.md'].text
+const googleConsoleCompletionPacket = consolePacketInputs['store/google-console-completion-packet.md'].text
 const reviewNotes = read('store/review-notes.md')
+
+for (const relative of CONSOLE_PACKET_PATHS) {
+  check(
+    consolePacketInputs[relative].available,
+    `Console packet input is configured and readable: ${relative}`,
+  )
+}
 
 const usd = (value) => `$${Number(value).toLocaleString('en-US', {
   minimumFractionDigits: 2,
@@ -440,7 +523,9 @@ check(
     releaseLedger,
     actualPacketDigests: Object.fromEntries(CONSOLE_PACKET_PATHS.map((relative) => [
       relative,
-      binaryEvidence(relative).sha256,
+      consolePacketInputs[relative].available
+        ? crypto.createHash('sha256').update(consolePacketInputs[relative].buffer).digest('hex')
+        : '',
     ])),
   }),
   'Console completion/action packets lack synchronized verified retention evidence',
@@ -533,244 +618,396 @@ check(
   'Release records preserve the migration-diagnostic audit and dirty-CLI deployment boundary',
 )
 
-const authorityAuditChecklistRow = releaseChecklist
-  .split(/\r?\n/)
-  .find((line) => line.includes('Submission-target authority reconciled')) || ''
-const authorityAuditLedgerRow = releaseLedger
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('> **CURRENT AUTHORITY AUDIT RECORD —')) || ''
-const authorityAuditLatestReconciliationRow = releaseLedger
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('> **LATEST RECONCILIATION —')) || ''
-const authorityAuditRecordSet = `${authorityAuditChecklistRow}\n${authorityAuditLedgerRow}\n${authorityAuditLatestReconciliationRow}`
-  .replace(/`[^`\r\n]*`/g, ' ')
+const authorityAuditChecklistRow = uniqueActiveAuthorityLineContaining(
+  releaseChecklist,
+  '**Submission-target authority reconciled',
+  {
+    prefix: '  - ✅ **Submission-target authority reconciled',
+    singlePhysicalLine: true,
+  },
+)
+const currentAuthorityLedgerSummaryRow = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '🚀 **DESKTOP v1.4.4 IS LIVE AS OF',
+  {
+    prefix: '> 🚀 **DESKTOP v1.4.4 IS LIVE AS OF',
+    singlePhysicalLine: true,
+  },
+)
+const historicalAuthorityAuditLedgerRow = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '**HISTORICAL AUTHORITY AUDIT RECORD —',
+  {
+    prefix: '> **HISTORICAL AUTHORITY AUDIT RECORD —',
+    singlePhysicalLine: true,
+  },
+)
+const currentAuthorityAuditLedgerRow = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '**CURRENT POST-BUILD-6 AUTHORITY RECORD —',
+  {
+    prefix: '> **CURRENT POST-BUILD-6 AUTHORITY RECORD —',
+    singlePhysicalLine: true,
+  },
+)
+const authorityAuditLatestReconciliationRow = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '**LATEST RECONCILIATION —',
+  {
+    prefix: '> **LATEST RECONCILIATION —',
+    singlePhysicalLine: true,
+  },
+)
+const authorityAuditRows = [
+  authorityAuditChecklistRow,
+  currentAuthorityLedgerSummaryRow,
+  historicalAuthorityAuditLedgerRow,
+  currentAuthorityAuditLedgerRow,
+  authorityAuditLatestReconciliationRow,
+]
+const authorityAuditRecordSet = stripInlineCode(authorityAuditRows.join('\n'))
   .replace(/\b1\.4\.2\s*\(6\)(?!\w)/gi, 'build 6')
+const authorityAuditSemanticFailures = authorityAuditRows.flatMap((row, index) => (
+  authoritySemanticFailures([
+    'checklist',
+    'ledger summary',
+    'historical ledger authority record',
+    'current ledger authority record',
+    'latest reconciliation',
+  ][index], row)
+))
 check(
   authorityAuditChecklistRow.includes('alias/adversative follow-up AUDIT CONFIRMED by Claude at 02:05 CDT') &&
+    Boolean(currentAuthorityLedgerSummaryRow) &&
     authorityAuditChecklistRow.includes("Claude's independent 7/7 battery") &&
-    authorityAuditChecklistRow.includes('focused control is **14/0**') &&
-    authorityAuditChecklistRow.includes('No build, upload, console, screenshot, or submission state changed') &&
-    authorityAuditChecklistRow.includes('the complete static gate remains intentionally red on its five recorded blockers') &&
-    authorityAuditLedgerRow.includes('Authority-parser alias/adversative follow-up remains AUDIT CONFIRMED (Claude 2026-08-15 02:05 CDT HANDOFF; independent 7/7 battery; focused 14/0).') &&
-    authorityAuditLedgerRow.includes('No build, upload, console, screenshot, or submission state changed') &&
-    authorityAuditLedgerRow.includes('Static checks do not establish submission readiness') &&
-    authorityAuditLatestReconciliationRow.includes('The five static failures remain: synchronized console-packet retention, current-source/uploaded-build lineage, packaged-bundle age, the Apple screenshot hold, and the Android screenshot hold') &&
-    authorityAuditLatestReconciliationRow.includes('The complete checker independently reproduces **174/1/5**.') &&
+    authorityAuditChecklistRow.includes('focused control is **55/55**') &&
+    authorityAuditChecklistRow.includes('Build 6 is now source-bound and accepted for upload, while processing completion, selectability, and listing attachment remain unproved') &&
+    authorityAuditChecklistRow.includes('the complete static gate remains intentionally red on its three recorded blockers') &&
+    historicalAuthorityAuditLedgerRow.includes('Authority-parser alias/adversative follow-up remains AUDIT CONFIRMED (Claude 2026-08-15 02:05 CDT HANDOFF; independent 7/7 battery; focused 14/0).') &&
+    historicalAuthorityAuditLedgerRow.includes('the shared checker control was **174/1/4**') &&
+    historicalAuthorityAuditLedgerRow.includes('No build, upload, console, screenshot, or submission state changed in that historical audit') &&
+    currentAuthorityAuditLedgerRow.includes('post-build-6 source/processing contract is locally reconciled with Claude audit pending') &&
+    currentAuthorityAuditLedgerRow.includes('build 6 is the only executable path after processing/selectability is proven and only under fresh action-time approval') &&
+    currentAuthorityAuditLedgerRow.includes('accepted upload is processing-only') &&
+    currentAuthorityAuditLedgerRow.includes('target-authority control is **55/55**') &&
+    currentAuthorityAuditLedgerRow.includes('complete checker is **179/1/3**') &&
+    authorityAuditLatestReconciliationRow.includes('The three static failures remain: synchronized console-packet retention, the Apple screenshot hold, and the Android screenshot hold') &&
+    authorityAuditLatestReconciliationRow.includes('The complete checker independently reproduces **179/1/3**.') &&
     authorityAuditLatestReconciliationRow.includes('Static checks do not establish submission readiness') &&
-    !hasUnmatchedInlineCode(authorityAuditLatestReconciliationRow) &&
-    !hasBuild5CurrentCandidateLabel(authorityAuditLatestReconciliationRow) &&
-    !/(?:alias\/adversative follow-up LOCAL|CLAUDE AUDIT PENDING|local and unreviewed)/i.test(authorityAuditRecordSet) &&
+    authorityAuditSemanticFailures.length === 0 &&
+    !authorityAuditRows.some(hasUnmatchedInlineCode) &&
+    !/(?:alias\/adversative follow-up LOCAL|local and unreviewed)/i.test(authorityAuditRecordSet) &&
     !/\bbuild(?:\s+|-)6\b[^.!?;\n]*\b(?:ready for submission|ready to submit|submission-ready)\b/i.test(authorityAuditRecordSet),
-  'Release records preserve authority-parser audit confirmation without claiming submission readiness',
+  'Release records preserve historical authority audit evidence and the processing-only build-6 boundary',
 )
 
-const nativePackageArtifactParityRow = releaseLedger
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('| Native package artifact parity |')) || ''
+const nativePackageArtifactParityRow = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '| Native package artifact parity |',
+  { prefix: '| Native package artifact parity |' },
+)
 check(
-  nativePackageArtifactParityRow.includes('PASS FOR BUILD-5 BYTES / CURRENT WORKING SOURCE NEWER') &&
-    nativePackageArtifactParityRow.includes('Build 5 does not contain the local next-build PREACH affordance fix') &&
-    nativePackageArtifactParityRow.includes('package-age assertion is intentionally red') &&
-    nativePackageArtifactParityRow.includes('screenshot hold remains separately red') &&
-    !/static gate is red only because|only failure is[^|]*screenshot/i.test(nativePackageArtifactParityRow),
-  'Release ledger separates build-5 artifact parity from newer working source',
+  authoritySemanticFailures('native package artifact parity', nativePackageArtifactParityRow).length === 0 &&
+    nativePackageArtifactParityRow.includes('PASS FOR BUILD-6 BYTES / IMMUTABLE TAGGED SOURCE / PACKAGE-AGE GREEN') &&
+    nativePackageArtifactParityRow.includes('Build 6 contains the PREACH affordance fix') &&
+    nativePackageArtifactParityRow.includes('static package-age assertion is green') &&
+    nativePackageArtifactParityRow.includes('Apple and Android screenshot holds remain separately red') &&
+    !/CURRENT WORKING SOURCE NEWER|package-age assertion is intentionally red|until a future candidate/i.test(nativePackageArtifactParityRow),
+  'Release ledger binds build-6 package parity to its immutable tagged source',
 )
 
-const currentStaticGateBoundary = releaseChecklist
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('- [ ] 🔴 **`npm run mobile:store:check`')) || ''
+const currentStaticGateBoundary = uniqueActiveAuthorityLineContaining(
+  releaseChecklist,
+  'THE POST-BUILD-6 AUTHORITY/LINEAGE ORACLE IS CURRENT',
+  { prefix: '- [ ] 🔴 **THE POST-BUILD-6 AUTHORITY/LINEAGE ORACLE IS CURRENT' },
+)
 check(
-  currentStaticGateBoundary.includes(
-    'complete three-slot iPad set is staged after one remaining clean active-Preach capture',
-  ) &&
-    currentStaticGateBoundary.includes(
-      'two clean build-5 landscape slots are locally ready and one active-Preach original remains missing',
-    ) &&
-    !currentStaticGateBoundary.includes('three remaining iPad screenshots'),
-  'Release checklist preserves the one-capture iPad screenshot completion boundary',
+  currentStaticGateBoundary.includes('target-authority command passes **55/55**') &&
+    currentStaticGateBoundary.includes('direct readiness command completes at **179 passed · 1 warning · 3 failed**') &&
+    currentStaticGateBoundary.includes('three failures are synchronized packet retention plus the Apple and Android screenshot holds') &&
+    currentStaticGateBoundary.includes('build-6-proven screenshots') &&
+    !/one remaining clean active-Preach|two clean build-5 landscape slots|three remaining iPad screenshots/i.test(currentStaticGateBoundary) &&
+    authoritySemanticFailures('current static gate boundary', currentStaticGateBoundary).length === 0,
+  'Release checklist preserves the build-6-proven iPad screenshot completion boundary',
 )
 
-const releaseSourceBoundary = releaseChecklist
-  .split(/\r?\n/)
-  .find((line) => line.includes('Mobile-source lineage, verified')) || ''
+const releaseSourceBoundary = uniqueActiveAuthorityLineContaining(
+  releaseChecklist,
+  '**Mobile-source lineage, verified',
+  { prefix: '  - **Mobile-source lineage, verified' },
+)
 const archivedReleaseMatch = releaseSourceBoundary
   .match(/canonical release source for uploaded build (\d+) is `([0-9a-f]{40})`/)
 const canonicalCandidateBuild = Number(archivedReleaseMatch?.[1] || 0)
 const canonicalReleaseSource = archivedReleaseMatch?.[2] || ''
-const currentPushedSource = releaseSourceBoundary
-  .match(/Local `HEAD` and `origin\/main` now resolve to descendant `([0-9a-f]{40})`/)?.[1] || ''
-const nextCandidateBuild = canonicalCandidateBuild > 0 ? canonicalCandidateBuild + 1 : 0
+const candidateMetadataSource = gitTextAt(canonicalReleaseSource, 'store/metadata.json')
+let candidateMetadata = null
+try {
+  candidateMetadata = JSON.parse(candidateMetadataSource)
+} catch {
+  candidateMetadata = null
+}
+const candidatePbxproj = gitTextAt(canonicalReleaseSource, 'ios/App/App.xcodeproj/project.pbxproj')
+const candidateXcodeRelease = xcodeTargetReleaseSettings(candidatePbxproj)
+const candidateAndroidBuild = gitTextAt(canonicalReleaseSource, 'android/app/build.gradle')
+const candidateAppleBuildIdentity = {
+  bundleId: candidateMetadata?.app?.bundleId || '',
+  marketingVersion: candidateMetadata?.app?.version || '',
+  buildNumber: Number(candidateXcodeRelease.match(/CURRENT_PROJECT_VERSION = ([1-9][0-9]*);/)?.[1] || 0),
+}
+const candidateAndroidBuildIdentity = {
+  applicationId: candidateMetadata?.app?.bundleId || '',
+  versionName: candidateMetadata?.app?.version || '',
+  versionCode: Number(candidateAndroidBuild.match(/\bversionCode\s+([1-9][0-9]*)/)?.[1] || 0),
+}
 
-const externalReleaseGates = releaseLedger
-  .split('## External release gates\n')[1]?.split('\n## ')[0] || ''
-const signingEvidence = releaseLedger
-  .split('## Signing evidence still required\n')[1]?.split('\n## ')[0] || ''
+const externalReleaseGates = uniqueActiveMarkdownSection(releaseLedger, 'External release gates')
+const signingEvidence = uniqueActiveMarkdownSection(releaseLedger, 'Signing evidence still required')
 const externalReleaseGatesLower = externalReleaseGates.toLowerCase()
 const signingEvidenceLower = signingEvidence.toLowerCase()
-const preachAffordanceLedgerRow = releaseLedger
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('| PREACH not-ready affordance (next build) |')) || ''
-const ipadScreenshotLedgerRow = releaseLedger
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('| iPad screenshots |')) || ''
-const currentAppleOpenBoundary = releaseLedger
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('**Still open in App Store Connect:**')) || ''
-const appleConsoleBuildBoundary = appleConsoleCompletionPacket
-  .split(/\r?\n/)
-  .find((line) => line.includes('Build boundary updated')) || ''
-const appleScreenshotHoldBoundary = screenshotPlan
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('> Apple submission hold:')) || ''
+const preachAffordanceLedgerRow = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '| PREACH not-ready affordance (build-6 packaged) |',
+  { prefix: '| PREACH not-ready affordance (build-6 packaged) |' },
+)
+const ipadScreenshotLedgerRow = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '| iPad screenshots |',
+  { prefix: '| iPad screenshots |' },
+)
+const currentAppleOpenBoundary = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '**Still open in App Store Connect:**',
+  {
+    prefix: '**Still open in App Store Connect:**',
+    singlePhysicalLine: true,
+  },
+)
+const appleConsoleBuildBoundary = uniqueActiveAuthorityLineContaining(
+  appleConsoleCompletionPacket,
+  'Build boundary updated',
+  {
+    prefix: '- **Build boundary updated',
+    singlePhysicalLine: true,
+  },
+)
+const appleScreenshotHoldBoundary = uniqueActiveAuthorityLineContaining(
+  screenshotPlan,
+  'Apple submission hold:',
+  {
+    prefix: '> Apple submission hold:',
+    singlePhysicalLine: true,
+  },
+)
 const preachAffordanceLedgerRowLower = preachAffordanceLedgerRow.toLowerCase()
 const ipadScreenshotLedgerRowLower = ipadScreenshotLedgerRow.toLowerCase()
 const currentAppleOpenBoundaryLower = currentAppleOpenBoundary.toLowerCase()
 const appleConsoleBuildBoundaryLower = appleConsoleBuildBoundary.toLowerCase()
 const appleScreenshotHoldBoundaryLower = appleScreenshotHoldBoundary.toLowerCase()
 check(
-  canonicalCandidateBuild > 0 &&
-    nextCandidateBuild === canonicalCandidateBuild + 1 &&
+  canonicalCandidateBuild === 6 &&
+    authoritySemanticFailures('mobile source lineage', releaseSourceBoundary).length === 0 &&
+    authoritySemanticFailures('PREACH ledger boundary', preachAffordanceLedgerRow).length === 0 &&
+    authoritySemanticFailures('iPad screenshot ledger boundary', ipadScreenshotLedgerRow).length === 0 &&
+    authoritySemanticFailures('Apple open-state boundary', currentAppleOpenBoundary).length === 0 &&
+    authoritySemanticFailures('external Apple gates', externalReleaseGates).length === 0 &&
+    authoritySemanticFailures('Apple signing evidence', signingEvidence).length === 0 &&
+    authoritySemanticFailures('Apple console build boundary', appleConsoleBuildBoundary).length === 0 &&
+    authoritySemanticFailures('Apple screenshot hold boundary', appleScreenshotHoldBoundary).length === 0 &&
+    releaseSourceBoundary.includes('Repository evidence may advance on clean pushed descendants of that immutable candidate only when all provenance-guarded mobile release inputs and synced native payloads remain byte-identical to the candidate') &&
+    releaseSourceBoundary.includes('The pushed evidence tip is `4b25c05db5054da079202a4ab05daf1048ee5502`') &&
+    releaseSourceBoundary.includes('Later pushed repository commits are permitted only by the exact pinned package-manifest transition while every other provenance-guarded input remains byte-identical to the evidence tip') &&
+    releaseSourceBoundary.includes('receipt evidence must never redefine the candidate source') &&
+    externalReleaseGates.includes(`\`${metadata.app.version} (4)\``) &&
+    externalReleaseGates.includes('and `(5)` are preserved') &&
     externalReleaseGates.includes(`\`${metadata.app.version} (${canonicalCandidateBuild})\``) &&
-    externalReleaseGates.includes(`\`${metadata.app.version} (${nextCandidateBuild})\``) &&
-    externalReleaseGatesLower.includes(
-      `build ${canonicalCandidateBuild} is historical upload evidence only`,
-    ) &&
-    externalReleaseGatesLower.includes(
-      `build ${canonicalCandidateBuild} must not be attached, selected, or submitted`,
-    ) &&
-    externalReleaseGatesLower.includes(`provenance-clean build ${nextCandidateBuild}`) &&
-    externalReleaseGatesLower.includes(`build-${nextCandidateBuild} processing/selectability`) &&
-    externalReleaseGatesLower.includes(`attach build ${nextCandidateBuild}`) &&
-    externalReleaseGatesLower.includes(`build-${nextCandidateBuild}-proven screenshot set`) &&
+    externalReleaseGatesLower.includes('historical builds') &&
+    externalReleaseGatesLower.includes('must not be attached, selected, or submitted') &&
+    externalReleaseGatesLower.includes(`build \`${metadata.app.version} (${canonicalCandidateBuild})\` is archived`) &&
+    externalReleaseGatesLower.includes('accepted by app store connect') &&
+    externalReleaseGatesLower.includes('receipt says only that the package is processing') &&
+    externalReleaseGatesLower.includes(`confirm build-${canonicalCandidateBuild} processing completion/selectability`) &&
+    externalReleaseGatesLower.includes(`attach build ${canonicalCandidateBuild}`) &&
+    externalReleaseGatesLower.includes('only under separate fresh approval') &&
+    externalReleaseGatesLower.includes(`build-${canonicalCandidateBuild}-proven screenshot set`) &&
     externalReleaseGatesLower.includes('pixel-equivalence proof') &&
     signingEvidenceLower.includes(
-      `processing/selectability and listing-selection receipts for build ${nextCandidateBuild}`,
+      `processing-completion/selectability and listing-selection receipts for uploaded build ${canonicalCandidateBuild}`,
     ) &&
-    signingEvidenceLower.includes(
-      `build-${canonicalCandidateBuild} upload receipt is historical evidence only`,
-    ) &&
-    preachAffordanceLedgerRowLower.includes(
-      `screenshot from build ${canonicalCandidateBuild} remains a valid visual draft`,
-    ) &&
-    preachAffordanceLedgerRowLower.includes(
-      `pixel-equivalence proof against packaged build ${nextCandidateBuild}`,
-    ) &&
-    ipadScreenshotLedgerRowLower.includes(`build-${canonicalCandidateBuild} visual drafts`) &&
-    ipadScreenshotLedgerRowLower.includes(`after build ${nextCandidateBuild} exists`) &&
+    signingEvidenceLower.includes('builds 4 and 5 are historical') &&
+    preachAffordanceLedgerRowLower.includes('screenshot from build 5 remains a historical visual draft') &&
+    preachAffordanceLedgerRowLower.includes(`pixel-equivalence proof against packaged build ${canonicalCandidateBuild}`) &&
+    ipadScreenshotLedgerRowLower.includes('build-5 drafts historical') &&
+    ipadScreenshotLedgerRowLower.includes(`build ${canonicalCandidateBuild} now exists as a source-bound uploaded artifact`) &&
     ipadScreenshotLedgerRowLower.includes(
-      `pixel-equivalence against packaged build ${nextCandidateBuild}`,
+      `pixel-equivalence of any reused draft against packaged build ${canonicalCandidateBuild}`,
     ) &&
-    ipadScreenshotLedgerRowLower.includes(`build-${nextCandidateBuild}-proven set`) &&
+    ipadScreenshotLedgerRowLower.includes(`build-${canonicalCandidateBuild}-proven set`) &&
     currentAppleOpenBoundaryLower.includes(
-      `provenance-clean build ${nextCandidateBuild} creation and upload`,
-    ) &&
-    currentAppleOpenBoundaryLower.includes(
-      `build-${nextCandidateBuild} processing/selectability and selection`,
+      `build-${canonicalCandidateBuild} processing completion/selectability and listing selection`,
     ) &&
     currentAppleOpenBoundaryLower.includes(
-      `build-${nextCandidateBuild}-proven ipad screenshots`,
+      `build-${canonicalCandidateBuild}-proven ipad screenshots`,
     ) &&
+    currentAppleOpenBoundaryLower.includes(`build ${canonicalCandidateBuild} creation/archive/export/upload is proven`) &&
     currentAppleOpenBoundaryLower.includes(
-      `build-${canonicalCandidateBuild} frames are visual drafts only`,
+      'existing build-5 frames are visual drafts only',
     ) &&
     appleConsoleBuildBoundaryLower.includes(
-      `build \`${metadata.app.version} (${canonicalCandidateBuild})\` is uploaded/receipted but superseded`,
+      `build \`${metadata.app.version} (5)\` is uploaded/receipted but superseded`,
     ) &&
     appleConsoleBuildBoundaryLower.includes('must not be attached, selected, or submitted') &&
-    appleConsoleBuildBoundaryLower.includes(`provenance-clean build **${nextCandidateBuild}**`) &&
-    appleConsoleBuildBoundaryLower.includes('processed/selectable') &&
+    appleConsoleBuildBoundaryLower.includes(`provenance-clean build **${canonicalCandidateBuild}**`) &&
+    appleConsoleCompletionPacket.toLowerCase().includes(`does not prove that provenance-clean build \`${metadata.app.version} (${canonicalCandidateBuild})\` exists, is processed/selectable, or is selected`) &&
     appleScreenshotHoldBoundaryLower.includes(
-      `these are build-${canonicalCandidateBuild} visual drafts only`,
+      'these are build-5 visual drafts only',
     ) &&
-    appleScreenshotHoldBoundaryLower.includes(`after build ${nextCandidateBuild} exists`) &&
+    appleScreenshotHoldBoundaryLower.includes(`build ${canonicalCandidateBuild} now exists as a source-bound uploaded artifact`) &&
     appleScreenshotHoldBoundaryLower.includes(
-      `pixel-equivalence against packaged build ${nextCandidateBuild}`,
+      `pixel-equivalence of any reused build-5 draft against packaged build ${canonicalCandidateBuild}`,
     ) &&
-    appleScreenshotHoldBoundaryLower.includes(`build-${nextCandidateBuild}-proven replacements`) &&
-    !externalReleaseGatesLower.includes(`build-${canonicalCandidateBuild} captures`) &&
-    !new RegExp(`\\b(?:attach|select|submit)\\b[^\\n.]*\\bbuild(?: |-)?${canonicalCandidateBuild}\\b`, 'i')
+    appleScreenshotHoldBoundaryLower.includes(`build-${canonicalCandidateBuild}-proven replacements`) &&
+    !new RegExp('\\b(?:attach|select|submit)\\b[^\\n.]*\\bbuild(?: |-)?(?:4|5)\\b', 'i')
       .test(externalReleaseGates) &&
-    !signingEvidenceLower.includes(
-      `listing-selection receipts for build ${canonicalCandidateBuild}`,
-    ) &&
+    !currentAppleOpenBoundaryLower.includes(`build ${canonicalCandidateBuild} creation and upload`) &&
     !ipadScreenshotLedgerRowLower.includes(
-      `complete three-slot build-${canonicalCandidateBuild} set`,
-    ) &&
-    !appleConsoleBuildBoundaryLower.includes(
-      `provenance-clean build **${canonicalCandidateBuild}** must be`,
+      'after build 6 exists',
     ) &&
     !appleScreenshotHoldBoundaryLower.includes(
-      `build-${canonicalCandidateBuild} preach capture completes`,
-    ) &&
-    !currentAppleOpenBoundaryLower.includes(
-      `build-${canonicalCandidateBuild} processing/selectability and selection`,
+      'after build 6 exists',
     ),
-  'Release ledger forward actions require the next build after the archived Apple candidate',
+  'Release ledger forward actions track uploaded build 6 without promoting processing',
 )
 
-const supersededAppleBuildProcessingBoundary = releaseChecklist
-  .split(/\r?\n/)
-  .find((line) => line.includes('Processing/selectability remains unverified.')) || ''
-const supersededAppleBuildProcessingBoundaryLower = supersededAppleBuildProcessingBoundary.toLowerCase()
-const finalAppleScreenshotChecklistBoundary = releaseChecklist
-  .split(/\r?\n/)
-  .find((line) => line.includes('The remaining screenshot provenance failure is fail-closed')) || ''
+const currentAppleBuildProcessingBoundary = uniqueActiveAuthorityLineContaining(
+  releaseChecklist,
+  'Processing/selectability remains unverified.',
+  {
+    prefix: '  - ⏳ **Processing/selectability remains unverified.',
+    singlePhysicalLine: true,
+  },
+)
+const currentAppleBuildProcessingBoundaryLower = currentAppleBuildProcessingBoundary.toLowerCase()
+const finalAppleScreenshotChecklistBoundary = uniqueActiveAuthorityLineContaining(
+  releaseChecklist,
+  'The remaining screenshot provenance failure is fail-closed',
+  {
+    prefix: '  - ✅ **The remaining screenshot provenance failure is fail-closed',
+    singlePhysicalLine: true,
+  },
+)
 const finalAppleScreenshotChecklistBoundaryLower = finalAppleScreenshotChecklistBoundary.toLowerCase()
-const preachAffordanceChecklistBoundary = releaseChecklist
-  .split(/\r?\n/)
-  .find((line) => line.includes('Silent PREACH-gate affordance AUDIT CONFIRMED')) || ''
+const preachAffordanceChecklistBoundary = uniqueActiveAuthorityLineContaining(
+  releaseChecklist,
+  'Silent PREACH-gate affordance AUDIT CONFIRMED',
+  {
+    prefix: '  - ✅ **Silent PREACH-gate affordance AUDIT CONFIRMED',
+    singlePhysicalLine: true,
+  },
+)
 const preachAffordanceChecklistBoundaryLower = preachAffordanceChecklistBoundary.toLowerCase()
 check(
-  canonicalCandidateBuild > 0 &&
-    supersededAppleBuildProcessingBoundaryLower.includes(
+  canonicalCandidateBuild === 6 &&
+    authoritySemanticFailures('Apple build processing boundary', currentAppleBuildProcessingBoundary).length === 0 &&
+    authoritySemanticFailures('final Apple screenshot boundary', finalAppleScreenshotChecklistBoundary).length === 0 &&
+    authoritySemanticFailures('PREACH checklist boundary', preachAffordanceChecklistBoundary).length === 0 &&
+    currentAppleBuildProcessingBoundaryLower.includes(
       `build ${canonicalCandidateBuild} upload is accepted`,
     ) &&
-    supersededAppleBuildProcessingBoundaryLower.includes(
-      `build ${canonicalCandidateBuild} is upload history only`,
+    currentAppleBuildProcessingBoundaryLower.includes(
+      'uploaded package is processing',
     ) &&
-    supersededAppleBuildProcessingBoundaryLower.includes(
-      `build ${canonicalCandidateBuild} must not be selected or submitted`,
+    currentAppleBuildProcessingBoundaryLower.includes(
+      'builds 4 and 5 are historical upload evidence and must not be selected or submitted',
     ) &&
-    supersededAppleBuildProcessingBoundaryLower.includes(
-      `provenance-clean build ${nextCandidateBuild}`,
+    currentAppleBuildProcessingBoundaryLower.includes(
+      `build ${canonicalCandidateBuild} is the only current executable path`,
     ) &&
-    supersededAppleBuildProcessingBoundaryLower.includes(
-      `attach/select build ${nextCandidateBuild} under fresh action-time approval`,
-    ) &&
-    finalAppleScreenshotChecklistBoundaryLower.includes(
-      `build ${canonicalCandidateBuild} only as a visual draft`,
+    currentAppleBuildProcessingBoundaryLower.includes(
+      `attach/select build ${canonicalCandidateBuild} only after app store connect shows it processed/selectable and cole gives fresh action-time approval`,
     ) &&
     finalAppleScreenshotChecklistBoundaryLower.includes(
-      `after provenance-clean build ${nextCandidateBuild} exists`,
+      'every build-5 frame as a historical visual draft',
     ) &&
-    finalAppleScreenshotChecklistBoundaryLower.includes('pixel-equivalence against its packaged bytes') &&
     finalAppleScreenshotChecklistBoundaryLower.includes(
-      `build-${nextCandidateBuild}-proven complete set`,
+      `build ${canonicalCandidateBuild} now exists as a source-bound uploaded artifact`,
+    ) &&
+    finalAppleScreenshotChecklistBoundaryLower.includes(`pixel-equivalence of any reused draft against packaged build ${canonicalCandidateBuild}`) &&
+    finalAppleScreenshotChecklistBoundaryLower.includes(
+      `build-${canonicalCandidateBuild}-proven complete set`,
     ) &&
     preachAffordanceChecklistBoundaryLower.includes(
-      `build-${canonicalCandidateBuild} preach-mode screenshot remains valid only as a visual draft`,
+      'build-5 preach-mode screenshot remains valid only as a historical visual draft',
     ) &&
     preachAffordanceChecklistBoundaryLower.includes(
-      `pixel-equivalence proof against packaged build ${nextCandidateBuild}`,
+      `pixel-equivalence proof against packaged build ${canonicalCandidateBuild}`,
     ) &&
-    !new RegExp(`\\b(?:attach|select|submit)\\b[^\\n.]*\\bbuild(?: |-)?${canonicalCandidateBuild}\\b`, 'i')
-      .test(supersededAppleBuildProcessingBoundary) &&
-    !/listing is explicitly switched/i.test(supersededAppleBuildProcessingBoundary) &&
+    !new RegExp('\\b(?:attach|select|submit)\\b[^\\n.]*\\bbuild(?: |-)?(?:4|5)\\b', 'i')
+      .test(currentAppleBuildProcessingBoundary) &&
+    !/listing is explicitly switched/i.test(currentAppleBuildProcessingBoundary) &&
+    !/first produce and upload provenance-clean build 6/i.test(currentAppleBuildProcessingBoundary) &&
     !finalAppleScreenshotChecklistBoundaryLower.includes(
-      `frame from build ${canonicalCandidateBuild}, then stage`,
+      'after provenance-clean build 6 exists',
     ) &&
     !preachAffordanceChecklistBoundaryLower.includes(
-      `build-${canonicalCandidateBuild} preach-mode screenshot remains valid because`,
+      'next-build source only',
     ),
   'Release checklist keeps every superseded Apple build out of the final selection path',
 )
 
-const currentMobileSourceBoundary = releaseChecklist
-  .split(/\r?\n/)
-  .find((line) => line.includes('The uploaded build contains the current mobile source')) || ''
-const latestUploadedArtifactBoundary = releaseLedger
-  .split(/\r?\n/)
-  .find((line) => line.startsWith('**The latest uploaded Apple artifact is build')) || ''
+const currentMobileSourceBoundary = uniqueActiveAuthorityLineContaining(
+  releaseChecklist,
+  'BUILD 6 ARCHIVE + DIRECT APP STORE CONNECT UPLOAD PROVEN',
+  {
+    prefix: '- [ ] 🟡 **BUILD 6 ARCHIVE + DIRECT APP STORE CONNECT UPLOAD PROVEN',
+    singlePhysicalLine: true,
+  },
+)
+const latestUploadedArtifactBoundary = uniqueActiveAuthorityLineContaining(
+  releaseLedger,
+  '**The latest uploaded Apple artifact is build',
+  {
+    prefix: '**The latest uploaded Apple artifact is build',
+    singlePhysicalLine: true,
+  },
+)
+const checklistEvidenceRepositoryHead = releaseSourceBoundary
+  .match(/pushed evidence tip is `([0-9a-f]{40})`/i)?.[1] || ''
+const ledgerEvidenceRepositoryHead = latestUploadedArtifactBoundary
+  .match(/pushed evidence tip is `([0-9a-f]{40})`/i)?.[1] || ''
+const evidenceRepositoryHead = checklistEvidenceRepositoryHead
+  && checklistEvidenceRepositoryHead === ledgerEvidenceRepositoryHead
+  ? checklistEvidenceRepositoryHead
+  : ''
+const pushedEvidenceRepositoryHead = gitRef('origin/main')
+const candidatePackageManifestSource = gitTextAt(canonicalReleaseSource, 'package.json')
+const evidencePackageManifestSource = gitTextAt(evidenceRepositoryHead, 'package.json')
+const pushedPackageManifestSource = gitTextAt(pushedEvidenceRepositoryHead, 'package.json')
+const indexPackageManifestSource = gitIndexText('package.json')
+const canonicalCandidateVersion = (() => {
+  try {
+    const parsed = JSON.parse(candidatePackageManifestSource)
+    return typeof parsed.version === 'string' ? parsed.version : ''
+  } catch {
+    return ''
+  }
+})()
+const canonicalCandidateTag = canonicalCandidateVersion ? `v${canonicalCandidateVersion}` : ''
+const canonicalCandidateTagRef = canonicalCandidateTag
+  ? `${canonicalCandidateTag}^{commit}`
+  : ''
+const taggedReleaseSource = canonicalCandidateTagRef
+  ? gitRef(canonicalCandidateTagRef)
+  : ''
+const candidatePackageLockSource = gitTextAt(canonicalReleaseSource, 'package-lock.json')
+const evidencePackageLockSource = gitTextAt(evidenceRepositoryHead, 'package-lock.json')
+const pushedEvidencePackageLockSource = gitTextAt(pushedEvidenceRepositoryHead, 'package-lock.json')
+const indexPackageLockSource = gitIndexText('package-lock.json')
+const configuredMobilePackageInputs = mobileReleaseProvenanceGate
+  .match(/RELEASE_INPUTS=\(\n([\s\S]*?)\n\)/)?.[1]
+  ?.split(/\r?\n/)
+  .map((line) => line.trim())
+  .filter(Boolean) || []
 const xcodeBuildNumbers = [...pbxproj.matchAll(/CURRENT_PROJECT_VERSION = (\d+);/g)]
   .map((match) => Number(match[1]))
 const canonicalBuildPattern = canonicalCandidateBuild
@@ -778,25 +1015,59 @@ const canonicalBuildPattern = canonicalCandidateBuild
   : /$a/
 check(
   Boolean(canonicalReleaseSource) &&
-    currentPushedSource === gitRef('HEAD') &&
-    currentPushedSource === gitRef('origin/main') &&
-    canonicalReleaseSource === gitRef('HEAD') &&
-    canonicalReleaseSource === gitRef('origin/main') &&
+    canonicalReleaseSource === taggedReleaseSource &&
+    configuredMobilePackageInputs.join('\0') === MOBILE_PACKAGE_INPUT_PATHS.join('\0') &&
+    candidateEvidenceGitLineageIsValid({
+      root,
+      candidateSource: canonicalReleaseSource,
+      evidenceHead: evidenceRepositoryHead,
+      pushedEvidenceHead: pushedEvidenceRepositoryHead,
+      candidateTagRef: canonicalCandidateTagRef,
+      releasePaths: MOBILE_RELEASE_LINEAGE_PATHS,
+      descendantReleasePaths: MOBILE_DESCENDANT_RELEASE_LINEAGE_PATHS,
+      worktreePaths: MOBILE_RELEASE_LINEAGE_PATHS,
+    }) &&
+    exactPackageManifestTransitionIsValid({
+      candidateSource: candidatePackageManifestSource,
+      evidenceSource: evidencePackageManifestSource,
+      pushedSource: pushedPackageManifestSource,
+      indexSource: indexPackageManifestSource,
+      workingTreeSource: fs.readFileSync(path.join(root, 'package.json'), 'utf8'),
+      candidateSha256: CANDIDATE_PACKAGE_MANIFEST_SHA256,
+      pushedSha256: PUSHED_PACKAGE_MANIFEST_SHA256,
+    }) &&
+    mobilePackageLockLineageIsValid({
+      candidateSource: candidatePackageLockSource,
+      evidenceSource: evidencePackageLockSource,
+      pushedEvidenceSource: pushedEvidencePackageLockSource,
+      indexSource: indexPackageLockSource,
+      workingTreeSource: fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'),
+    }) &&
     canonicalCandidateBuild > 0 &&
     xcodeBuildNumbers.length >= 2 &&
     xcodeBuildNumbers.every((buildNumber) => buildNumber === canonicalCandidateBuild) &&
     canonicalBuildPattern.test(currentMobileSourceBoundary) &&
-    currentMobileSourceBoundary.includes('canonical mobile-source lineage row') &&
+    authoritySemanticFailures('current mobile source boundary', currentMobileSourceBoundary).length === 0 &&
+    currentMobileSourceBoundary.includes(canonicalReleaseSource) &&
+    currentMobileSourceBoundary.includes(`clean pushed tag \`${canonicalCandidateTag}\` at \`${canonicalReleaseSource}\``) &&
+    releaseSourceBoundary.includes(`pushed evidence tip is \`${evidenceRepositoryHead}\``) &&
+    currentMobileSourceBoundary.includes('payload/source binding') &&
+    currentMobileSourceBoundary.includes('Uploaded package is processing') &&
     canonicalBuildPattern.test(latestUploadedArtifactBoundary) &&
-    latestUploadedArtifactBoundary.includes('no eligible App Store submission candidate currently exists') &&
-    latestUploadedArtifactBoundary.includes(`historical pushed source \`${canonicalReleaseSource}\``) &&
-    latestUploadedArtifactBoundary.includes(`Current pushed source is \`${currentPushedSource}\``) &&
-    latestUploadedArtifactBoundary.includes('processing/selectability remains unverified') &&
-    !latestUploadedArtifactBoundary.includes('current uploaded App Store candidate') &&
+    authoritySemanticFailures('uploaded artifact', latestUploadedArtifactBoundary).length === 0 &&
+    latestUploadedArtifactBoundary.includes('processing/selectability and listing attachment remain unproved') &&
+    latestUploadedArtifactBoundary.includes(`immutable tagged release source \`${canonicalReleaseSource}\` and Xcode build number \`${canonicalCandidateBuild}\``) &&
+    latestUploadedArtifactBoundary.includes(`pushed evidence tip is \`${evidenceRepositoryHead}\``) &&
+    latestUploadedArtifactBoundary.includes('Later pushed repository commits are permitted only by the exact pinned package-manifest transition while every other provenance-guarded input remains byte-identical to the evidence tip') &&
+    latestUploadedArtifactBoundary.includes('upload receipt says only that the package is processing') &&
+    latestUploadedArtifactBoundary.includes('must not be attached, selected, or submitted without a fresh approval after a real processing/selectability receipt') &&
+    latestUploadedArtifactBoundary.includes('No later candidate is required for source parity') &&
+    !latestUploadedArtifactBoundary.includes('current eligible App Store submission candidate') &&
     releaseSourceBoundary.includes('archive payload exactly matches the clean committed iOS public payload') &&
     releaseSourceBoundary.includes('upload receipt records success with no errors') &&
-    releaseSourceBoundary.includes('processing completion remains unproven'),
-  'Release records bind the uploaded Apple build to current pushed source and Xcode build number',
+    releaseSourceBoundary.includes('Uploaded package is processing') &&
+    releaseSourceBoundary.includes('processing completion, selectability, and listing attachment remain unproven'),
+  'Release records bind the uploaded Apple build to its immutable source while the pushed evidence tip preserves release inputs',
 )
 
 check(metadata.app.name.length <= 30, 'App name fits both stores')
@@ -808,6 +1079,8 @@ check(metadata.google.shortDescription.length <= 80, 'Google short description i
 check(metadata.google.fullDescription.length <= 4000, 'Google full description is 4,000 characters or fewer')
 for (const result of mobileVersionContract({
   desktopVersion: packageJson.version,
+  desktopLockVersion: packageLock.version,
+  desktopLockRootVersion: packageLock.packages?.['']?.version,
   storeVersion: metadata.app.version,
   serverVersion: serverPackageJson.version,
   serverLockVersion: serverPackageLock.version,
@@ -963,6 +1236,10 @@ check(
 )
 const mobileBundleDigest = directoryDigest('dist-mobile')
 const capacitorGeneratedBundleFiles = new Set(['cordova.js', 'cordova_plugins.js'])
+const preservedBuild6IpaRuntimeTree = iosIpaRuntimeTreeEvidence({
+  ipaPath: BUILD_6_IPA_EVIDENCE_PATH,
+  ignoredRootFiles: [...capacitorGeneratedBundleFiles],
+})
 const packagedMobileBuiltAt = fs.statSync(path.join(root, 'dist-mobile/index.html')).mtimeMs
 const newestMobileSourceAt = fs.readdirSync(path.join(root, 'src/mobile'), { withFileTypes: true, recursive: true })
   .filter((entry) => entry.isFile() && /\.(?:[cm]?[jt]sx?|css)$/.test(entry.name))
@@ -981,8 +1258,17 @@ check(
   'Packaged mobile bundle contains the full native subscription surface',
 )
 check(
-  directoryDigest('android/app/src/main/assets/public', capacitorGeneratedBundleFiles) === mobileBundleDigest &&
-    directoryDigest('ios/App/App/public', capacitorGeneratedBundleFiles) === mobileBundleDigest,
+  packagedCandidateTreeDigestsAreValid({
+    expectedDigest: BUILD_6_RUNTIME_TREE_DIGEST,
+    distDigest: mobileBundleDigest,
+    androidDigest: directoryDigest('android/app/src/main/assets/public', capacitorGeneratedBundleFiles),
+    iosDigest: directoryDigest('ios/App/App/public', capacitorGeneratedBundleFiles),
+  }) &&
+    preservedBuild6IpaRuntimeTree?.archiveSize === BUILD_6_IPA_SIZE &&
+    preservedBuild6IpaRuntimeTree?.archiveSha256 === BUILD_6_IPA_SHA256 &&
+    preservedBuild6IpaRuntimeTree?.totalPublicFileCount === 25 &&
+    preservedBuild6IpaRuntimeTree?.runtimeFileCount === 23 &&
+    preservedBuild6IpaRuntimeTree?.runtimeDigest === BUILD_6_RUNTIME_TREE_DIGEST,
   'Android and iOS package the current mobile production bundle byte-for-byte',
 )
 check(tabletDeskModel.includes('MAX_TABLET_DESK_NODES = 32') && tabletDesk.includes('DESK FULL') && tabletDesk.includes('NOTHING WAS DELETED'), 'The Infinite Desk refuses excess tiles visibly instead of dropping them')
@@ -1029,20 +1315,28 @@ for (const [relative, width, height, bitDepth, colorType, encoding] of expectedS
   check(size?.bitDepth === bitDepth && size?.colorType === colorType, `${relative} is ${encoding}`)
 }
 
+const stagedScreenshotPaths = { apple: [], android: [] }
 for (const { label, directory, dimensions, minCount, maxCount, ios } of STORE_SCREENSHOT_SETS) {
   if (!exists(directory)) {
     fail(`${label} screenshot directory exists`)
     continue
   }
 
-  const images = fs.readdirSync(path.join(root, directory), { withFileTypes: true })
-    .filter((entry) => entry.isFile() && !entry.name.startsWith('.'))
+  const visibleEntries = fs.readdirSync(path.join(root, directory), { withFileTypes: true })
+    .filter((entry) => !entry.name.startsWith('.'))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  const images = visibleEntries
+    .filter((entry) => entry.isFile())
     .map((entry) => entry.name)
-    .sort()
+  stagedScreenshotPaths[ios ? 'apple' : 'android'].push(
+    ...images.map((name) => path.posix.join(directory, name)),
+  )
 
   check(
-    images.length >= minCount && images.length <= maxCount,
-    `${label} screenshot count is ${images.length} (${minCount}-${maxCount} required)`,
+    visibleEntries.every((entry) => entry.isFile())
+      && images.length >= minCount
+      && images.length <= maxCount,
+    `${label} screenshot entries are regular files and count is ${images.length} (${minCount}-${maxCount} required)`,
   )
 
   for (const name of images) {
@@ -1061,12 +1355,37 @@ for (const { label, directory, dimensions, minCount, maxCount, ios } of STORE_SC
   }
 }
 
-check(!hasAppleScreenshotSubmissionHold(screenshotPlan), 'Apple screenshot set has no unresolved visual submission hold')
+check(
+  !hasAppleScreenshotSubmissionHold(screenshotPlan)
+    && appleScreenshotReceiptIsValid(appleScreenshotReceipt, {
+      actualScreenshots: stagedScreenshotPaths.apple.map((relative) => ({
+        path: relative,
+        sha256: binaryEvidence(relative).sha256,
+      })),
+      expectedSourceCommit: canonicalReleaseSource,
+      expectedBuildIdentity: candidateAppleBuildIdentity,
+      receiptGitCustody: appleScreenshotReceiptGitCustody,
+    }),
+  'Apple screenshot set has no unresolved visual submission hold',
+)
 check(
   appleScreenshotProvenanceIsConsistent(screenshotPlan, releaseChecklist),
   'Apple screenshot hold matches the canonical build-provenance state',
 )
-check(!hasAndroidScreenshotCreativeHold(screenshotPlan), 'Android screenshot set has no unresolved visual submission hold')
+check(
+  !hasAndroidScreenshotCreativeHold(screenshotPlan)
+    && androidScreenshotProvenanceIsConsistent(screenshotPlan, releaseLedger)
+    && androidScreenshotReceiptIsValid(androidScreenshotReceipt, {
+      actualScreenshots: stagedScreenshotPaths.android.map((relative) => ({
+        path: relative,
+        sha256: binaryEvidence(relative).sha256,
+      })),
+      expectedSourceCommit: canonicalReleaseSource,
+      expectedBuildIdentity: candidateAndroidBuildIdentity,
+      receiptGitCustody: androidScreenshotReceiptGitCustody,
+    }),
+  'Android screenshot set has no unresolved visual submission hold',
+)
 check(!/^> PRICE HOLD:/m.test(productPlan), 'Store subscription prices have Cole approval')
 
 for (const relative of [
@@ -1074,7 +1393,6 @@ for (const relative of [
   'store/products.md',
   'store/privacy-data.md',
   'store/review-notes.md',
-  'store/apple-console-completion-packet.md',
   'store/screenshots.md',
   'store/release-checklist.md',
   'store/release-ledger.md',

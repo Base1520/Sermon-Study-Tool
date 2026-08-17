@@ -11,7 +11,11 @@ Creating or statically checking this packet proves none of those assertions. All
 applicable row is exercised on the exact store-distributed candidate and the non-secret evidence
 pointers below are complete.
 
-## Candidate identity — complete before testing
+## Candidate identity and redaction closure
+
+Complete the first seven rows before testing. Leave the private configured-code comparison row open
+until that device's result reasons and evidence pointers are entered; complete it before relying on any
+recorded result for that device.
 
 | Field | iPhone | iPad | Android phone | Android tablet |
 | --- | --- | --- | --- | --- |
@@ -22,11 +26,16 @@ pointers below are complete.
 | Candidate receipt/checksum pointer | — | — | — | — |
 | Installed identity evidence pointer | — | — | — | — |
 | Tester and local timestamp | — | — | — | — |
+| Private configured-code comparison (after evidence entry) | — | — | — | — |
 
 Record app version and build as `<marketing version> (<platform build number>)`, for example
 `1.4.2 (6)`. Every recorded device in one run must share the same marketing version and reviewed
 source commit. The iPhone and iPad must share one exact version/build, and the Android phone and
 tablet must share one exact version/build; Apple and Android platform build numbers may differ.
+
+Record tester and local timestamp as `<identified tester> · <RFC3339 timestamp with numeric offset>`,
+for example `Tester iPad · 2026-08-16T12:00:00-05:00`. The calendar date and clock must be valid, the
+offset must be known (never `-00:00`), and the timestamp must not be in the future.
 
 Do not mix builds in one run. Restart the matrix if any executable, bundled web asset, store
 catalog, backend release stage, or candidate source changes.
@@ -34,9 +43,25 @@ catalog, backend release stage, or candidate source changes.
 ## Evidence rules
 
 - Record only `PASS`, `FAIL`, `BLOCKED`, or `N/A` in result cells. Every `N/A` needs a reason.
-- Evidence pointers may identify a local screenshot, screen recording, console receipt, or written
-  observation. They must not contain an email address, verification/device-link/comp code, bearer,
-  receipt body, account ID, install ID, or recording content.
+- Candidate-identity values and evidence pointers may identify a local screenshot, screen recording,
+  console receipt, installed identity record, tester, timestamp, source commit, or written observation.
+  They must not contain an email address, verification/device-link/comp code, bearer, receipt body,
+  account ID, install ID, or recording content. Record the reviewed source commit as its full
+  40-character lowercase Git object ID; store only pointers to receipts and identity evidence, never
+  their private bodies. A path or filename may contain an explicitly labeled build number (for
+  example, `build-123456.ipa.sha256`), and a pointer may be a bare 40/64-character hexadecimal object
+  or digest (optionally `sha1:`/`sha-1:` or `sha256:`/`sha-256:` prefixed). An isolated six-digit value
+  or path segment is forbidden because it is indistinguishable from a verification code. Although the
+  reviewed-source field requires a full lowercase Git object ID, this packet guard checks only its
+  syntax and cross-device consistency; independently resolve it to a commit in the reviewed repository
+  before relying on a completed run. The static redaction guard recognizes the app's device-link
+  normalization, known purchase/comp prefixes, and values explicitly labeled as comp codes. Configured
+  comp codes have no universal lexical form, so static pattern matching cannot prove an unlabeled
+  arbitrary string safe; human review must compare against the private configured codes without
+  recording those codes here. Enter `PASS — compared privately; no configured code recorded` only
+  after comparing every value, result reason, and evidence pointer for that device against the private
+  configured-code inventory. The guard verifies that this attestation is present, not that the private
+  comparison was truthful or complete.
 - Every recorded `PASS`, `FAIL`, or `BLOCKED` needs a device-matched non-secret evidence pointer or
   precise blocker in that row's final cell. Use the exact labels `iPhone:`, `iPad:`, `Android phone:`,
   and `Android tablet:` for the corresponding recorded result, separated by semicolons. Do not add a

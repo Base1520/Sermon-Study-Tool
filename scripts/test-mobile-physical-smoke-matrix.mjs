@@ -97,25 +97,106 @@ const candidateFields = [
   'Candidate receipt/checksum pointer',
   'Installed identity evidence pointer',
   'Tester and local timestamp',
+  'Private configured-code comparison (after evidence entry)',
 ]
 
-function tableRows(markdown, prefix) {
-  return markdown
-    .split('\n')
-    .filter((line) => new RegExp(`^\\| ${prefix}\\d{2} \\|`).test(line))
-    .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()))
+const privateCodeAttestation = 'PASS — compared privately; no configured code recorded'
+
+function activeMarkdown(markdown) {
+  // Multiline comments can conceal whole table rows. Single-line comment syntax inside an
+  // otherwise active row is retained so the source-level redaction guard still rejects secrets
+  // that someone tries to conceal in an evidence or candidate cell.
+  const withoutComments = markdown.replace(/<!--[\s\S]*?(?:-->|$)/g, (comment) => (
+    comment.includes('\n') ? comment.replace(/[^\n]/g, '') : comment
+  ))
+  const activeLines = []
+  let fence = null
+  let rawHtml = null
+
+  const rawHtmlStart = (line) => {
+    const typeOne = /^ {0,3}<(pre|script|style|textarea)(?:\s|>|$)/i.exec(line)
+    if (typeOne) return { until: new RegExp(`</${typeOne[1]}\\s*>`, 'i') }
+    if (/^ {0,3}<\?/.test(line)) return { until: /\?>/ }
+    if (/^ {0,3}<![A-Z]/.test(line)) return { until: />/ }
+    if (/^ {0,3}<!\[CDATA\[/.test(line)) return { until: /\]\]>/ }
+    const openingTag = /^ {0,3}<([A-Za-z][A-Za-z0-9-]*)(?:\s|\/?>|$)/.exec(line)
+    if (openingTag) return { until: new RegExp(`</${openingTag[1]}\\s*>`, 'i') }
+    if (/^ {0,3}<\/[A-Za-z][A-Za-z0-9-]*(?:\s|>|$)/.test(line)) return { untilBlank: true }
+    return null
+  }
+
+  for (const line of withoutComments.split('\n')) {
+    if (fence) {
+      const closingFence = new RegExp(`^ {0,3}${fence.marker}{${fence.length},}\\s*$`)
+      if (closingFence.test(line)) fence = null
+      activeLines.push('')
+      continue
+    }
+
+    if (rawHtml) {
+      if ((rawHtml.until && rawHtml.until.test(line)) || (rawHtml.untilBlank && /^\s*$/.test(line))) {
+        rawHtml = null
+      }
+      activeLines.push('')
+      continue
+    }
+
+    const openingFence = /^ {0,3}(`{3,}|~{3,})(?:[^`].*)?$/.exec(line)
+    if (openingFence) {
+      fence = {
+        marker: openingFence[1][0],
+        length: openingFence[1].length,
+      }
+      activeLines.push('')
+      continue
+    }
+
+    const openingRawHtml = rawHtmlStart(line)
+    if (openingRawHtml) {
+      if (!(openingRawHtml.until && openingRawHtml.until.test(line))) rawHtml = openingRawHtml
+      activeLines.push('')
+      continue
+    }
+
+    activeLines.push(/^(?: {4}|\t)/.test(line) ? '' : line)
+  }
+
+  return activeLines.join('\n')
+}
+
+const candidateTableHeader = '| Field | iPhone | iPad | Android phone | Android tablet |'
+const candidateTableDelimiter = '| --- | --- | --- | --- | --- |'
+const functionalTableHeader = '| ID | Lane | Platforms | Required physical action and observable pass condition | iPhone | iPad | Android phone | Android tablet | Device-matched non-secret evidence pointers / precise blockers |'
+const functionalTableDelimiter = '| --- | --- | --- | --- | --- | --- | --- | --- | --- |'
+const legalTableHeader = '| ID | App control | Exact destination | iPhone | iPad | Android phone | Android tablet | Device-matched evidence / blocker |'
+const eightColumnTableDelimiter = '| --- | --- | --- | --- | --- | --- | --- | --- |'
+const controlTableHeader = '| ID | Surface | Required traversal | iPhone | iPad | Android phone | Android tablet | Device-matched evidence / blocker |'
+
+function boundTableRows(markdown, header, delimiter) {
+  const lines = markdown.split('\n')
+  const starts = lines
+    .map((line, index) => (line === header && lines[index + 1] === delimiter ? index : -1))
+    .filter((index) => index >= 0)
+  if (starts.length !== 1) return []
+
+  const rows = []
+  for (let index = starts[0] + 2; index < lines.length && lines[index].startsWith('| '); index += 1) {
+    rows.push(lines[index].split('|').slice(1, -1).map((cell) => cell.trim()))
+  }
+  return rows
 }
 
 function validate({ matrix, readme, checklist }) {
   const failures = []
-  const compact = matrix.replace(/\s+/g, ' ')
-  const functionalRows = tableRows(matrix, 'M')
-  const controlRows = tableRows(matrix, 'C')
-  const legalRows = tableRows(matrix, 'L')
-  const candidateRows = matrix
-    .split('\n')
-    .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()))
-    .filter(([field]) => candidateFields.includes(field))
+  const activeMatrix = activeMarkdown(matrix)
+  const compact = activeMatrix.replace(/\s+/g, ' ')
+  const functionalRows = boundTableRows(activeMatrix, functionalTableHeader, functionalTableDelimiter)
+    .filter(([id]) => /^M\d{2}$/.test(id))
+  const controlRows = boundTableRows(activeMatrix, controlTableHeader, eightColumnTableDelimiter)
+    .filter(([id]) => /^C\d{2}$/.test(id))
+  const legalRows = boundTableRows(activeMatrix, legalTableHeader, eightColumnTableDelimiter)
+    .filter(([id]) => /^L\d{2}$/.test(id))
+  const candidateRows = boundTableRows(activeMatrix, candidateTableHeader, candidateTableDelimiter)
 
   if (functionalRows.map(([id]) => id).join(',') !== [...expectedFunctionalRows.keys()].join(',')) {
     failures.push('functional smoke matrix keeps the exact M01-M11 sequence')
@@ -126,7 +207,7 @@ function validate({ matrix, readme, checklist }) {
     }
   }
   const validResult = (value) => ['—', 'PASS', 'FAIL', 'BLOCKED'].includes(value) || /^N\/A — \S/.test(value)
-  if (!matrix.includes('| ID | Lane | Platforms | Required physical action and observable pass condition | iPhone | iPad | Android phone | Android tablet | Device-matched non-secret evidence pointers / precise blockers |')
+  if (!activeMatrix.includes('| ID | Lane | Platforms | Required physical action and observable pass condition | iPhone | iPad | Android phone | Android tablet | Device-matched non-secret evidence pointers / precise blockers |')
     || functionalRows.some((row) => row.length !== 9 || !row[2] || row[2] === '—' || !row[3] || row[3] === '—' || row.slice(4, 8).some((value) => !validResult(value)))) {
     failures.push('functional smoke rows retain platform, action, and valid per-device result cells')
   }
@@ -192,10 +273,12 @@ function validate({ matrix, readme, checklist }) {
     || legalRows.some((row) => evidenceDoesNotMatch(row, 3, 7, 7, 8))) {
     failures.push('recorded physical results require device-matched non-secret evidence pointers or precise blockers')
   }
-  const prohibitedEvidencePatterns = [
-    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
-    /(?:^|[^0-9])\d{6}(?![0-9])/,
-    /\bOPR-[A-Z0-9]{4}-[A-Z0-9]{4}\b/i,
+  const plainSixDigitPattern = /(?:^|[^\p{Nd}])\p{Nd}{6}(?!\p{Nd})/u
+  const emailPattern = /[^\s/@]+@[^\s/@]+\.[^\s/@]+/gu
+  const assetDensityPointerPattern = /^(?:.*\/)?[^/@\s]+@\d+(?:\.\d+)?x\.(?:png|jpe?g|webp|heic|pdf)$/i
+  const contextualProhibitedPatterns = [
+    /OPR-[A-Z0-9]{4}-[A-Z0-9]{4}/i,
+    /opr_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/,
     /\bbearer(?:[ _-]?token)?\s*[:=]\s*[A-Za-z0-9._~+/=-]{8,}\b/i,
     /\bbearer\s+[A-Za-z0-9._~+/=-]{16,}\b/i,
     /\bverification[ _-]?code\s*[:=]\s*[^\s;]+/i,
@@ -204,24 +287,166 @@ function validate({ matrix, readme, checklist }) {
     /\breceipt[ _-]?body\s*[:=]\s*[^\s;]+/i,
     /\b(?:account|install)[ _-]?id\s*[:=]\s*[^\s;]+/i,
     /\brecording[ _-]?content\s*[:=]\s*[^\s;]+/i,
+    /(?:verification|device[ _-]?link|comp(?:ensation)?)[ _-]?code\s+\d{6}\b/i,
+    /BUY-(?:[A-F0-9]{4}-){5}[A-F0-9]{4}/i,
+    /OPERATOR[-_][A-Z0-9]+(?:[-_][A-Z0-9]+)*/i,
   ]
+  const namedEntityValues = new Map([
+    ['amp', '&'], ['commat', '@'], ['colon', ':'], ['equals', '='], ['sol', '/'],
+    ['frasl', '/'], ['bsol', '\\'], ['period', '.'], ['hyphen', '-'], ['lowbar', '_'],
+    ['tab', ' '], ['newline', ' '], ['nbsp', ' '], ['quot', ''], ['apos', ''],
+    ['ldquo', ''], ['rdquo', ''], ['lsquo', ''], ['rsquo', ''], ['ast', ''],
+    ['lowast', ''], ['grave', ''], ['excl', ''], ['lbrack', ''], ['rbrack', ''],
+    ['lpar', ''], ['rpar', ''], ['lcub', ''], ['rcub', ''], ['lrm', ''], ['rlm', ''],
+    ['zerowidthspace', ''], ['zwnj', ''], ['zwj', ''],
+  ])
+  const decodeSensitiveEscapes = (value) => {
+    let decoded = String(value)
+    while (true) {
+      const next = decoded
+        .replace(/&#(x[0-9a-f]+|\d+);?/gi, (entity, encoded) => {
+          const isHex = encoded[0]?.toLowerCase() === 'x'
+          const codePoint = Number.parseInt(isHex ? encoded.slice(1) : encoded, isHex ? 16 : 10)
+          return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+            ? String.fromCodePoint(codePoint)
+            : entity
+        })
+        .replace(/%([0-9a-f]{2})/gi, (escape, encoded) => {
+          const codePoint = Number.parseInt(encoded, 16)
+          return codePoint >= 0x20 && codePoint <= 0x7e ? String.fromCodePoint(codePoint) : escape
+        })
+        .replace(/&([a-z][a-z0-9]+);?/gi, (entity, name) => namedEntityValues.get(name.toLowerCase()) ?? '')
+      if (next === decoded) break
+      decoded = next
+    }
+    return decoded
+  }
+  const normalizeSensitiveSyntax = (value) => {
+    const source = decodeSensitiveEscapes(value)
+    const renderedMarkup = source
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<[^>]*>/g, '')
+      .replace(/!?\[([^\]]*)\]\(([^)]*)\)/g, '$1')
+      .replace(/!?\[([^\]]*)\]\[[^\]]*\]/g, '$1')
+    const scanSource = renderedMarkup === source ? source : `${renderedMarkup} ${source}`
+    return scanSource
+      .normalize('NFKD')
+      .replace(/\p{M}/gu, '')
+      .replace(/!?\[([^\]]*)\]\(([^)]*)\)/g, '$1 $2 $1')
+      .replace(/\\(?=[:=*!`'"[\](){}<>])/g, '')
+      .replace(/\\/g, '/')
+      .replace(/[!`'"“”‘’„‟‚‛«»‹›*~[\](){}<>\p{Cf}\uFE00-\uFE0F]/gu, '')
+      .replace(/\s*([/._:-])\s*/g, '$1')
+  }
+  const labelledCodePathPattern = /(verification(?:[ _./:-]*code)?|device[ _./:-]*link(?:[ _./:-]*code)?|(?:comp(?:ensation)?|access|redeem|redemption|promo)[ _./:-]*code)[-_./:=]*([A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?)(?=$|[\s./:])/gi
+  const explicitCodeLabelPattern = /(?:verification(?:[ _./:-]*code)?|device[ _./:-]*link(?:[ _./:-]*code)?|(?:comp(?:ensation)?|access|redeem|redemption|promo)[ _./:-]*code)(?=$|[^\s])/i
+  const valueFreeCodeScreenshotPointerPattern = /^(?:[A-Za-z0-9._-]+\/)*(?:verification|device[-_.]?link|comp(?:ensation)?)[-_.]?code[-_.]?screenshot(?:[-_](?:iphone|ipad|android|phone|tablet|dark|light|before|after|\d+))*\.(?:png|jpe?g|webp|heic|pdf|txt|json|log)$/i
+  const containsDeviceLinkEquivalent = (value) => {
+    const upper = value.toUpperCase()
+    return /O[^A-Z0-9]*P[^A-Z0-9]*R(?:[^A-Z0-9]*[A-HJ-NP-Z2-9]){8}(?![A-Z0-9])/.test(upper)
+  }
+  const containsContextualSecret = (value) => {
+    const normalized = normalizeSensitiveSyntax(value)
+    const emailMatches = [...normalized.matchAll(emailPattern)].map(([match]) => match)
+    if (emailMatches.some((match) => !assetDensityPointerPattern.test(match))) return true
+    if (contextualProhibitedPatterns.some((pattern) => pattern.test(normalized))) return true
+    if (containsDeviceLinkEquivalent(String(value)) || containsDeviceLinkEquivalent(normalized)) return true
+    if (explicitCodeLabelPattern.test(normalized) && !valueFreeCodeScreenshotPointerPattern.test(normalized)) return true
+    if (/(?:verification(?:[ _./:-]*code)?|device[ _./:-]*link(?:[ _./:-]*code)?|(?:comp(?:ensation)?|access|redeem|redemption|promo)[ _./:-]*code)[-_./:=]*[A-Z0-9]{6}(?=$|[\s._/:-])/i.test(normalized)) return true
+    return [...normalized.matchAll(labelledCodePathPattern)]
+      .some(() => !valueFreeCodeScreenshotPointerPattern.test(normalized))
+  }
+  const exactHexPointerPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64}|sha-?1:[0-9a-f]{40}|sha-?256:[0-9a-f]{64})$/i
+  const containsUnscopedSixDigitCode = (value) => {
+    const markdownPointer = /^!?\[([^\]]*)\]\(([^)]*)\)$/.exec(String(value).trim())
+    const representations = markdownPointer ? [markdownPointer[1], markdownPointer[2]] : [value]
+    return representations.some((representation) => {
+      const normalized = normalizeSensitiveSyntax(representation)
+      if (exactHexPointerPattern.test(normalized)) return false
+      const unscoped = normalized
+        .replace(/\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2}/g, '')
+        .replace(/(^|[^A-Za-z0-9])(build[-_.])\d{6}(?=$|[^0-9])/gi, '$1$2')
+      return plainSixDigitPattern.test(unscoped)
+    })
+  }
+  const candidateTesterTimestampIsValid = (value) => {
+    const match = /^(\S(?:.*\S)?) · (\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?([+-])(\d{2}):(\d{2})$/.exec(value)
+    if (!match) return false
+    const [, , yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw, fractionRaw = '0', sign, offsetHourRaw, offsetMinuteRaw] = match
+    const [year, month, day, hour, minute, second, offsetHour, offsetMinute] = [
+      yearRaw,
+      monthRaw,
+      dayRaw,
+      hourRaw,
+      minuteRaw,
+      secondRaw,
+      offsetHourRaw,
+      offsetMinuteRaw,
+    ].map(Number)
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+    const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1]
+      || hour > 23 || minute > 59 || second > 59
+      || offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0)
+      || (sign === '-' && offsetHour === 0 && offsetMinute === 0)) return false
+    const fraction = Number(fractionRaw.slice(0, 3).padEnd(3, '0'))
+    const offset = (offsetHour * 60 + offsetMinute) * (sign === '+' ? 1 : -1)
+    const timestamp = Date.UTC(year, month - 1, day, hour, minute, second, fraction) - offset * 60_000
+    return Number.isFinite(timestamp) && timestamp <= Date.now()
+  }
   const evidenceCells = [
     ...functionalRows.filter((row) => row.length === 9).map((row) => row[8]),
     ...controlRows.filter((row) => row.length === 8).map((row) => row[7]),
     ...legalRows.filter((row) => row.length === 8).map((row) => row[7]),
   ]
-  if (evidenceCells.some((value) => prohibitedEvidencePatterns.some((pattern) => pattern.test(value)))) {
+  const resultCells = [
+    ...functionalRows.filter((row) => row.length === 9).flatMap((row) => row.slice(4, 8)),
+    ...controlRows.filter((row) => row.length === 8).flatMap((row) => row.slice(3, 7)),
+    ...legalRows.filter((row) => row.length === 8).flatMap((row) => row.slice(3, 7)),
+  ]
+  const evidenceHasPlainCode = evidenceCells.some((value) => {
+    const evidence = parseDeviceEvidence(value)
+    if (!evidence.valid) return containsUnscopedSixDigitCode(value)
+    return [...evidence.entries.values()].some(containsUnscopedSixDigitCode)
+  })
+  if (
+    [...resultCells, ...evidenceCells].some(containsContextualSecret)
+    || resultCells.some(containsUnscopedSixDigitCode)
+    || evidenceHasPlainCode
+  ) {
     failures.push('recorded physical evidence excludes prohibited sensitive data')
+  }
+  const candidateValues = candidateRows.flatMap(([, ...values]) => values)
+  const candidateTesterValues = candidateRows
+    .find(([field]) => field === 'Tester and local timestamp')
+    ?.slice(1) ?? []
+  const candidatePointerValues = candidateRows
+    .filter(([field]) => [
+      'Candidate receipt/checksum pointer',
+      'Installed identity evidence pointer',
+    ].includes(field))
+    .flatMap(([, ...values]) => values)
+  if (
+    candidateValues.some(containsContextualSecret)
+    || candidateValues.some((value) => /^\d{6}$/.test(value.trim()))
+    || candidateTesterValues.some(containsUnscopedSixDigitCode)
+    || candidatePointerValues.some(containsUnscopedSixDigitCode)
+  ) {
+    failures.push('recorded candidate identity excludes prohibited sensitive data')
+  }
+  if (candidateTesterValues.some((value) => value !== '—' && !candidateTesterTimestampIsValid(value))) {
+    failures.push('candidate tester values use an identified local RFC3339 timestamp with a known offset')
   }
   if (!compact.includes('system browser to open the exact HTTPS destination below')
     || !compact.includes("the return path to preserve the app's Account surface and state")) {
     failures.push('legal-link matrix requires destination, load, and return-path proof')
   }
 
-  if (!matrix.includes('| Field | iPhone | iPad | Android phone | Android tablet |')
+  if (!activeMatrix.includes('| Field | iPhone | iPad | Android phone | Android tablet |')
     || candidateRows.map(([field]) => field).join(',') !== candidateFields.join(',')
     || candidateRows.some((row) => row.length !== 5)
     || !compact.includes('Record app version and build as `<marketing version> (<platform build number>)`')
+    || !compact.includes('Record tester and local timestamp as `<identified tester> · <RFC3339 timestamp with numeric offset>`')
     || !compact.includes('Every recorded device in one run must share the same marketing version and reviewed source commit.')
     || !compact.includes('Apple and Android platform build numbers may differ.')
     || !compact.includes('Do not mix builds in one run.')) {
@@ -241,12 +466,34 @@ function validate({ matrix, readme, checklist }) {
     }
   }
   const candidateValuesByField = new Map(candidateRows.map(([field, ...values]) => [field, values]))
+  const reviewedSourceValues = candidateValuesByField.get('Reviewed source commit') ?? []
+  if (reviewedSourceValues.some((value) => value !== '—' && !/^[0-9a-f]{40}$/.test(value))) {
+    failures.push('candidate reviewed source commits use full 40-character lowercase Git object IDs')
+  }
+  let unrecordedStructuredValueIsInvalid = false
+  for (let deviceIndex = 0; deviceIndex < deviceLabels.length; deviceIndex += 1) {
+    if (recordedDeviceIndexes.has(deviceIndex)) continue
+    const expectedChannel = deviceIndex < 2 ? 'TestFlight' : 'Play internal'
+    const channel = candidateValuesByField.get('Distribution channel (TestFlight / Play internal)')?.[deviceIndex]
+    const versionBuild = candidateValuesByField.get('App version and build')?.[deviceIndex]
+    const bundleId = candidateValuesByField.get('Bundle/package ID')?.[deviceIndex]
+    const privateComparison = candidateValuesByField.get('Private configured-code comparison (after evidence entry)')?.[deviceIndex]
+    if ((channel && channel !== '—' && channel !== expectedChannel)
+      || (versionBuild && versionBuild !== '—' && !/^\d+(?:\.\d+){2} \(\d+\)$/.test(versionBuild))
+      || (bundleId && bundleId !== '—' && bundleId !== '`com.base1520.theoperator`')
+      || (privateComparison && privateComparison !== '—' && privateComparison !== privateCodeAttestation)) {
+      unrecordedStructuredValueIsInvalid = true
+    }
+  }
+  if (unrecordedStructuredValueIsInvalid) {
+    failures.push('candidate identity values use valid field-specific formats before results are recorded')
+  }
   const completeCandidateValuesByDevice = new Map()
   for (const deviceIndex of recordedDeviceIndexes) {
     const device = deviceLabels[deviceIndex]
     const values = candidateFields.map((field) => candidateValuesByField.get(field)?.[deviceIndex] ?? '')
     if (values.some((value) => !value || value === '—')) {
-      failures.push(`recorded ${device} results require all seven candidate-identity values`)
+      failures.push(`recorded ${device} results require all eight candidate-identity and redaction values`)
       continue
     }
     const expectedChannel = deviceIndex < 2 ? 'TestFlight' : 'Play internal'
@@ -255,6 +502,9 @@ function validate({ matrix, readme, checklist }) {
     }
     if (values[2] !== '`com.base1520.theoperator`') {
       failures.push(`recorded ${device} results require the canonical bundle/package ID`)
+    }
+    if (values[7] !== privateCodeAttestation) {
+      failures.push(`recorded ${device} results require the exact private configured-code comparison attestation`)
     }
     completeCandidateValuesByDevice.set(deviceIndex, values)
   }
@@ -303,6 +553,8 @@ function validate({ matrix, readme, checklist }) {
 
   const safetyPhrases = [
     'Record only `PASS`, `FAIL`, `BLOCKED`, or `N/A`',
+    'Candidate-identity values and evidence pointers may identify',
+    'full 40-character lowercase Git object ID',
     'must not contain an email address',
     'verification/device-link/comp code',
     'bearer',
@@ -310,6 +562,13 @@ function validate({ matrix, readme, checklist }) {
     'account ID',
     'install ID',
     'recording content',
+    'bare 40/64-character hexadecimal object or digest',
+    'An isolated six-digit value or path segment is forbidden',
+    'checks only its syntax and cross-device consistency',
+    'static pattern matching cannot prove an unlabeled arbitrary string safe',
+    'Enter `PASS — compared privately; no configured code recorded` only after comparing every value, result reason, and evidence pointer for that device against the private configured-code inventory.',
+    'The guard verifies that this attestation is present, not that the private comparison was truthful or complete.',
+    'the timestamp must not be in the future',
     'Every recorded `PASS`, `FAIL`, or `BLOCKED` needs a device-matched non-secret evidence pointer or precise blocker',
     'Use the exact labels `iPhone:`, `iPad:`, `Android phone:`, and `Android tablet:`',
     'Use a disposable non-review account for registration and deletion.',
@@ -346,7 +605,7 @@ function validate({ matrix, readme, checklist }) {
     failures.push('store README routes the physical smoke matrix')
   }
   const readmeCompact = readme.replace(/\s+/g, ' ')
-  if (!readmeCompact.includes('A passing static check does not authorize submission and does not replace physical-device, sandbox-purchase, TestFlight, or Play internal-track testing.')) {
+  if (!readmeCompact.includes('Neither command authorizes upload or submission or replaces physical-device, sandbox-purchase, TestFlight, or Play internal-track testing.')) {
     failures.push('store README keeps static checks subordinate to physical and store-channel testing')
   }
   if (!checklist.includes('- [ ] Physical iPhone/iPad and Android smoke tests cover registration, study, library, account, deletion, microphone, export, and offline saved-study access.')
@@ -380,8 +639,8 @@ function replaceRequired(source, target, replacement) {
   return mutated
 }
 
-function expectFailures(input, failures) {
-  assert.deepEqual(validate(input), failures)
+function expectFailures(input, failures, context) {
+  assert.deepEqual(validate(input), failures, context)
 }
 
 function fillCandidateIdentities(source, deviceIndexes = [0, 1, 2, 3]) {
@@ -392,7 +651,13 @@ function fillCandidateIdentities(source, deviceIndexes = [0, 1, 2, 3]) {
     ['Reviewed source commit', Array(4).fill('0123456789abcdef0123456789abcdef01234567')],
     ['Candidate receipt/checksum pointer', ['iphone-receipt', 'ipad-receipt', 'android-phone-receipt', 'android-tablet-receipt']],
     ['Installed identity evidence pointer', ['iphone-identity', 'ipad-identity', 'android-phone-identity', 'android-tablet-identity']],
-    ['Tester and local timestamp', ['Tester · iPhone', 'Tester · iPad', 'Tester · Android phone', 'Tester · Android tablet']],
+    ['Tester and local timestamp', [
+      'Tester iPhone · 2026-08-16T12:00:00-05:00',
+      'Tester iPad · 2026-08-16T12:00:00-05:00',
+      'Tester Android phone · 2026-08-16T12:00:00-05:00',
+      'Tester Android tablet · 2026-08-16T12:00:00-05:00',
+    ]],
+    ['Private configured-code comparison (after evidence entry)', Array(4).fill(privateCodeAttestation)],
   ])
   return source
     .split('\n')
@@ -404,6 +669,21 @@ function fillCandidateIdentities(source, deviceIndexes = [0, 1, 2, 3]) {
       return `| ${cells.join(' | ')} |`
     })
     .join('\n')
+}
+
+function buildRecordedIpadM02PassFixture() {
+  return replaceRequired(
+    fillCandidateIdentities(actual.matrix, [1]),
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: ipad-registration |',
+  )
+}
+
+function replacePrivateCodeAttestationRow(source, render) {
+  const prefix = '| Private configured-code comparison (after evidence entry) |'
+  const rows = source.split('\n').filter((line) => line.startsWith(prefix))
+  assert.equal(rows.length, 1)
+  return replaceRequired(source, rows[0], render(rows[0]))
 }
 
 function fillRepresentativeResults(source = actual.matrix) {
@@ -614,7 +894,7 @@ check('an iPad result cannot be recorded before its complete candidate identity'
     '$1 — | PASS | — | — | iPad: ipad-registration |',
   )
   expectFailures({ ...actual, matrix }, [
-    'recorded iPad results require all seven candidate-identity values',
+    'recorded iPad results require all eight candidate-identity and redaction values',
   ])
 })
 
@@ -625,6 +905,106 @@ check('a complete TestFlight iPad identity permits the same recorded result', ()
     '$1 — | PASS | — | — | iPad: ipad-registration |',
   )
   expectFailures({ ...actual, matrix }, [])
+
+  const falseAttestation = replaceRequired(
+    matrix,
+    `| Private configured-code comparison (after evidence entry) | — | ${privateCodeAttestation} | — | — |`,
+    '| Private configured-code comparison (after evidence entry) | — | PASS | — | — |',
+  )
+  expectFailures({ ...actual, matrix: falseAttestation }, [
+    'recorded iPad results require the exact private configured-code comparison attestation',
+  ])
+})
+
+const missingActiveCandidateFailures = [
+  'matrix binds results to one exact distributed candidate',
+  'recorded iPad results require all eight candidate-identity and redaction values',
+]
+
+check('candidate rows hidden in a Markdown HTML comment cannot authorize a recorded iPad PASS', () => {
+  const matrix = replacePrivateCodeAttestationRow(
+    buildRecordedIpadM02PassFixture(),
+    (row) => `<!--\n${row}\n-->`,
+  )
+  expectFailures({ ...actual, matrix }, missingActiveCandidateFailures)
+})
+
+check('candidate rows hidden in a fenced Markdown code block cannot authorize a recorded iPad PASS', () => {
+  const matrix = replacePrivateCodeAttestationRow(
+    buildRecordedIpadM02PassFixture(),
+    (row) => `\`\`\`text\n${row}\n\`\`\``,
+  )
+  expectFailures({ ...actual, matrix }, missingActiveCandidateFailures)
+})
+
+check('candidate rows hidden in indented Markdown code blocks cannot authorize a recorded iPad PASS', () => {
+  for (const indent of ['    ', '\t']) {
+    const matrix = replacePrivateCodeAttestationRow(
+      buildRecordedIpadM02PassFixture(),
+      (row) => `${indent}${row}`,
+    )
+    expectFailures({ ...actual, matrix }, missingActiveCandidateFailures, JSON.stringify(indent))
+  }
+})
+
+check('candidate attestation hidden in CommonMark raw HTML blocks cannot authorize a recorded iPad PASS', () => {
+  const wrappers = [
+    ['pre', (row) => `<pre>\n${row}\n</pre>`],
+    ['script', (row) => `<script>\n\n${row}\n</script>`],
+    ['style', (row) => `<style>\n${row}\n</style>`],
+    ['textarea', (row) => `<textarea>\n${row}\n</textarea>`],
+    ['processing instruction', (row) => `<?operator\n${row}\n?>`],
+    ['declaration', (row) => `<!UPPER\n${row}\n>`],
+    ['CDATA', (row) => `<![CDATA[\n${row}\n]]>`],
+    ['div block', (row) => `<div>\n${row}\n</div>\n`],
+    ['table block', (row) => `<table>\n${row}\n</table>\n`],
+    ['template block across a blank line', (row) => `<template>\n\n${row}\n</template>`],
+    ['details block across a blank line', (row) => `<details>\n\n${row}\n</details>`],
+    ['custom block across a blank line', (row) => `<operator-audit>\n\n${row}\n</operator-audit>`],
+  ]
+
+  for (const [variant, wrap] of wrappers) {
+    const matrix = replacePrivateCodeAttestationRow(buildRecordedIpadM02PassFixture(), wrap)
+    expectFailures({ ...actual, matrix }, missingActiveCandidateFailures, variant)
+  }
+})
+
+check('candidate attestation hidden in an unclosed generic HTML block cannot authorize a recorded iPad PASS', () => {
+  const fixture = buildRecordedIpadM02PassFixture()
+  const prefix = '| Private configured-code comparison (after evidence entry) |'
+  const attestationRow = fixture.split('\n').find((line) => line.startsWith(prefix))
+  assert.ok(attestationRow)
+
+  for (const tag of ['template', 'details', 'operator-audit']) {
+    const matrix = `${replaceRequired(fixture, attestationRow, '')}\n\n<${tag}>\n\n${attestationRow}`
+    expectFailures({ ...actual, matrix }, missingActiveCandidateFailures, `unclosed ${tag}`)
+  }
+})
+
+check('candidate attestation disconnected from its rendered table cannot authorize a recorded iPad PASS', () => {
+  const fixture = buildRecordedIpadM02PassFixture()
+  const prefix = '| Private configured-code comparison (after evidence entry) |'
+  const attestationRow = fixture.split('\n').find((line) => line.startsWith(prefix))
+  assert.ok(attestationRow)
+
+  const afterBlankLine = replaceRequired(fixture, attestationRow, `\n${attestationRow}`)
+  expectFailures({ ...actual, matrix: afterBlankLine }, missingActiveCandidateFailures, 'blank before attestation')
+
+  const movedStandalone = `${replaceRequired(fixture, attestationRow, '')}\n\n${attestationRow}`
+  expectFailures({ ...actual, matrix: movedStandalone }, missingActiveCandidateFailures, 'standalone attestation')
+})
+
+check('disconnected functional, legal, and control rows are excluded from their rendered tables', () => {
+  for (const [id, header, delimiter] of [
+    ['M11', functionalTableHeader, functionalTableDelimiter],
+    ['L04', legalTableHeader, eightColumnTableDelimiter],
+    ['C06', controlTableHeader, eightColumnTableDelimiter],
+  ]) {
+    const row = actual.matrix.split('\n').find((line) => line.startsWith(`| ${id} |`))
+    assert.ok(row)
+    const matrix = `${replaceRequired(actual.matrix, row, '')}\n\n${row}`
+    assert.equal(boundTableRows(activeMarkdown(matrix), header, delimiter).some(([candidate]) => candidate === id), false)
+  }
 })
 
 check('a recorded iPad result rejects a sideloaded distribution channel', () => {
@@ -719,30 +1099,454 @@ check('weakening the no-mixed-builds contract fails closed', () => {
   ])
 })
 
-for (const [name, evidence] of [
-  ['an email address', 'cole@example.com'],
+const sensitiveRecordExamples = [
+  ['an email address', [
+    'cole@example.com',
+    'josé@example.com',
+    'δοκιμή@παράδειγμα.δοκιμή',
+    'cole&commat;example.com',
+    'cole&amp;commat;example.com',
+    'cole@exam<em>ple</em>.com',
+    'local/person@example.com/m02@2x.png',
+  ]],
   ['a six-digit verification code', '123456'],
-  ['an Operator device-link code', 'OPR-AAAA-AAAA'],
-  ['a bearer credential', 'Bearer abcdefghijklmnop'],
-  ['a labeled bearer credential', 'bearer: abcdefghijklmnop'],
-  ['a labeled verification code', 'verification_code=private-code'],
-  ['a labeled comp code', 'comp_code=private-code'],
+  ['an Operator device-link code', [
+    'OPR-AAAA-AAAA',
+    'O\u0301PR-AAAA-AAAA',
+    'OPR-A\u0301AAA-AAAA',
+    'OPR-AAAA-A\u0300AAA',
+    'OÁPR-AAAA-AAAA',
+    'OéPR-AAAA-AAAA',
+    'OPR-ÁAAAA-AAAA',
+    'OPR-AAÁAA-AAAA',
+    'O&lrm;P&lrm;R-A-B-C-D-E-F-G-H',
+  ]],
+  ['a compact redemption-equivalent device-link code', ['OPRAAAAAAAA', 'OPR:AA:AA:AA:AA']],
+  ['a slash-form redemption-equivalent device-link code', [
+    'OPR/AAAA/AAAA',
+    'O/P/R/AAAA/AAAA',
+    'OPR/A/A/A/A/A/A/A/A',
+    'local/OPR/A/B/C/D/E/F/G/H.txt',
+    'local/device-link-code-screenshot/ABCDEF.txt',
+  ]],
+  ['a space-form redemption-equivalent device-link code', ['OPR AAAA AAAA', 'O P R A A A A A A A A']],
+  ['an underscore-form redemption-equivalent device-link code', 'OPR_AAAA_AAAA'],
+  ['a dotted redemption-equivalent device-link code', 'O.P.R.A.A.A.A.A.A.A.A'],
+  ['a website purchase code', [
+    'BUY-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF',
+    'receipt_BUY-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF.png',
+    'BUY-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF_receipt.png',
+  ]],
+  ['an Operator comp code', ['OPERATOR-ABC123', 'receipt_OPERATOR-ABC123.png']],
+  ['an underscored Operator comp code', 'OPERATOR_SECRET'],
+  ['a lowercase redemption-equivalent Operator comp code', 'operator-abc123'],
+  ['a bearer credential', ['Bearer abcdefghijklmnop', `opr_${'A'.repeat(43)}`]],
+  ['a labeled bearer credential', [
+    'bearer: abcdefghijklmnop',
+    'bearer&colon;&Tab;abcdefghijklmnop',
+    'bearer&amp;colon; abcdefghijklmnop',
+    'bearer&amp;#58; abcdefghijklmnop',
+    'bearer%253A abcdefghijklmnop',
+    'bear<em>er</em>: abcdefghijklmnop',
+    'bear<!--x-->er: abcdefghijklmnop',
+    'bear~~er~~: abcdefghijklmnop',
+    '~~bearer~~: abcdefghijklmnop',
+    '[bear<em>er</em>](https://example.com): abcdefghijklmnop',
+    '<!-- bearer: abcdefghijklmnop -->',
+    '<a href="https://example.com?bearer=abcdefghijklmnop">receipt</a>',
+    '<img alt="bearer: abcdefghijklmnop">',
+  ]],
+  ['a labeled verification code', [
+    'verification_code=private-code',
+    'verification-code123456.png',
+    'verificationcode123456.png',
+    'verifi<em>cation</em> code: ABCDEF',
+    'verifi~~cation~~ code: ABCDEF',
+    '<https://example.com?verification_code=123456>',
+    'local/verification-code-screenshot/ABCDEF.txt',
+    '[verification](https://x.invalid)[ code](https://x.invalid): ABCDEF',
+    '[verification code][ref]: ABCDEF',
+  ]],
+  ['a labeled comp code', [
+    'comp_code=private-code',
+    'compcode-FREEPASS2026',
+    'comp%252Dcode%253DFREEPASS2026',
+    'access-code-FREEPASS2026',
+    'redeem-code-FREEPASS2026',
+    'redemption-code-FREEPASS2026',
+    'promo-code-FREEPASS2026',
+    'local/comp-code-$FREEPASS2026.txt',
+    'local/comp-code-+FREEPASS2026.txt',
+    'local/comp-code-秘密.txt',
+    'local/comp-code-screenshot.PRIVATE.txt',
+    '[comp](https://x.invalid)[ code](https://x.invalid)-FREEPASS2026',
+  ]],
   ['a receipt body', 'receipt_body=private-receipt'],
   ['an account ID', 'account_id=private-account'],
   ['an install ID', 'install ID=private-install'],
   ['recording content', 'recording_content=private-words'],
-]) {
+]
+
+for (const [name, rawExamples] of sensitiveRecordExamples) {
   check(`physical evidence rejects ${name}`, () => {
+    for (const evidence of Array.isArray(rawExamples) ? rawExamples : [rawExamples]) {
+      const matrix = replaceRequired(
+        fillCandidateIdentities(actual.matrix, [1]),
+        /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+        `$1 — | PASS | — | — | iPad: ${evidence} |`,
+      )
+      expectFailures({ ...actual, matrix }, evidence.includes(';') ? [
+        'recorded physical results require device-matched non-secret evidence pointers or precise blockers',
+        'recorded physical evidence excludes prohibited sensitive data',
+      ] : [
+        'recorded physical evidence excludes prohibited sensitive data',
+      ], evidence)
+    }
+  })
+}
+
+for (const [name, rawExamples] of sensitiveRecordExamples) {
+  check(`candidate identity rejects ${name}`, () => {
+    for (const value of Array.isArray(rawExamples) ? rawExamples : [rawExamples]) {
+      let matrix = fillCandidateIdentities(actual.matrix, [1])
+      matrix = replaceRequired(
+        matrix,
+        '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+        `| Candidate receipt/checksum pointer | — | ${value} | — | — |`,
+      )
+      expectFailures({ ...actual, matrix }, [
+        'recorded candidate identity excludes prohibited sensitive data',
+      ], value)
+    }
+  })
+}
+
+check('candidate tester details reject an embedded six-digit verification code', () => {
+  let matrix = fillCandidateIdentities(actual.matrix, [1])
+  matrix = replaceRequired(
+    matrix,
+    '| Tester and local timestamp | — | Tester iPad · 2026-08-16T12:00:00-05:00 | — | — |',
+    '| Tester and local timestamp | — | Tester 123456 · 2026-08-16T12:00:00-05:00 | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'recorded candidate identity excludes prohibited sensitive data',
+  ])
+})
+
+check('candidate identity rejects a whitespace-labeled verification code', () => {
+  let matrix = fillCandidateIdentities(actual.matrix, [1])
+  matrix = replaceRequired(
+    matrix,
+    '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+    '| Candidate receipt/checksum pointer | — | verification code 123456 | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'recorded candidate identity excludes prohibited sensitive data',
+  ])
+})
+
+check('candidate identity rejects a filename-labeled verification code', () => {
+  let matrix = fillCandidateIdentities(actual.matrix, [1])
+  matrix = replaceRequired(
+    matrix,
+    '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+    '| Candidate receipt/checksum pointer | — | local/verification-code-123456.png | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'recorded candidate identity excludes prohibited sensitive data',
+  ])
+})
+
+for (const [name, value] of [
+  ['slash-delimited verification code', 'local/verification-code/123456.png'],
+  ['dot-delimited verification code', 'local/verification-code.123456.png'],
+  ['repeated-delimiter verification code', 'local/verification-code--123456.png'],
+  ['filename-labeled alphanumeric comp code', 'local/comp-code-ABCDEF.txt'],
+  ['numeric-only pointer segment', 'local/screenshots/123456.png'],
+  ['slash-split alphanumeric verification code', 'local/verification/code/ABCDEF.txt'],
+  ['dot-split alphanumeric verification code', 'local/verification.code.ABCDEF.txt'],
+  ['slash-split alphanumeric device-link code', 'local/device/link/code/ABCDEF.txt'],
+  ['separator-split alphanumeric verification code', 'local/verification-code-AB-CD-EF.txt'],
+  ['prefixed Operator comp code', 'local/comp-code-OPERATOR-ABC123.png'],
+  ['lowercase prefixed Operator comp code', 'local/comp-code-operator-abc123.png'],
+  ['spaced split-label code', 'local/comp / code / ABCDEF.txt'],
+  ['labeled code with a numeric suffix', 'local/verification-code-123456-note.png'],
+  ['labeled code with an alphanumeric suffix', 'local/verification-code-ABCDEF-note.png'],
+  ['unlabeled numeric filename suffix', [
+    'local/screenshot-123456.png',
+    'local/screenshot123456.png',
+    'local/123456note.png',
+    'local/x123456y.png',
+    'local/123456/build-654321.png',
+    'C:\\screenshots\\123456\\build-654321.png',
+    'build-123456-654321.png',
+    'local/١٢٣٤٥٦.png',
+    'local/۱۲۳۴۵۶.png',
+    'local/१२३४५६.png',
+  ]],
+  ['hidden numeric filename segment', 'local/screenshots/.123456.png'],
+  ['dot-delimited numeric filename segment', 'local/screenshot.123456.png'],
+  ['Windows numeric-only path segment', 'C:\\screenshots\\123456.png'],
+  ['Markdown-link verification label', '[verification code](https://example.com): ABCDEF'],
+  ['arbitrary configured comp-code filename', 'local/comp-code-PRIVATE-COMP-CODE.txt'],
+  ['arbitrary configured compact comp-code filename', 'local/comp-code-FREEPASS2026.txt'],
+]) {
+  check(`candidate identity rejects a ${name}`, () => {
+    for (const example of Array.isArray(value) ? value : [value]) {
+      let matrix = fillCandidateIdentities(actual.matrix, [1])
+      matrix = replaceRequired(
+        matrix,
+        '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+        `| Candidate receipt/checksum pointer | — | ${example} | — | — |`,
+      )
+      expectFailures({ ...actual, matrix }, [
+        'recorded candidate identity excludes prohibited sensitive data',
+      ])
+    }
+  })
+}
+
+check('candidate identity rejects a Markdown-wrapped bearer', () => {
+  let matrix = fillCandidateIdentities(actual.matrix, [1])
+  matrix = replaceRequired(
+    matrix,
+    '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+    '| Candidate receipt/checksum pointer | — | bearer: `abcdefghijklmnop` | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'recorded candidate identity excludes prohibited sensitive data',
+  ])
+})
+
+for (const [name, wrapper] of [
+  ['bold Markdown', '**'],
+  ['Unicode curly quotes', '“”'],
+  ['HTML code tags', '<code></code>'],
+]) {
+  check(`candidate identity rejects a bearer wrapped in ${name}`, () => {
+    let matrix = fillCandidateIdentities(actual.matrix, [1])
+    const [open, close] = wrapper === '“”'
+      ? [...wrapper]
+      : wrapper === '<code></code>'
+        ? ['<code>', '</code>']
+        : [wrapper, wrapper]
+    matrix = replaceRequired(
+      matrix,
+      '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+      `| Candidate receipt/checksum pointer | — | bearer: ${open}abcdefghijklmnop${close} | — | — |`,
+    )
+    expectFailures({ ...actual, matrix }, [
+      'recorded candidate identity excludes prohibited sensitive data',
+    ])
+  })
+}
+
+for (const [name, value] of [
+  ['Markdown-escaped delimiter', 'bearer\\: abcdefghijklmnop'],
+  ['zero-width delimiter', 'bearer:\u200Babcdefghijklmnop'],
+  ['HTML-entity quote wrapper', 'bearer: &quot;abcdefghijklmnop&quot;'],
+  ['numeric-entity code wrapper', 'bearer: &#96;abcdefghijklmnop&#96;'],
+  ['uppercase-hex numeric-entity delimiter', 'bearer&#X3A; abcdefghijklmnop'],
+  ['Markdown image wrapper', 'bearer: ![abcdefghijklmnop](token)'],
+  ['Markdown-link label', '[bearer](https://example.com): abcdefghijklmnop'],
+  ['percent-encoded delimiter', 'bearer%3A abcdefghijklmnop'],
+  ['deeply percent-encoded delimiter', 'bearer%25252525253A abcdefghijklmnop'],
+  ['semicolonless numeric-entity delimiter', 'bearer&#58 abcdefghijklmnop'],
+  ['semicolonless numeric-entity purchase-code separator', 'BUY&#45AAAA-BBBB-CCCC-DDDD-EEEE-FFFF'],
+  ['semicolonless numeric-entity Operator split', 'OPERA&#8203TOR-ABC123'],
+]) {
+  check(`candidate identity rejects a bearer with a ${name}`, () => {
+    let matrix = fillCandidateIdentities(actual.matrix, [1])
+    matrix = replaceRequired(
+      matrix,
+      '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+      `| Candidate receipt/checksum pointer | — | ${value} | — | — |`,
+    )
+    expectFailures({ ...actual, matrix }, [
+      'recorded candidate identity excludes prohibited sensitive data',
+    ])
+  })
+}
+
+check('secret-bearing N/A reasons are rejected', () => {
+  for (const secret of [
+    'verification_code=private-code',
+    `opr_${'A'.repeat(43)}`,
+    'josé@example.com',
+    'O/P/R/AAAA/AAAA',
+    'receipt_BUY-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF.png',
+    '<!-- bearer: abcdefghijklmnop -->',
+    '[verification](https://x.invalid)[ code](https://x.invalid): ABCDEF',
+    'verifi~~cation~~ code: ABCDEF',
+    'access-code-FREEPASS2026',
+  ]) {
     const matrix = replaceRequired(
-      fillCandidateIdentities(actual.matrix, [1]),
-      /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
-      `$1 — | PASS | — | — | iPad: ${evidence} |`,
+      actual.matrix,
+      'N/A — tablet only | — | N/A — tablet only | — | — |',
+      `N/A — tablet only ${secret} | — | N/A — tablet only | — | — |`,
+    )
+    expectFailures({ ...actual, matrix }, [
+      'recorded physical evidence excludes prohibited sensitive data',
+    ])
+  }
+})
+
+check('Markdown-wrapped bearer values in N/A reasons are rejected', () => {
+  const matrix = replaceRequired(
+    actual.matrix,
+    'N/A — tablet only | — | N/A — tablet only | — | — |',
+    'N/A — tablet only bearer: `abcdefghijklmnop` | — | N/A — tablet only | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'recorded physical evidence excludes prohibited sensitive data',
+  ])
+})
+
+check('bold Markdown bearer values in N/A reasons are rejected', () => {
+  const matrix = replaceRequired(
+    actual.matrix,
+    'N/A — tablet only | — | N/A — tablet only | — | — |',
+    'N/A — tablet only bearer: **abcdefghijklmnop** | — | N/A — tablet only | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'recorded physical evidence excludes prohibited sensitive data',
+  ])
+})
+
+check('prefixed Operator comp codes in N/A reasons are rejected', () => {
+  const matrix = replaceRequired(
+    actual.matrix,
+    'N/A — tablet only | — | N/A — tablet only | — | — |',
+    'N/A — tablet only comp-code-operator-abc123 | — | N/A — tablet only | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'recorded physical evidence excludes prohibited sensitive data',
+  ])
+})
+
+check('fullwidth six-digit values in N/A reasons are rejected', () => {
+  const matrix = replaceRequired(
+    actual.matrix,
+    'N/A — tablet only | — | N/A — tablet only | — | — |',
+    'N/A — tablet only code １２３４５６ | — | N/A — tablet only | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'recorded physical evidence excludes prohibited sensitive data',
+  ])
+})
+
+for (const [name, value] of [
+  ['redemption-equivalent device-link code', 'OPR/AAAA/AAAA'],
+  ['arbitrary configured comp code', 'comp-code-PRIVATE-COMP-CODE'],
+]) {
+  check(`${name} in N/A reasons is rejected`, () => {
+    const matrix = replaceRequired(
+      actual.matrix,
+      'N/A — tablet only | — | N/A — tablet only | — | — |',
+      `N/A — tablet only ${value} | — | N/A — tablet only | — | — |`,
     )
     expectFailures({ ...actual, matrix }, [
       'recorded physical evidence excludes prohibited sensitive data',
     ])
   })
 }
+
+check('candidate reviewed source commits require a full lowercase Git object ID', () => {
+  let matrix = fillCandidateIdentities(actual.matrix, [1])
+  matrix = replaceRequired(
+    matrix,
+    '| Reviewed source commit | — | 0123456789abcdef0123456789abcdef01234567 | — | — |',
+    '| Reviewed source commit | — | not-a-source-commit | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [
+    'candidate reviewed source commits use full 40-character lowercase Git object IDs',
+  ])
+})
+
+for (const [name, row, replacement] of [
+  [
+    'unrecorded malformed distribution channel',
+    '| Distribution channel (TestFlight / Play internal) | — | — | — | — |',
+    '| Distribution channel (TestFlight / Play internal) | — | TestFlight-123456 | — | — |',
+  ],
+  [
+    'unrecorded malformed version/build',
+    '| App version and build | — | — | — | — |',
+    '| App version and build | — | build-123456 | — | — |',
+  ],
+]) {
+  check(`candidate identity rejects an ${name}`, () => {
+    const matrix = replaceRequired(actual.matrix, row, replacement)
+    expectFailures({ ...actual, matrix }, [
+      'candidate identity values use valid field-specific formats before results are recorded',
+    ])
+  })
+}
+
+for (const [name, value] of [
+  ['missing timestamp', 'Tester iPad'],
+  ['arbitrary text', 'anything'],
+  ['impossible timestamp', 'Tester iPad · 2026-02-30T25:61:61-00:00'],
+  ['future timestamp', 'Tester iPad · 2099-01-01T00:00:00-05:00'],
+]) {
+  check(`recorded candidate identity rejects a tester value with ${name}`, () => {
+    const matrix = replaceRequired(
+      fillRepresentativeResults(),
+      'Tester iPad · 2026-08-16T12:00:00-05:00',
+      value,
+    )
+    expectFailures({ ...actual, matrix }, [
+      'candidate tester values use an identified local RFC3339 timestamp with a known offset',
+    ])
+  })
+}
+
+check('source-commit guard explicitly remains syntax-only until independent repository resolution', () => {
+  const matrix = replaceRequired(
+    actual.matrix,
+    '| Reviewed source commit | — | — | — | — |',
+    '| Reviewed source commit | — | 0000000000000000000000000000000000000000 | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [])
+})
+
+check('legitimate hashes, numbered pointers, and timestamps remain accepted', () => {
+  let matrix = fillCandidateIdentities(actual.matrix, [1])
+  matrix = replaceRequired(
+    matrix,
+    '| Reviewed source commit | — | 0123456789abcdef0123456789abcdef01234567 | — | — |',
+    '| Reviewed source commit | — | abcdef123456abcdef123456abcdef123456abcd | — | — |',
+  )
+  matrix = replaceRequired(
+    matrix,
+    '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+    '| Candidate receipt/checksum pointer | — | local/receipts/build-123456.ipa.sha256 | — | — |',
+  )
+  matrix = replaceRequired(
+    matrix,
+    '| Installed identity evidence pointer | — | ipad-identity | — | — |',
+    '| Installed identity evidence pointer | — | abcdef123456abcdef123456abcdef123456abcdef123456abcdef123456abcd | — | — |',
+  )
+  matrix = replaceRequired(
+    matrix,
+    '| Tester and local timestamp | — | Tester iPad · 2026-08-16T12:00:00-05:00 | — | — |',
+    '| Tester and local timestamp | — | Cole · 2026-08-16T12:30:00-05:00 | — | — |',
+  )
+  expectFailures({ ...actual, matrix }, [])
+
+  for (const timestamp of [
+    'Cole · 2026-08-16t12:30:00-05:00',
+    'Cole · 2026-08-16T12:30:00.123456-05:00',
+    'Cole · 2026-08-16T12:30:00.123456789-05:00',
+  ]) {
+    const rfc3339Variant = replaceRequired(
+      matrix,
+      'Cole · 2026-08-16T12:30:00-05:00',
+      timestamp,
+    )
+    expectFailures({ ...actual, matrix: rfc3339Variant }, [])
+  }
+})
 
 check('safe local evidence pointers and value-free blockers remain accepted', () => {
   const identified = fillCandidateIdentities(actual.matrix, [1])
@@ -753,6 +1557,152 @@ check('safe local evidence pointers and value-free blockers remain accepted', ()
   )
   expectFailures({ ...actual, matrix: withPointer }, [])
 
+  const withNumberedPointer = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: local/screenshots/build-123456.png |',
+  )
+  expectFailures({ ...actual, matrix: withNumberedPointer }, [])
+
+  const withBareNumberedFilename = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: build-123456.ipa.sha256 |',
+  )
+  expectFailures({ ...actual, matrix: withBareNumberedFilename }, [])
+
+  const withBareDigest = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: abcdef123456abcdef123456abcdef123456abcdef123456abcdef123456abcd |',
+  )
+  expectFailures({ ...actual, matrix: withBareDigest }, [])
+
+  const withPrefixedDigest = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: sha256:abcdef123456abcdef123456abcdef123456abcdef123456abcdef123456abcd |',
+  )
+  expectFailures({ ...actual, matrix: withPrefixedDigest }, [])
+
+  const withHyphenatedDigestLabels = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: SHA-256:abcdef123456abcdef123456abcdef123456abcdef123456abcdef123456abcd |',
+  )
+  expectFailures({ ...actual, matrix: withHyphenatedDigestLabels }, [])
+
+  const withSha1Digest = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: sha1:abcdef123456abcdef123456abcdef123456abcd |',
+  )
+  expectFailures({ ...actual, matrix: withSha1Digest }, [])
+
+  for (const pointer of [
+    '[candidate](local/receipts/build-123456.ipa.sha256)',
+    '[checksum](sha256:123456abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd)',
+  ]) {
+    const withMarkdownPointer = replaceRequired(
+      identified,
+      /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+      `$1 — | PASS | — | — | iPad: ${pointer} |`,
+    )
+    expectFailures({ ...actual, matrix: withMarkdownPointer }, [])
+  }
+
+  const withBareBuildPointer = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: build-123456 |',
+  )
+  expectFailures({ ...actual, matrix: withBareBuildPointer }, [])
+
+  const withPrefixedBuildPointer = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: ios-build-123456 |',
+  )
+  expectFailures({ ...actual, matrix: withPrefixedBuildPointer }, [])
+
+  const withSpacedExtensionlessPath = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: `local/build receipts/build-123456` |',
+  )
+  expectFailures({ ...actual, matrix: withSpacedExtensionlessPath }, [])
+
+  const withWindowsBuildPath = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: C:\\screenshots\\build-123456.png |',
+  )
+  expectFailures({ ...actual, matrix: withWindowsBuildPath }, [])
+
+  const withDensityFilenames = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: m02@2x.png |',
+  )
+  expectFailures({ ...actual, matrix: withDensityFilenames }, [])
+
+  let withCandidateDensityFilenames = replaceRequired(
+    identified,
+    '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+    '| Candidate receipt/checksum pointer | — | m02@2x.png | — | — |',
+  )
+  withCandidateDensityFilenames = replaceRequired(
+    withCandidateDensityFilenames,
+    '| Installed identity evidence pointer | — | ipad-identity | — | — |',
+    '| Installed identity evidence pointer | — | build6@3x.png | — | — |',
+  )
+  expectFailures({ ...actual, matrix: withCandidateDensityFilenames }, [])
+
+  const withSpacedLocalPath = replaceRequired(
+    identified,
+    /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+    '$1 — | PASS | — | — | iPad: `local/build receipts/build-123456.ipa` |',
+  )
+  expectFailures({ ...actual, matrix: withSpacedLocalPath }, [])
+
+  const withVerificationScreenshotFilename = replaceRequired(
+    identified,
+    '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+    '| Candidate receipt/checksum pointer | — | local/verification-code-screenshot.png | — | — |',
+  )
+  expectFailures({ ...actual, matrix: withVerificationScreenshotFilename }, [])
+
+  let withValueFreeFilename = replaceRequired(
+    identified,
+    '| Candidate receipt/checksum pointer | — | ipad-receipt | — | — |',
+    '| Candidate receipt/checksum pointer | — | local/verification-code-screenshot.png | — | — |',
+  )
+  withValueFreeFilename = replaceRequired(
+    withValueFreeFilename,
+    '| Installed identity evidence pointer | — | ipad-identity | — | — |',
+    '| Installed identity evidence pointer | — | local/comp-code-screenshot.png | — | — |',
+  )
+  withValueFreeFilename = replaceRequired(
+    withValueFreeFilename,
+    '| Candidate receipt/checksum pointer | — | local/verification-code-screenshot.png | — | — |',
+    '| Candidate receipt/checksum pointer | — | local/OPR-screenshot.png | — | — |',
+  )
+  expectFailures({ ...actual, matrix: withValueFreeFilename }, [])
+
+  for (const pointer of [
+    'local/comp-code-screenshot-ipad.png',
+    'local/comp-code-screenshot-dark.png',
+    'local/verification-code-screenshot-after.png',
+    'local/device-link-code-screenshot-android-tablet.png',
+  ]) {
+    const withQualifiedValueFreeFilename = replaceRequired(
+      identified,
+      '| Installed identity evidence pointer | — | ipad-identity | — | — |',
+      `| Installed identity evidence pointer | — | ${pointer} | — | — |`,
+    )
+    expectFailures({ ...actual, matrix: withQualifiedValueFreeFilename }, [])
+  }
+
   const withBlocker = replaceRequired(
     identified,
     /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
@@ -761,8 +1711,44 @@ check('safe local evidence pointers and value-free blockers remain accepted', ()
   expectFailures({ ...actual, matrix: withBlocker }, [])
 })
 
+check('physical evidence rejects a numeric-only pointer segment', () => {
+  for (const pointer of [
+    'local/screenshots/123456.png',
+    'local/screenshot123456.png',
+    'local/123456note.png',
+    'local/x123456y.png',
+    'local/123456/build-654321.png',
+    'C:\\screenshots\\123456\\build-654321.png',
+    'build-123456-654321.png',
+    'local/١٢٣٤٥٦.png',
+    'local/۱۲۳۴۵۶.png',
+    'local/१२३४५६.png',
+  ]) {
+    const matrix = replaceRequired(
+      fillCandidateIdentities(actual.matrix, [1]),
+      /^(\| M02 \|.*? \|) — \| — \| — \| — \| — \|$/m,
+      `$1 — | PASS | — | — | iPad: ${pointer} |`,
+    )
+    expectFailures({ ...actual, matrix }, [
+      'recorded physical evidence excludes prohibited sensitive data',
+    ])
+  }
+})
+
 check('weakening the evidence redaction rule fails closed', () => {
   const matrix = replaceRequired(actual.matrix, 'must not contain an email address', 'may contain an email address')
+  expectFailures(
+    { ...actual, matrix },
+    ['matrix evidence rules exclude credentials, identifiers, and reviewer-account deletion'],
+  )
+})
+
+check('weakening candidate-identity redaction scope fails closed', () => {
+  const matrix = replaceRequired(
+    actual.matrix,
+    'Candidate-identity values and evidence pointers may identify',
+    'Evidence pointers may identify',
+  )
   expectFailures(
     { ...actual, matrix },
     ['matrix evidence rules exclude credentials, identifiers, and reviewer-account deletion'],
@@ -819,8 +1805,8 @@ check('dropping a device class from candidate identity fails closed', () => {
 check('dropping the README physical-test caveat fails closed', () => {
   const readme = replaceRequired(
     actual.readme,
-    'A passing static check does not authorize submission and does not replace physical-device, sandbox-purchase, TestFlight, or Play internal-track testing.',
-    'A passing static check authorizes submission.',
+    'Neither command authorizes upload or submission or replaces physical-device, sandbox-purchase, TestFlight, or Play internal-track testing.',
+    'Both commands authorize upload and submission.',
   )
   expectFailures({ ...actual, readme }, [
     'store README keeps static checks subordinate to physical and store-channel testing',

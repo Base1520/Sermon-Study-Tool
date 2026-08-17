@@ -11,6 +11,8 @@ const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[
  */
 export function mobileVersionContract({
   desktopVersion,
+  desktopLockVersion,
+  desktopLockRootVersion,
   storeVersion,
   serverVersion,
   serverLockVersion,
@@ -22,6 +24,10 @@ export function mobileVersionContract({
     {
       ok: SEMVER.test(desktopVersion),
       message: 'Desktop package version is a valid release version',
+    },
+    {
+      ok: desktopLockVersion === desktopVersion && desktopLockRootVersion === desktopVersion,
+      message: 'Desktop lockfile version matches its package',
     },
     {
       ok: serverVersion === storeVersion,

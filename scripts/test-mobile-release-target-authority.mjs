@@ -1,96 +1,20 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+import {
+  readConsolePacketInput,
+} from './console-packet-retention.mjs'
+import {
+  authoritySemanticFailures,
+  lineContaining,
+  lineStarting,
+  stripInlineCode,
+} from './mobile-release-record-authority.mjs'
 
 const root = process.cwd()
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), 'utf8')
-}
-
-function lineStarting(text, prefix) {
-  return text.split(/\r?\n/).find((line) => line.startsWith(prefix)) || ''
-}
-
-function lineContaining(text, fragment) {
-  return text.split(/\r?\n/).find((line) => line.includes(fragment)) || ''
-}
-
-function hasUnmatchedInlineCode(text) {
-  return (text.match(/`/g) || []).length % 2 !== 0
-}
-
-function hasCurrentAuthorization(text, subjectPattern) {
-  if (hasUnmatchedInlineCode(text)) return false
-  const withoutInlineCode = text.replace(/`[^`\r\n]*`/g, ' ')
-
-  const strongPredicate = /\b(?:authoriz(?:e|ed)|approv(?:e|ed)|allow(?:ed)?|permit(?:ted)?|eligible|selectable|submittable|attachable|executable|proceed(?:s)?|submission path)\b/i
-  const actionPredicate = /\b(?:attach(?:ed)?|select(?:ed)?|submit(?:ted)?|ship(?:ped)?)\b/i
-  const modality = /\b(?:is|are|was|were|remains|stays|becomes|can|may|must|should|will)\b/i
-  const negation = /\b(?:not|never|cannot|must not|may not|should not|will not|do not|does not|did not|neither|no longer)\b/i
-  const noncurrent = /\b(?:historical|historically|previously|formerly|prior|archived|superseded|retroactive|until|once|later|future|pending|could|might|would)\b/i
-  const current = /\b(?:now|today|currently|at present)\b/i
-
-  const sentences = withoutInlineCode
-    .split(/[.!?;]+/)
-    .map((sentence) => sentence.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-
-  return sentences.some((sentence) => {
-    let subjectSeen = false
-    return sentence.split(/\b(?:but|however|yet)\b/i).some((segment) => {
-      if (subjectPattern.test(segment)) subjectSeen = true
-      if (!subjectSeen) return false
-      const affirms = strongPredicate.test(segment)
-        || (modality.test(segment) && actionPredicate.test(segment))
-      if (!affirms || negation.test(segment)) return false
-      if (noncurrent.test(segment) && !current.test(segment)) return false
-      return true
-    })
-  })
-}
-
-function hasBuild5Authorization(text) {
-  const normalized = text.replace(/\b1\.4\.2\s*\(5\)(?!\w)/gi, 'build 5')
-  return hasCurrentAuthorization(normalized, /\bbuild(?:\s+|-)5\b/i)
-}
-
-function hasBuild5CurrentCandidateLabel(text) {
-  if (hasUnmatchedInlineCode(text)) return false
-  const normalized = text
-    .replace(/`[^`\r\n]*`/g, ' ')
-    .replace(/\b1\.4\.2\s*\(5\)(?!\w)/gi, 'build 5')
-  const build5 = /\bbuild(?:\s+|-)5\b/i
-  const currentCandidate = /(?:\b(?:current(?:ly)?|now|today|at present)\b[^.!?;\n]{0,96}\bcandidate(?:\s+artifact)?\b|\bcandidate(?:\s+artifact)?\b[^.!?;\n]{0,96}\b(?:currently|now|today|at present)\b)/i
-  const labelVerb = /\b(?:is|are|remains|stays|becomes)\b/i
-  const negation = /\b(?:not|never|cannot|must not|may not|should not|will not|do not|does not|did not|neither|no longer)\b/i
-  const noncurrent = /\b(?:historical|historically|previously|formerly|prior|archived|superseded|retroactive|until|once|later|future|pending|could|might|would)\b/i
-
-  const sentences = normalized
-    .split(/[.!?;]+/)
-    .map((sentence) => sentence.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-
-  return sentences.some((sentence) => {
-    let subjectSeen = false
-    return sentence.split(/\b(?:but|however|yet)\b/i).some((segment) => {
-      if (build5.test(segment)) subjectSeen = true
-      if (!subjectSeen || !currentCandidate.test(segment) || !labelVerb.test(segment)) return false
-      if (negation.test(segment) || noncurrent.test(segment)) return false
-      return true
-    })
-  })
-}
-
-function hasBuild6SubmissionReadiness(text) {
-  if (hasUnmatchedInlineCode(text)) return false
-  const normalized = text
-    .replace(/`[^`\r\n]*`/g, ' ')
-    .replace(/\b1\.4\.2\s*\(6\)(?!\w)/gi, 'build 6')
-  return /\bbuild(?:\s+|-)6\b[^.!?;\n]*\b(?:ready for submission|ready to submit|submission-ready)\b/i.test(normalized)
-}
-
-function hasUnexpectedPathA(text) {
-  return hasCurrentAuthorization(text, /\bpath\s+a\b/i)
 }
 
 function validate({ checklist, ledger, matrix, applePacket, screenshots }) {
@@ -101,24 +25,56 @@ function validate({ checklist, ledger, matrix, applePacket, screenshots }) {
 
   const checklistAuthority = lineContaining(
     checklist,
-    'Submission-target authority reconciled',
+    '**Submission-target authority reconciled',
+    {
+      prefix: '  - ✅ **Submission-target authority reconciled',
+      singlePhysicalLine: true,
+    },
   )
-  const ledgerSummary = lineStarting(ledger, '> 🚀 **DESKTOP v1.4.4 IS LIVE')
-  const latestReconciliation = lineStarting(ledger, '> **LATEST RECONCILIATION')
-  const externalGate = lineStarting(ledger, '1. Historical build `1.4.2 (4)`')
-  const appleBuildBoundary = lineContaining(applePacket, 'Build boundary updated')
-  const screenshotHold = lineStarting(screenshots, '> Apple submission hold:')
-  const mobileSourceLineage = lineContaining(checklist, 'Mobile-source lineage, verified')
-  const latestUploadedArtifact = lineStarting(
+  const ledgerSummary = lineContaining(
+    ledger,
+    '🚀 **DESKTOP v1.4.4 IS LIVE AS OF',
+    {
+      prefix: '> 🚀 **DESKTOP v1.4.4 IS LIVE AS OF',
+      singlePhysicalLine: true,
+    },
+  )
+  const latestReconciliation = lineContaining(
+    ledger,
+    '**LATEST RECONCILIATION',
+    {
+      prefix: '> **LATEST RECONCILIATION',
+      singlePhysicalLine: true,
+    },
+  )
+  const externalGate = lineContaining(
+    ledger,
+    'are preserved but must not be attached, selected, or submitted. Build',
+    { prefix: '1. Historical builds `1.4.2 (4)` and `(5)`' },
+  )
+  const appleBuildBoundary = lineContaining(
+    applePacket,
+    '**Build boundary updated',
+    { prefix: '- **Build boundary updated' },
+  )
+  const screenshotHold = lineContaining(
+    screenshots,
+    'Apple submission hold:',
+    { prefix: '> Apple submission hold:' },
+  )
+  const mobileSourceLineage = lineContaining(
+    checklist,
+    '**Mobile-source lineage, verified',
+    { prefix: '  - **Mobile-source lineage, verified' },
+  )
+  const latestUploadedArtifact = lineContaining(
     ledger,
     '**The latest uploaded Apple artifact is build ',
+    { prefix: '**The latest uploaded Apple artifact is build ' },
   )
   const uploadedSourceMatch = mobileSourceLineage.match(
     /canonical release source for uploaded build (\d+) is `([0-9a-f]{40})`/,
   )
-  const currentSource = mobileSourceLineage.match(
-    /Local `HEAD` and `origin\/main` now resolve to descendant `([0-9a-f]{40})`/,
-  )?.[1] || ''
   const uploadedBuild = Number(uploadedSourceMatch?.[1] || 0)
   const uploadedSource = uploadedSourceMatch?.[2] || ''
 
@@ -128,12 +84,9 @@ function validate({ checklist, ledger, matrix, applePacket, screenshots }) {
     ['latest reconciliation', latestReconciliation],
   ]
 
-  for (const [name, row] of currentAuthorityRows) {
-    require(Boolean(row), `current ${name} records release-target authority`)
-    require(
-      !hasUnmatchedInlineCode(row),
-      `current ${name} has balanced inline-code delimiters`,
-    )
+  for (const [name, rawRow] of currentAuthorityRows) {
+    require(Boolean(rawRow), `current ${name} records release-target authority`)
+    const row = stripInlineCode(rawRow)
     require(
       row.includes('No recorded Cole decision between the historical Path A / Path B options is being invented.'),
       `current ${name} does not invent a historical Path A / Path B decision`,
@@ -162,62 +115,49 @@ function validate({ checklist, ledger, matrix, applePacket, screenshots }) {
       row.includes('unless Cole makes a new explicit decision'),
       `current ${name} preserves Cole's authority to change the path`,
     )
-    require(
-      !/Cole (?:already )?(?:chose|selected|approved) build 6/i.test(row),
-      `current ${name} does not falsely claim Cole chose build 6`,
-    )
-    require(
-      !hasUnexpectedPathA(row),
-      `current ${name} does not authorize historical Path A`,
-    )
-    require(
-      !hasBuild5Authorization(row),
-      `current ${name} contains no contradictory build-5 authorization`,
-    )
-    require(
-      !hasBuild6SubmissionReadiness(row),
-      `current ${name} does not falsely claim build 6 is submission-ready`,
-    )
+    failures.push(...authoritySemanticFailures(name, rawRow))
   }
 
   require(
-    !hasBuild5CurrentCandidateLabel(latestReconciliation),
-    'current latest reconciliation does not label build 5 as the current candidate',
-  )
-
-  require(
-    checklistAuthority.includes(
-      'the complete static gate remains intentionally red on its five recorded blockers',
+    stripInlineCode(checklistAuthority).includes(
+      'the complete static gate remains intentionally red on its three recorded blockers',
     ),
-    'current checklist authority row preserves the exact five-failure static board',
+    'current checklist authority row preserves the exact three-failure static board',
   )
 
   require(
-    latestReconciliation.includes(
-      'The five static failures remain: synchronized console-packet retention, current-source/uploaded-build lineage, packaged-bundle age, the Apple screenshot hold, and the Android screenshot hold',
+    stripInlineCode(latestReconciliation).includes(
+      'The three static failures remain: synchronized console-packet retention, the Apple screenshot hold, and the Android screenshot hold',
     ) &&
-      latestReconciliation.includes(
-        'The complete checker independently reproduces **174/1/5**.',
+      stripInlineCode(latestReconciliation).includes(
+        'The complete checker independently reproduces **179/1/3**.',
       ),
-    'current latest reconciliation preserves the exact five-failure static board',
+    'current latest reconciliation preserves the exact three-failure static board',
   )
 
   require(
-    uploadedBuild > 0 &&
+    uploadedBuild === 6 &&
       Boolean(uploadedSource) &&
-      Boolean(currentSource) &&
+      mobileSourceLineage.includes('Repository evidence may advance on clean pushed descendants of that immutable candidate only when all provenance-guarded mobile release inputs and synced native payloads remain byte-identical to the candidate') &&
+      mobileSourceLineage.includes('The pushed evidence tip is `4b25c05db5054da079202a4ab05daf1048ee5502`') &&
+      mobileSourceLineage.includes('Later pushed repository commits are permitted only by the exact pinned package-manifest transition while every other provenance-guarded input remains byte-identical to the evidence tip') &&
+      mobileSourceLineage.includes('receipt evidence must never redefine the candidate source') &&
       latestUploadedArtifact.includes(
-        `**The latest uploaded Apple artifact is build ${uploadedBuild}; no eligible App Store submission candidate currently exists.**`,
+        `**The latest uploaded Apple artifact is build ${uploadedBuild}; processing/selectability and listing attachment remain unproved.**`,
       ) &&
       latestUploadedArtifact.includes(
-        `Build ${uploadedBuild} is tied to historical pushed source \`${uploadedSource}\` and Xcode build number \`${uploadedBuild}\``,
+        `Build ${uploadedBuild} is tied to immutable tagged release source \`${uploadedSource}\` and Xcode build number \`${uploadedBuild}\``,
       ) &&
+      latestUploadedArtifact.includes('The pushed evidence tip is `4b25c05db5054da079202a4ab05daf1048ee5502`') &&
+      latestUploadedArtifact.includes('Later pushed repository commits are permitted only by the exact pinned package-manifest transition while every other provenance-guarded input remains byte-identical to the evidence tip') &&
       latestUploadedArtifact.includes(
-        `Current pushed source is \`${currentSource}\`, so provenance-clean build ${uploadedBuild + 1} is required before selection or submission.`,
+        'the upload receipt says only that the package is processing',
       ) &&
-      latestUploadedArtifact.includes('processing/selectability remains unverified') &&
-      !latestUploadedArtifact.includes('current uploaded App Store candidate'),
-    'release records distinguish the latest uploaded Apple artifact from an eligible submission candidate',
+      latestUploadedArtifact.includes('No later candidate is required for source parity') &&
+      latestUploadedArtifact.includes('must not be attached, selected, or submitted without a fresh approval after a real processing/selectability receipt') &&
+      !latestUploadedArtifact.includes('current eligible App Store submission candidate') &&
+      authoritySemanticFailures('uploaded artifact', latestUploadedArtifact).length === 0,
+    'release records keep uploaded build 6 processing-only and approval-bound',
   )
 
   require(
@@ -229,12 +169,15 @@ function validate({ checklist, ledger, matrix, applePacket, screenshots }) {
   )
 
   require(
-    externalGate.includes('Subsequent candidate evidence proves build 5 fails required C05') &&
-      externalGate.includes('without inventing a historical Cole choice') &&
-      externalGate.includes('build 5 must not be attached, selected, or submitted') &&
-      externalGate.includes('Produce provenance-clean build 6') &&
+    externalGate.includes('Historical builds `1.4.2 (4)` and `(5)` are preserved but must not be attached, selected, or submitted') &&
+      externalGate.includes('Build `1.4.2 (6)` is archived from the executed clean `v1.4.5` sync') &&
+      externalGate.includes('accepted by App Store Connect') &&
+      externalGate.includes('receipt says only that the package is processing') &&
+      externalGate.includes('Confirm build-6 processing completion/selectability') &&
       externalGate.includes('attach build 6') &&
-      externalGate.includes('only under separate fresh approval'),
+      externalGate.includes('only under separate fresh approval') &&
+      externalGate.includes('build-6-proven screenshot set') &&
+      authoritySemanticFailures('external gate', externalGate).length === 0,
     'external Apple gate keeps build 5 historical and build 6 approval-bound',
   )
 
@@ -244,14 +187,18 @@ function validate({ checklist, ledger, matrix, applePacket, screenshots }) {
       appleBuildBoundary.includes('build 5 fails required C05') &&
       appleBuildBoundary.includes('without inventing a historical Cole choice') &&
       appleBuildBoundary.includes('must NOT be attached, selected, or submitted') &&
-      appleBuildBoundary.includes('provenance-clean build **6**'),
-    'Apple completion packet derives the approval-bound build-6 boundary from C05',
+      appleBuildBoundary.includes('provenance-clean build **6**') &&
+      authoritySemanticFailures('Apple packet', applePacket).length === 0,
+    'retained Apple completion packet stays fail-closed as historical evidence',
   )
 
   require(
     screenshotHold.includes('build 5 fails required C05') &&
       screenshotHold.includes('build 6 is the current fail-closed final-screenshot path') &&
       screenshotHold.includes('without inventing a historical Cole choice') &&
+      screenshotHold.includes('Build 6 now exists as a source-bound uploaded artifact') &&
+      screenshotHold.includes('no final screenshot set is proven against its packaged UI') &&
+      screenshotHold.includes('pixel-equivalence of any reused build-5 draft against packaged build 6') &&
       screenshotHold.includes('build-6-proven replacements'),
     'screenshot hold derives build-6 final provenance from the build-5 failure',
   )
@@ -268,27 +215,419 @@ function expectFailures(name, sources, expected) {
   }
 }
 
+function expectFailureIncludes(name, sources, expected) {
+  const actual = validate(sources)
+  if (!actual.includes(expected)) {
+    throw new Error(`${name}: expected ${JSON.stringify(expected)} in ${JSON.stringify(actual)}`)
+  }
+}
+
 function replaceRequired(text, before, after, label) {
   const changed = text.replace(before, after)
   if (changed === text) throw new Error(`${label}: mutation did not change its input`)
   return changed
 }
 
+function sectionStarting(text, heading) {
+  const marker = `## ${heading}`
+  const start = text.indexOf(marker)
+  if (start === -1) throw new Error(`${heading}: section heading not found`)
+  const next = text.indexOf('\n## ', start + marker.length)
+  return text.slice(start, next === -1 ? text.length : next)
+}
+
+function runDirectReadinessWithSources({ checklist, ledger, applePacket, screenshots }) {
+  const harness = [
+    'import fs from "node:fs"',
+    'import path from "node:path"',
+    'const root = process.cwd()',
+    'const checklistPath = path.join(root, "store/release-checklist.md")',
+    'const ledgerPath = path.join(root, "store/release-ledger.md")',
+    'const applePacketPath = path.join(root, "store/apple-console-completion-packet.md")',
+    'const screenshotsPath = path.join(root, "store/screenshots.md")',
+    'const injected = JSON.parse(fs.readFileSync(0, "utf8"))',
+    'const originalRead = fs.readFileSync.bind(fs)',
+    'fs.readFileSync = (file, ...args) => {',
+    '  const resolved = path.resolve(String(file))',
+    '  if (resolved === checklistPath) return injected.checklist',
+    '  if (resolved === ledgerPath) return injected.ledger',
+    '  if (resolved === applePacketPath) return injected.applePacket',
+    '  if (resolved === screenshotsPath) return injected.screenshots',
+    '  return originalRead(file, ...args)',
+    '}',
+    'const originalLog = console.log.bind(console)',
+    'console.log = (...args) => {',
+    '  const value = args.join(" ")',
+    '  if (value.startsWith("FAIL") || value.includes("passed ·")) originalLog(value)',
+    '}',
+    'await import("./scripts/check-mobile-store-readiness.mjs?authority-fixture")',
+  ].join('\n')
+
+  return spawnSync(process.execPath, ['--input-type=module', '-e', harness], {
+    cwd: root,
+    encoding: 'utf8',
+    input: JSON.stringify({ checklist, ledger, applePacket, screenshots }),
+    maxBuffer: 4 * 1024 * 1024,
+  })
+}
+
+function expectDirectAuthorityFailure(
+  name,
+  checklist,
+  ledger = canonical.ledger,
+  expectedFailure = 'Release records preserve historical authority audit evidence and the processing-only build-6 boundary',
+  extraSources = {},
+) {
+  const sources = {
+    checklist,
+    ledger,
+    applePacket: extraSources.applePacket || canonical.applePacket,
+    screenshots: extraSources.screenshots || canonical.screenshots,
+  }
+  if (Object.entries(sources).every(([key, value]) => value === canonical[key])) {
+    throw new Error(`${name}: mutation did not change its input`)
+  }
+
+  const result = runDirectReadinessWithSources(sources)
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`
+  if (result.status !== 1 ||
+      !output.includes(`FAIL  ${expectedFailure}`) ||
+      !output.includes('178 passed · 1 warnings · 4 failed')) {
+    throw new Error(`${name}: unexpected result ${JSON.stringify({
+      status: result.status,
+      output: output.trim(),
+    })}`)
+  }
+}
+
+const applePacketInput = readConsolePacketInput({
+  root,
+  relative: 'store/apple-console-completion-packet.md',
+})
+
 const canonical = {
   checklist: read('store/release-checklist.md'),
   ledger: read('store/release-ledger.md'),
   matrix: read('store/mobile-physical-smoke-matrix.md'),
-  applePacket: read('store/apple-console-completion-packet.md'),
+  applePacket: applePacketInput.text,
   screenshots: read('store/screenshots.md'),
 }
 
 const tests = [
+  {
+    name: 'Console packet input is configured and readable: store/apple-console-completion-packet.md',
+    run() {
+      if (!applePacketInput.available) {
+        throw new Error('configured Apple completion packet input is unavailable')
+      }
+    },
+  },
+  ...(applePacketInput.available ? [
   {
     name: 'canonical records keep build 6 fail-closed without inventing Cole\'s decision',
     run() {
       expectFailures('canonical', canonical, [])
     },
   },
+  {
+    name: 'the direct readiness checker rejects inactive safe authority shadows across every release-boundary selector',
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const fence = '`'.repeat(3)
+      const checklist = canonical.checklist.replace(
+        authority,
+        `${fence}text\n${authority}\n${fence}\n${authority} Build 6 is submission-ready today.`,
+      )
+      expectDirectAuthorityFailure('direct-readiness-inactive-authority', checklist)
+
+      const sourceBoundary = lineContaining(
+        canonical.checklist,
+        'BUILD 6 ARCHIVE + DIRECT APP STORE CONNECT UPLOAD PROVEN',
+      )
+      const checklistWithSourceOverclaim = canonical.checklist.replace(
+        sourceBoundary,
+        `${fence}text\n${sourceBoundary}\n${fence}\n${sourceBoundary} Build 6 is processed and selectable today.`,
+      )
+      expectDirectAuthorityFailure(
+        'direct-build-6-archive-inactive-shadow',
+        checklistWithSourceOverclaim,
+        canonical.ledger,
+        'Release records bind the uploaded Apple build to its immutable source while the pushed evidence tip preserves release inputs',
+      )
+
+      const uploadedArtifact = lineContaining(
+        canonical.ledger,
+        '**The latest uploaded Apple artifact is build',
+      )
+      const ledger = canonical.ledger.replace(
+        uploadedArtifact,
+        `${fence}text\n${uploadedArtifact}\n${fence}\n${uploadedArtifact} Build 6 is processed and selectable today.`,
+      )
+      expectDirectAuthorityFailure(
+        'direct-uploaded-artifact-inactive-shadow',
+        canonical.checklist,
+        ledger,
+        'Release records bind the uploaded Apple build to its immutable source while the pushed evidence tip preserves release inputs',
+      )
+
+      const processingBoundary = lineContaining(
+        canonical.checklist,
+        'Processing/selectability remains unverified.',
+      )
+      const checklistWithProcessingOverclaim = canonical.checklist.replace(
+        processingBoundary,
+        `${fence}text\n${processingBoundary}\n${fence}\n${processingBoundary} Build 6 is processed and selectable today.`,
+      )
+      expectDirectAuthorityFailure(
+        'direct-processing-boundary-inactive-shadow',
+        checklistWithProcessingOverclaim,
+        canonical.ledger,
+        'Release checklist keeps every superseded Apple build out of the final selection path',
+      )
+
+      const boundaryCases = [
+        {
+          name: 'final-screenshot-boundary',
+          source: 'checklist',
+          marker: 'The remaining screenshot provenance failure is fail-closed',
+          expectedFailure: 'Release checklist keeps every superseded Apple build out of the final selection path',
+        },
+        {
+          name: 'preach-checklist-boundary',
+          source: 'checklist',
+          marker: 'Silent PREACH-gate affordance AUDIT CONFIRMED',
+          expectedFailure: 'Release checklist keeps every superseded Apple build out of the final selection path',
+        },
+        {
+          name: 'apple-open-ledger-boundary',
+          source: 'ledger',
+          marker: '**Still open in App Store Connect:**',
+          expectedFailure: 'Release ledger forward actions track uploaded build 6 without promoting processing',
+        },
+        {
+          name: 'preach-ledger-boundary',
+          source: 'ledger',
+          marker: '| PREACH not-ready affordance (build-6 packaged) |',
+          expectedFailure: 'Release ledger forward actions track uploaded build 6 without promoting processing',
+        },
+        {
+          name: 'ipad-screenshot-ledger-boundary',
+          source: 'ledger',
+          marker: '| iPad screenshots |',
+          expectedFailure: 'Release ledger forward actions track uploaded build 6 without promoting processing',
+        },
+        {
+          name: 'native-package-parity-ledger-boundary',
+          source: 'ledger',
+          marker: '| Native package artifact parity |',
+          expectedFailure: 'Release ledger binds build-6 package parity to its immutable tagged source',
+        },
+        {
+          name: 'apple-console-build-boundary',
+          source: 'applePacket',
+          marker: 'Build boundary updated',
+          expectedFailure: 'Release ledger forward actions track uploaded build 6 without promoting processing',
+        },
+        {
+          name: 'apple-screenshot-hold-boundary',
+          source: 'screenshots',
+          marker: 'Apple submission hold:',
+          expectedFailure: 'Release ledger forward actions track uploaded build 6 without promoting processing',
+        },
+      ]
+      for (const boundaryCase of boundaryCases) {
+        const original = canonical[boundaryCase.source]
+        const boundary = lineContaining(original, boundaryCase.marker)
+        const mutated = original.replace(
+          boundary,
+          `${fence}text\n${boundary}\n${fence}\n${boundary} Build 6 is processed and selectable today.`,
+        )
+        const sources = {
+          checklist: canonical.checklist,
+          ledger: canonical.ledger,
+          applePacket: canonical.applePacket,
+          screenshots: canonical.screenshots,
+          [boundaryCase.source]: mutated,
+        }
+        expectDirectAuthorityFailure(
+          `direct-${boundaryCase.name}-inactive-shadow`,
+          sources.checklist,
+          sources.ledger,
+          boundaryCase.expectedFailure,
+          {
+            applePacket: sources.applePacket,
+            screenshots: sources.screenshots,
+          },
+        )
+      }
+
+      for (const sectionName of ['External release gates', 'Signing evidence still required']) {
+        const section = sectionStarting(canonical.ledger, sectionName)
+        const ledgerWithSectionOverclaim = canonical.ledger.replace(
+          section,
+          `${fence}text\n${section}\n${fence}\n${section}\nBuild 6 is processed and selectable today.`,
+        )
+        expectDirectAuthorityFailure(
+          `direct-${sectionName.toLowerCase().replaceAll(' ', '-')}-inactive-shadow`,
+          canonical.checklist,
+          ledgerWithSectionOverclaim,
+          'Release ledger forward actions track uploaded build 6 without promoting processing',
+        )
+      }
+    },
+  },
+  {
+    name: 'the direct readiness checker rejects a blockquote-nested reference definition',
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `> [authority-shadow]: / "${authority}"`,
+      )
+      expectDirectAuthorityFailure('direct-blockquote-reference', checklist)
+    },
+  },
+  {
+    name: 'the direct readiness checker rejects a blockquote-nested fenced block',
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `> ~~~md\n> ${authority}\n> ~~~`,
+      )
+      expectDirectAuthorityFailure('direct-blockquote-fence', checklist)
+    },
+  },
+  {
+    name: 'the direct readiness checker rejects a blockquote-nested raw HTML block',
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `> <div>\n> ${authority}\n> </div>\n>`,
+      )
+      expectDirectAuthorityFailure('direct-blockquote-raw-html', checklist)
+    },
+  },
+  {
+    name: 'the direct readiness checker rejects a multiline inline-code authority row',
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `\`\n${authority}\n\``,
+      )
+      expectDirectAuthorityFailure('direct-multiline-inline-code', checklist)
+    },
+  },
+  {
+    name: 'the direct readiness checker rejects a multiline reference-definition title',
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `[authority-shadow]:\n  /destination\n  "${authority}"`,
+      )
+      expectDirectAuthorityFailure('direct-multiline-reference-title', checklist)
+    },
+  },
+  {
+    name: 'the direct readiness checker rejects authority text in an inline HTML attribute',
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `ordinary prose <span title="${authority}">shadow</span>`,
+      )
+      expectDirectAuthorityFailure('direct-inline-html-attribute', checklist)
+    },
+  },
+  {
+    name: 'the direct readiness checker rejects two authority markers on one active line',
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `${authority} **Submission-target authority reconciled**`,
+      )
+      expectDirectAuthorityFailure('direct-same-line-duplicate', checklist)
+    },
+  },
+  ...[
+    ['Path A authorization', 'Path A is authorized now.'],
+    ['build-5 selectability', 'Build 5 remains selectable for submission today.'],
+    ['build-6 processing', 'Build 6 is processed and selectable today.'],
+    ['invented Cole decision', 'Cole already chose build 6.'],
+  ].map(([label, overclaim]) => ({
+    name: `the direct readiness checker rejects ${label}`,
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(authority, `${authority} ${overclaim}`)
+      expectDirectAuthorityFailure(`direct-${label.replaceAll(' ', '-')}`, checklist)
+    },
+  })),
+  {
+    name: 'the direct readiness checker rejects an overclaim in the current ledger summary',
+    run() {
+      const summary = lineStarting(canonical.ledger, '> 🚀 **DESKTOP v1.4.4 IS LIVE')
+      const ledger = canonical.ledger.replace(
+        summary,
+        `${summary} Build 5 remains selectable for submission today.`,
+      )
+      expectDirectAuthorityFailure('direct-ledger-summary-overclaim', canonical.checklist, ledger)
+    },
+  },
+  ...[
+    ['lazy', ''],
+    ['four-space', '    '],
+    ['six-space', '      '],
+  ].map(([label, indentation]) => ({
+    name: `the direct readiness checker rejects a ${label} checklist authority continuation`,
+    run() {
+      const authority = lineContaining(canonical.checklist, '**Submission-target authority reconciled')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `${authority}\n${indentation}Build 6 is submission-ready today.`,
+      )
+      expectDirectAuthorityFailure(`direct-checklist-${label}-continuation`, checklist)
+    },
+  })),
+  ...[
+    [
+      'ledger summary',
+      '🚀 **DESKTOP v1.4.4 IS LIVE AS OF',
+      'Build 5 remains selectable for submission today.',
+    ],
+    [
+      'historical ledger authority record',
+      '**HISTORICAL AUTHORITY AUDIT RECORD —',
+      'Build 6 is submission-ready today.',
+    ],
+    [
+      'current ledger authority record',
+      '**CURRENT POST-BUILD-6 AUTHORITY RECORD —',
+      'Build 6 is processed and selectable today.',
+    ],
+    [
+      'latest reconciliation',
+      '**LATEST RECONCILIATION —',
+      'Build 6 is submission-ready today.',
+    ],
+  ].map(([label, marker, overclaim]) => ({
+    name: `the direct readiness checker rejects a ${label} blockquote continuation`,
+    run() {
+      const authority = lineContaining(canonical.ledger, marker)
+      const ledger = canonical.ledger.replace(
+        authority,
+        `${authority}\n> ${overclaim}`,
+      )
+      expectDirectAuthorityFailure(
+        `direct-${label.replaceAll(' ', '-')}-continuation`,
+        canonical.checklist,
+        ledger,
+      )
+    },
+  })),
   {
     name: 'authorizing historical Path A in the current ledger summary fails closed',
     run() {
@@ -421,21 +760,21 @@ const tests = [
     },
   },
   {
-    name: 'the latest reconciliation cannot regress to the pre-retention static board',
+    name: 'the latest reconciliation cannot regress to a four-failure static board',
     run() {
       const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
       const mutatedLatest = latest
-        .replaceAll('174/1/5', '174/1/4')
+        .replaceAll('179/1/3', '178/1/4')
         .replace(
-          'The five static failures remain: synchronized console-packet retention, current-source/uploaded-build lineage, packaged-bundle age, the Apple screenshot hold, and the Android screenshot hold',
-          'The four static failures remain: current-source/uploaded-build lineage, packaged-bundle age, the Apple screenshot hold, and the Android screenshot hold',
+          'The three static failures remain: synchronized console-packet retention, the Apple screenshot hold, and the Android screenshot hold',
+          'The four static failures remain: synchronized console-packet retention, packaged-bundle age, the Apple screenshot hold, and the Android screenshot hold',
         )
       if (mutatedLatest === latest) {
         throw new Error('latest-static-board: mutation did not change its input')
       }
       const ledger = canonical.ledger.replace(latest, mutatedLatest)
       expectFailures('latest-static-board', { ...canonical, ledger }, [
-        'current latest reconciliation preserves the exact five-failure static board',
+        'current latest reconciliation preserves the exact three-failure static board',
       ])
     },
   },
@@ -444,26 +783,26 @@ const tests = [
     run() {
       const checklist = replaceRequired(
         canonical.checklist,
-        'the complete static gate remains intentionally red on its five recorded blockers',
+        'the complete static gate remains intentionally red on its three recorded blockers',
         'the complete static gate remains intentionally red on its four recorded blockers',
         'checklist-static-board',
       )
       expectFailures('checklist-static-board', { ...canonical, checklist }, [
-        'current checklist authority row preserves the exact five-failure static board',
+        'current checklist authority row preserves the exact three-failure static board',
       ])
     },
   },
   {
-    name: 'the latest uploaded Apple artifact cannot be called the current candidate',
+    name: 'uploaded build 6 cannot be called an eligible submission candidate',
     run() {
       const ledger = replaceRequired(
         canonical.ledger,
-        '**The latest uploaded Apple artifact is build 5; no eligible App Store submission candidate currently exists.**',
-        '**The current uploaded App Store candidate artifact is build 5.**',
-        'latest-artifact-current-candidate',
+        '**The latest uploaded Apple artifact is build 6; processing/selectability and listing attachment remain unproved.**',
+        '**The current eligible App Store submission candidate is build 6.**',
+        'latest-artifact-eligible-candidate',
       )
-      expectFailures('latest-artifact-current-candidate', { ...canonical, ledger }, [
-        'release records distinguish the latest uploaded Apple artifact from an eligible submission candidate',
+      expectFailures('latest-artifact-eligible-candidate', { ...canonical, ledger }, [
+        'release records keep uploaded build 6 processing-only and approval-bound',
       ])
     },
   },
@@ -481,15 +820,15 @@ const tests = [
     },
   },
   {
-    name: 'a reverse-order build alias cannot hide the current-candidate label',
+    name: 'the latest reconciliation cannot claim build 6 is processed or selectable',
     run() {
       const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
       const ledger = canonical.ledger.replace(
         latest,
-        `${latest} 1.4.2 (5) remains the current App Store submission candidate.`,
+        `${latest} Build 6 is processed and selectable today.`,
       )
-      expectFailures('latest-build-5-current-candidate-alias', { ...canonical, ledger }, [
-        'current latest reconciliation does not label build 5 as the current candidate',
+      expectFailures('latest-build-6-processed-selectable', { ...canonical, ledger }, [
+        'current latest reconciliation does not falsely claim build 6 is processed or selectable',
       ])
     },
   },
@@ -536,13 +875,190 @@ const tests = [
     },
   },
   {
+    name: 'a fenced safe reconciliation cannot shadow an active build-5 authorization',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const unsafe = `${latest} Build 5 remains selectable for submission today.`
+      const ledger = canonical.ledger.replace(
+        latest,
+        `\`\`\`text\n${latest}\n\`\`\`\n${unsafe}`,
+      )
+      expectFailureIncludes('fenced-reconciliation-shadow', { ...canonical, ledger },
+        'current latest reconciliation contains no contradictory build-5 authorization')
+    },
+  },
+  {
+    name: 'an HTML-commented safe reconciliation cannot shadow an active build-5 authorization',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const unsafe = `${latest} Build 5 remains selectable for submission today.`
+      const ledger = canonical.ledger.replace(
+        latest,
+        `<!--\n${latest}\n-->\n${unsafe}`,
+      )
+      expectFailureIncludes('commented-reconciliation-shadow', { ...canonical, ledger },
+        'current latest reconciliation contains no contradictory build-5 authorization')
+    },
+  },
+  {
+    name: 'a raw-HTML safe reconciliation cannot shadow an active build-5 authorization',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const unsafe = `${latest} Build 5 remains selectable for submission today.`
+      const ledger = canonical.ledger.replace(
+        latest,
+        `<div>\n${latest}\n</div>\n\n${unsafe}`,
+      )
+      expectFailureIncludes('raw-html-reconciliation-shadow', { ...canonical, ledger },
+        'current latest reconciliation contains no contradictory build-5 authorization')
+    },
+  },
+  {
+    name: 'an indented-code safe checklist row cannot shadow active Path A authorization',
+    run() {
+      const authority = lineContaining(canonical.checklist, 'Submission-target authority reconciled')
+      const unsafe = `${authority} Path A is authorized now;`
+      const checklist = canonical.checklist.replace(
+        authority,
+        `    ${authority.trimStart()}\n${unsafe}`,
+      )
+      expectFailureIncludes('indented-checklist-shadow', { ...canonical, checklist },
+        'current checklist does not authorize historical Path A')
+    },
+  },
+  {
+    name: 'a reference-definition safe checklist row cannot shadow active Path A authorization',
+    run() {
+      const authority = lineContaining(canonical.checklist, 'Submission-target authority reconciled')
+      const unsafe = `${authority} Path A is authorized now;`
+      const checklist = canonical.checklist.replace(
+        authority,
+        `[authority-shadow]: / "${authority}"\n${unsafe}`,
+      )
+      expectFailureIncludes('reference-definition-checklist-shadow', { ...canonical, checklist },
+        'current checklist does not authorize historical Path A')
+    },
+  },
+  {
+    name: 'an inline-code safe checklist row cannot shadow active Path A authorization',
+    run() {
+      const authority = lineContaining(canonical.checklist, 'Submission-target authority reconciled')
+      const unsafe = `${authority} Path A is authorized now;`
+      const checklist = canonical.checklist.replace(
+        authority,
+        `\`${authority}\`\n${unsafe}`,
+      )
+      expectFailureIncludes('inline-code-checklist-shadow', { ...canonical, checklist },
+        'current checklist does not authorize historical Path A')
+    },
+  },
+  {
+    name: 'a longer inline-code span cannot shadow active Path A authorization',
+    run() {
+      const authority = lineContaining(canonical.checklist, 'Submission-target authority reconciled')
+      const unsafe = `${authority} Path A is authorized now;`
+      const checklist = canonical.checklist.replace(
+        authority,
+        `\`\`${authority}\`\`\n${unsafe}`,
+      )
+      expectFailureIncludes('longer-inline-code-checklist-shadow', { ...canonical, checklist },
+        'current checklist does not authorize historical Path A')
+    },
+  },
+  {
+    name: 'a longer inline-code span cannot supply active authority evidence',
+    run() {
+      const authority = lineContaining(canonical.checklist, 'Submission-target authority reconciled')
+      const headingEnd = authority.indexOf('.** ') + 4
+      if (headingEnd < 4) throw new Error('longer-inline-code-authority: heading boundary missing')
+      const checklist = canonical.checklist.replace(
+        authority,
+        `${authority.slice(0, headingEnd)}\`\`${authority.slice(headingEnd)}\`\``,
+      )
+      expectFailureIncludes('longer-inline-code-authority', { ...canonical, checklist },
+        'current checklist does not invent a historical Path A / Path B decision')
+    },
+  },
+  {
+    name: 'multiple active latest-reconciliation markers fail closed',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const ledger = canonical.ledger.replace(
+        latest,
+        `${latest}\n${latest} Build 5 remains selectable for submission today.`,
+      )
+      expectFailureIncludes('duplicate-active-reconciliation', { ...canonical, ledger },
+        'current latest reconciliation records release-target authority')
+    },
+  },
+  {
+    name: 'a one-space container prefix cannot hide a duplicate latest reconciliation',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const ledger = canonical.ledger.replace(
+        latest,
+        `${latest}\n ${latest} Build 5 remains selectable for submission today.`,
+      )
+      expectFailureIncludes('one-space-duplicate-reconciliation', { ...canonical, ledger },
+        'current latest reconciliation records release-target authority')
+    },
+  },
+  {
+    name: 'a three-space container prefix cannot hide a duplicate latest reconciliation',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const ledger = canonical.ledger.replace(
+        latest,
+        `${latest}\n   ${latest} Build 5 remains selectable for submission today.`,
+      )
+      expectFailureIncludes('three-space-duplicate-reconciliation', { ...canonical, ledger },
+        'current latest reconciliation records release-target authority')
+    },
+  },
+  {
+    name: 'a list-nested block quote cannot hide a duplicate latest reconciliation',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const ledger = canonical.ledger.replace(
+        latest,
+        `${latest}\n- ${latest} Build 5 remains selectable for submission today.`,
+      )
+      expectFailureIncludes('list-nested-duplicate-reconciliation', { ...canonical, ledger },
+        'current latest reconciliation records release-target authority')
+    },
+  },
+  {
+    name: 'a no-space block quote marker cannot hide a duplicate latest reconciliation',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const ledger = canonical.ledger.replace(
+        latest,
+        `${latest}\n>${latest.slice(2)} Build 5 remains selectable for submission today.`,
+      )
+      expectFailureIncludes('no-space-duplicate-reconciliation', { ...canonical, ledger },
+        'current latest reconciliation records release-target authority')
+    },
+  },
+  {
+    name: 'a nested block quote cannot hide a duplicate latest reconciliation',
+    run() {
+      const latest = lineStarting(canonical.ledger, '> **LATEST RECONCILIATION')
+      const ledger = canonical.ledger.replace(
+        latest,
+        `${latest}\n> ${latest} Build 5 remains selectable for submission today.`,
+      )
+      expectFailureIncludes('nested-duplicate-reconciliation', { ...canonical, ledger },
+        'current latest reconciliation records release-target authority')
+    },
+  },
+  {
     name: 'weakening the detailed external Apple gate fails closed',
     run() {
-      const external = lineStarting(canonical.ledger, '1. Historical build `1.4.2 (4)`')
+      const external = lineStarting(canonical.ledger, '1. Historical builds `1.4.2 (4)` and `(5)`')
       const mutatedExternal = replaceRequired(
         external,
-        'build 5 must not be attached, selected, or submitted',
-        'build 5 may be selected',
+        'Historical builds `1.4.2 (4)` and `(5)` are preserved but must not be attached, selected, or submitted',
+        'Historical builds `1.4.2 (4)` and `(5)` are preserved and may be selected',
         'external-build-5-selection',
       )
       const ledger = canonical.ledger.replace(external, mutatedExternal)
@@ -565,6 +1081,7 @@ const tests = [
       ])
     },
   },
+  ] : []),
 ]
 
 let failed = 0

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "platform": "apple",
+  "status": "hold",
+  "reviewedSourceCommit": null,
+  "buildIdentity": {
+    "bundleId": "com.base1520.theoperator",
+    "marketingVersion": "1.4.2",
+    "buildNumber": 6
+  },
+  "visualReview": {
+    "result": "HOLD",
+    "reviewedBy": "Codex",
+    "reviewedAt": "2026-08-16T18:17:21-05:00"
+  },
+  "screenshots": [
+    {
+      "path": "store/assets/screenshots/ios-iphone-submission/00-quick-study-start.png",
+      "sha256": "1d224d7488bbf2af47ba1497ec58c8180b22bd405d6d4ce6f4bf9b936dd7af5f"
+    },
+    {
+      "path": "store/assets/screenshots/ios-iphone-submission/01-quick-study.png",
+      "sha256": "e2ce65229a191251bf62282640ea9b8decec77c06a371b67861e066d174c1e34"
+    },
+    {
+      "path": "store/assets/screenshots/ios-ipad-submission/00-covenant-plain-study.png",
+      "sha256": "2aa9d9a234d68d695fd6838143767e4d90d68d5d180db9b7f9cd2016ef6537f8"
+    },
+    {
+      "path": "store/assets/screenshots/ios-ipad-submission/01-infinite-sermon-desk.png",
+      "sha256": "c711c510616421b7b979b2c6aa50df13715991ae22ef3c9ac3e24ccee9fd5b37"
+    },
+    {
+      "path": "store/assets/screenshots/ios-ipad-submission/02-preach-mode.png",
+      "sha256": "92684f929765d31644e5b1383cb23900eead04d355e529267eb2856d84aed835"
+    }
+  ]
+}

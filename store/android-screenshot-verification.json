@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "platform": "android",
+  "status": "hold",
+  "reviewedSourceCommit": null,
+  "buildIdentity": {
+    "applicationId": "com.base1520.theoperator",
+    "versionName": "1.4.2",
+    "versionCode": 1
+  },
+  "visualReview": {
+    "result": "HOLD",
+    "reviewedBy": "Codex",
+    "reviewedAt": "2026-08-16T16:56:01-05:00"
+  },
+  "screenshots": [
+    {
+      "path": "store/assets/screenshots/android-phone/00-quick-study-start.png",
+      "sha256": "f4257ee464b2f5a1992a373b39ba995063a96f438a44721507c20ff6ddc5fdac"
+    },
+    {
+      "path": "store/assets/screenshots/android-phone/01-quick-study.png",
+      "sha256": "9ea4846c0d2f7847cd24d4f234992b76169f233504c147091512a3054f387beb"
+    },
+    {
+      "path": "store/assets/screenshots/android-tablet-7/00-guided-study.png",
+      "sha256": "52471e90804d02d1c0921bf8831f85128c4563db88cc13a5edd3b1ded878c753"
+    },
+    {
+      "path": "store/assets/screenshots/android-tablet-7/01-infinite-sermon-desk.png",
+      "sha256": "04f5676bb8a28f4be299ae0ee4388b652f0950e6097c70d8114c9ac1b41753e6"
+    },
+    {
+      "path": "store/assets/screenshots/android-tablet-10/00-guided-study.png",
+      "sha256": "5024d52e394e367bca2230649e1303f9cc839f6ae0e28bce19dcb71bf7f5248e"
+    },
+    {
+      "path": "store/assets/screenshots/android-tablet-10/01-infinite-sermon-desk.png",
+      "sha256": "c25c28f87ee40b50f7e63d68733b6035faf3aa752a8e06488f503c784fc19086"
+    }
+  ]
+}

@@ -10,6 +10,45 @@ const schema = readinessSource.match(/const SCHEMA_VERSION = '([^']+)'/)?.[1] ||
 const sourcePrivacy = fs.readFileSync(path.join(root, 'website/operator-privacy-addendum.html'), 'utf8')
 const variant = process.env.OPERATOR_TEST_PRIVACY_VARIANT || 'complete'
 const capabilityVariant = process.env.OPERATOR_TEST_CAPABILITY_VARIANT || 'all-ready'
+const requestProfile = process.env.OPERATOR_TEST_REQUEST_PROFILE || 'full'
+
+const expectedRequestsByProfile = {
+  full: [
+    'GET api.example.test/health',
+    'POST api.example.test/v1/quick-study',
+    'POST api.example.test/v1/guided-study',
+    'POST api.example.test/v1/ask',
+    'POST api.example.test/v1/sermon-assist',
+    'POST api.example.test/v1/iap/verify',
+    'GET api.example.test/v1/studies/00000000-0000-4000-8000-000000000000/commentary',
+    'PATCH api.example.test/v1/studies/00000000-0000-4000-8000-000000000000/workspace',
+    'GET www.base1520.com/operator/privacy/',
+    'GET www.base1520.com/operator/terms/',
+    'GET www.base1520.com/operator/account-deletion/',
+    'GET www.base1520.com/contact/',
+  ],
+  'public-get': [
+    'GET api.example.test/health',
+    'GET www.base1520.com/operator/privacy/',
+    'GET www.base1520.com/operator/terms/',
+    'GET www.base1520.com/operator/account-deletion/',
+    'GET www.base1520.com/contact/',
+  ],
+  none: [],
+}
+
+const expectedRequests = expectedRequestsByProfile[requestProfile]
+if (!expectedRequests) throw new Error(`Unknown request fixture profile: ${requestProfile}`)
+const seenRequests = []
+let requestProfileChecked = false
+
+process.on('beforeExit', () => {
+  if (requestProfileChecked) return
+  requestProfileChecked = true
+  if (JSON.stringify(seenRequests) !== JSON.stringify(expectedRequests)) {
+    throw new Error(`Request profile mismatch: expected ${JSON.stringify(expectedRequests)}, received ${JSON.stringify(seenRequests)}`)
+  }
+})
 
 const replacements = {
   'missing-ip-hash': [
@@ -74,9 +113,16 @@ function response(url, status, body, jsonBody = null) {
   }
 }
 
-globalThis.fetch = async (input) => {
+globalThis.fetch = async (input, options = {}) => {
   const url = String(input)
   const parsed = new URL(url)
+  const method = String(options.method || 'GET').toUpperCase()
+  const requestKey = `${method} ${parsed.hostname}${parsed.pathname}`
+  seenRequests.push(requestKey)
+
+  if (!expectedRequests.includes(requestKey)) {
+    throw new Error(`${requestProfile} fixture rejected ${method} ${parsed.pathname}`)
+  }
 
   if (parsed.hostname === 'api.example.test' && parsed.pathname === '/health') {
     return response(url, 200, '', {

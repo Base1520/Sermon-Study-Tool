@@ -33,3 +33,7 @@ store/external-artifacts.md
 store/console-action-packet.md
 store/topup-refund-remediation.md
 store/morning-report-*.md
+
+# Console completion packets: sensitive working docs, live in the vault; present locally for the release gate, never committed (public repo)
+store/apple-console-completion-packet.md
+store/google-console-completion-packet.md

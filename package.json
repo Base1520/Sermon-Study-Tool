@@ -1,6 +1,6 @@
 {
   "name": "the-operator",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "description": "Study any passage of Scripture in its own context \u2014 what the author meant, how you know, and what to do with it.",
   "main": "electron/main.js",
   "featureFlags": {
@@ -22,7 +22,8 @@
     "mobile:android": "npm run mobile:sync && npx cap open android",
     "mobile:store:assets": "bash scripts/render-store-assets.sh",
     "mobile:store:check": "node scripts/test-mobile-release-target-authority.mjs && node scripts/test-mobile-physical-smoke-matrix.mjs && node scripts/test-desktop-restored-study-field-test.mjs && node scripts/test-theology-external-artifact.mjs && node scripts/test-console-packet-retention.mjs && node scripts/check-mobile-store-readiness.mjs",
-    "mobile:store:check:live": "node scripts/check-mobile-store-live.mjs",
+    "mobile:store:check:public": "OPERATOR_LIVE_PROBE_MODE=public-get node scripts/check-mobile-store-live.mjs",
+    "mobile:store:check:live": "OPERATOR_LIVE_PROBE_MODE=full node scripts/check-mobile-store-live.mjs",
     "test:mobile-store-live": "node scripts/test-mobile-store-live.mjs",
     "test:mobile-release-target-authority": "node scripts/test-mobile-release-target-authority.mjs",
     "test:mobile-physical-smoke-matrix": "node scripts/test-mobile-physical-smoke-matrix.mjs",

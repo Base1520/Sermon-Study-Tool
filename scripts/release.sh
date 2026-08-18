@@ -27,6 +27,25 @@ if ! SCRIPT_PATH=$(/bin/realpath "$SCRIPT_PATH"); then
   echo 'Could not resolve the physical release driver path.' >&2
   exit 1
 fi
+# The realpath above binds the release to this physical checkout, but the entry
+# path the caller used must BE that checkout. Entering through a symlinked
+# script means the caller's tree — its package.json, its guards — is not the
+# tree that gets released; refuse instead of silently releasing the real
+# repository from an adjacent directory. (Directory-level symlinks such as
+# /var -> /private/var are resolved with pwd -P and are not refused.) Without this refusal the
+# provenance suite's symlink probe re-entered a FULL release and recursed
+# (each level's test gate spawned the next), which is how the v1.4.6 Mac
+# packages came to be built by a nested probe on 2026-08-17.
+ENTRY_PATH=${BASH_SOURCE[0]}
+case "$ENTRY_PATH" in
+  /*) ;;
+  *) ENTRY_PATH="$INVOCATION_ROOT/$ENTRY_PATH" ;;
+esac
+if [ -L "$ENTRY_PATH" ] ||
+  [ "$(cd -- "${ENTRY_PATH%/*}" 2>/dev/null && pwd -P)/${ENTRY_PATH##*/}" != "$SCRIPT_PATH" ]; then
+  echo "Release entry $ENTRY_PATH is not the physical script $SCRIPT_PATH; run scripts/release.sh from its own checkout." >&2
+  exit 1
+fi
 # Privileged Bash ignores startup hooks and exported functions itself, but it
 # otherwise passes their environment entries to later plain-Bash test/helper
 # children. Re-exec only when one is present, removing every such entry so no

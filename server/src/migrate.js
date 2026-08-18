@@ -74,6 +74,33 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
     ? `comp codes seeded (${CODES.length})`
     : 'no comp codes in OPERATOR_COMP_CODES — none seeded')
 
+  /**
+   * App Review device-link codes ride the same lane as comp codes, but as
+   * sha256 HASHES only: OPERATOR_REVIEW_LINK_HASHES="hex64,hex64,…". The
+   * plaintext is minted offline (`node src/review-access.js --mint`) and lives
+   * only in the stores' private reviewer fields. Seeding is idempotent and
+   * never revokes, and — like a comp-code typo — a malformed value must not
+   * take the API offline: it is logged and skipped.
+   */
+  const reviewHashRaw = String(process.env.OPERATOR_REVIEW_LINK_HASHES || '')
+  const reviewHashCandidates = reviewHashRaw.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)
+  const reviewHashes = reviewHashCandidates.filter((x) => /^[0-9a-f]{64}$/.test(x))
+  if (reviewHashCandidates.length !== reviewHashes.length) {
+    console.error(`[review-access] ignoring ${reviewHashCandidates.length - reviewHashes.length} malformed review link hash entr(y/ies)`)
+  }
+  if (reviewHashes.length) {
+    const { seedReviewLinkHashes, ReviewAccessError, REVIEW_ACCOUNT_EMAIL } = require('./review-access')
+    try {
+      const seeded = await seedReviewLinkHashes(db, { hashes: reviewHashes })
+      console.log(`review link codes seeded on ${REVIEW_ACCOUNT_EMAIL} (${seeded.inserted} new, ${seeded.existing} already present)`)
+    } catch (error) {
+      if (!(error instanceof ReviewAccessError)) throw error
+      console.error(`[review-access] not seeded: ${error.message}`)
+    }
+  } else {
+    console.log('no review link hashes in OPERATOR_REVIEW_LINK_HASHES — none seeded')
+  }
+
   const adminEmails = String(process.env.OPERATOR_ADMIN_EMAILS || '')
     .split(',')
     .map((value) => value.trim().toLowerCase())

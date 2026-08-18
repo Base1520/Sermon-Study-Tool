@@ -127,6 +127,52 @@ async function test(name, fn) {
     }, { reference: 'John 3:16', text: passage, translation: 'kjv', vaultSourced: false }), /anchor/i)
   })
 
+  // Field bug 2026-08-17 (beta tester, TestFlight build 6): a two-verse memory
+  // text was refused because the two-anchor floor applied to a ~33-word passage
+  // whose only quotable clause repeats verbatim in both verses.
+  const shortPassage = 'Then shall two be in the field; the one shall be taken, and the other left. Two women shall be grinding at the mill; the one shall be taken, and the other left.'
+  const shortBase = {
+    ...base,
+    mainClaim: 'At Christ’s coming, people side by side in ordinary work will be divided: one taken, one left.',
+    textEvidence: [{ words: 'the one shall be taken, and the other left', shows: 'The division is sudden and individual, not by group.' }],
+    keyTerms: [{ term: 'taken', meaning: 'Removed from where one stood.', whyItMatters: 'The word marks the separation the passage announces.' }],
+    sourceAnchors: {
+      mainClaim: ['the one shall be taken, and the other left'],
+      context: ['two be in the field'],
+      wholeBible: ['grinding at the mill'],
+    },
+  }
+  const shortOptions = { reference: 'Matthew 24:40-41', text: shortPassage, translation: 'kjv', vaultSourced: false }
+
+  await test('a short two-verse passage passes with ONE distinct verbatim anchor', () => {
+    const result = validateQuickStudy(shortBase, shortOptions)
+    assert.strictEqual(result.textEvidence.length, 1)
+  })
+
+  await test('a repeated clause quoted twice cannot satisfy the two-anchor floor on a long passage', () => {
+    assert.throws(() => validateQuickStudy({
+      ...base,
+      textEvidence: [
+        { words: 'God so loved the world', shows: 'The giving begins in love.' },
+        { words: 'God so loved the world', shows: 'Said again, still one clause.' },
+      ],
+    }, { reference: 'John 3:16', text: `${passage} ${passage}`, translation: 'kjv', vaultSourced: false }), /anchor/i)
+  })
+
+  await test('a short passage with only invented evidence is still refused', () => {
+    assert.throws(() => validateQuickStudy({
+      ...shortBase,
+      textEvidence: [{ words: 'the gates of Rome', shows: 'This was invented.' }],
+    }, shortOptions), /anchor/i)
+  })
+
+  await test('a long passage still demands two distinct anchors', () => {
+    assert.throws(() => validateQuickStudy({
+      ...base,
+      textEvidence: [{ words: 'God so loved the world', shows: 'One anchor only.' }],
+    }, { reference: 'John 3:16', text: `${passage} ${passage} ${passage}`, translation: 'kjv', vaultSourced: false }), /anchor/i)
+  })
+
   await test('key terms must be visible in the supplied translation', () => {
     const result = validateQuickStudy({
       ...base,

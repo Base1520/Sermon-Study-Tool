@@ -8,6 +8,8 @@ const QUICK_STUDY_MODEL = 'claude-haiku-4-5-20251001'
 const QUICK_STUDY_PROMPT_VERSION = 3
 const QUICK_STUDY_VALIDATOR_VERSION = 3
 const QUICK_STUDY_MAX_TOKENS = 1200
+/** Passages shorter than this need one distinct verbatim anchor; longer need two. */
+const QUICK_STUDY_TWO_ANCHOR_WORDS = 40
 
 function cleanText(value, max = 1800) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max)
@@ -77,15 +79,31 @@ function validateQuickStudy(raw, { reference, text, translation, vaultNotes = []
     throw new Error('The quick study left out a required section.')
   }
 
+  const seenEvidence = new Set()
   const textEvidence = (Array.isArray(raw.textEvidence) ? raw.textEvidence : [])
     .map((item) => ({
       words: cleanText(item?.words, 260),
       shows: cleanText(item?.shows, 450),
     }))
     .filter((item) => item.words && item.shows && appearsMeaningfullyInPassage(item.words, text))
+    // The same quoted words twice is one anchor, not two — a repeated clause
+    // (Matthew 24:40-41 says "the one shall be taken, and the other left" in
+    // both verses) must not satisfy the count on its own.
+    .filter((item) => {
+      const key = comparable(item.words)
+      if (seenEvidence.has(key)) return false
+      seenEvidence.add(key)
+      return true
+    })
     .slice(0, 3)
   const passageWordCount = comparable(text).split(' ').filter(Boolean).length
-  const minimumEvidence = passageWordCount <= 6 ? 1 : 2
+  // A short passage cannot supply two DISTINCT verbatim anchors and still be
+  // studied honestly — a two-verse memory text (~30 words) has one real clause
+  // to quote. The old cutoff (six words) only spared single-phrase inputs and
+  // rejected every two-verse passage a Sunday-school teacher would type; a
+  // beta tester hit it on Matthew 24:40-41 the first day. Longer passages keep
+  // the two-anchor floor so a lazy study cannot ride on one lucky quote.
+  const minimumEvidence = passageWordCount < QUICK_STUDY_TWO_ANCHOR_WORDS ? 1 : 2
   if (textEvidence.length < minimumEvidence) {
     throw new Error('The quick study did not anchor its claim in enough of the passage text.')
   }

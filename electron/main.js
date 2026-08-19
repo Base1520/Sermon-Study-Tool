@@ -2179,6 +2179,51 @@ ipcMain.handle('export-pdf', async (_, { html, reference }) => {
 // ── Specialist Agent Chat (Exegetical / Theological / Homiletical) ────────────
 ipcMain.handle('agent-chat', async (event, { agentType, messages, passageContext, streamId }) => {
   requireFeature('gen.agents')
+
+  // ── HOSTED ────────────────────────────────────────────────────────────────
+  // The Scholar got this branch on 2026-08-15; the other three specialists did
+  // not, so on a hosted build Exegetical / Theological / Homiletical fell
+  // straight through to requireSecret and answered every question with the
+  // "not on our servers yet — needs your own key" dead end (Clint, Matthew
+  // 23:27-28, 2026-08-19). /v1/sermon-assist has accepted all four roles all
+  // along, so this is the same wiring gap, closed the same way: resolve the
+  // finished-study id from the passage, send the newest user turn as the
+  // question and the rest as history, return the answer as a string. No id is
+  // not a wall — the server answers as a standing conversation in that agent's
+  // discipline and says it is ungrounded. The local-key branch below is
+  // untouched for builds without OPERATOR_API_URL.
+  if (hosted.hostedBaseUrl()) {
+    const role = ['exegetical', 'theological', 'homiletical', 'scholar'].includes(agentType)
+      ? agentType
+      : 'exegetical'
+    const { studyId } = resolveScholarChatContext(passageContext)
+    const list = Array.isArray(messages)
+      ? messages.filter((m) => m && typeof m.content === 'string')
+      : []
+    let lastUserIdx = -1
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].role === 'user') { lastUserIdx = i; break }
+    }
+    if (lastUserIdx === -1) {
+      throw asRendererError(new Error(`Ask the ${role} agent a question first.`))
+    }
+    const question = list[lastUserIdx].content.trim()
+    const history = list.slice(0, lastUserIdx).map((m) => ({ role: m.role, content: m.content }))
+    try {
+      const reply = await hosted.sermonAssist(store, {
+        studyId: studyId ?? null,
+        agent: role,
+        question,
+        history,
+      })
+      // AgentChat assigns the return value straight into the assistant bubble
+      // (its streamId listener is optional), so this must be a plain string.
+      return String(reply?.answer ?? '')
+    } catch (e) {
+      throw asRendererError(e)
+    }
+  }
+
   const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')
   const client = new Anthropic.default({ apiKey })
   const profile = store?.get('scholar-profile', null)

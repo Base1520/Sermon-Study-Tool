@@ -143,6 +143,20 @@ function validate(input) {
   if (!input.electronMain.includes('studyId: studyId ?? null')) {
     failures.push('electron/main.js must send the null studyId that makes the Scholar a standing chat')
   }
+  // The other three specialists (Clint, 2026-08-19): on a hosted build the
+  // agent-chat handler must reach hosted.sermonAssist with the agent role before
+  // it can ever ask for a local Anthropic key — otherwise every Exegetical /
+  // Theological / Homiletical question answers with the "not on our servers
+  // yet" dead end while the Scholar works.
+  const agentHandlerStart = input.electronMain.indexOf("ipcMain.handle('agent-chat'")
+  const agentHandler = agentHandlerStart === -1 ? '' : input.electronMain.slice(agentHandlerStart, agentHandlerStart + 6000)
+  const hostedAt = agentHandler.indexOf('hosted.sermonAssist(store, {')
+  const keyAt = agentHandler.indexOf("requireSecret('ANTHROPIC_KEY'")
+  if (hostedAt === -1 || keyAt === -1 || hostedAt > keyAt
+    || !agentHandler.slice(0, hostedAt).includes('if (hosted.hostedBaseUrl()) {')
+    || !agentHandler.slice(hostedAt, keyAt).includes('agent: role')) {
+    failures.push('electron/main.js agent-chat must route exegetical/theological/homiletical through hosted.sermonAssist before any local key lookup')
+  }
   if (input.packet.includes('emits the finished-study/library message when it is absent')
     || !input.packet.includes('when it is absent, the current standing-chat path sends a null ID and answers generally instead of emitting the retired library refusal.')) {
     failures.push('field packet source basis matches the current standing-chat behavior')
@@ -332,6 +346,39 @@ check('restoring the retired finished-study refusal to the source basis fails cl
   )
   expectFailures({ ...canonical, packet }, [
     'field packet source basis matches the current standing-chat behavior',
+  ])
+})
+
+check('dropping the hosted branch from agent-chat fails closed', () => {
+  const electronMain = replaceRequired(
+    canonical.electronMain,
+    "  if (hosted.hostedBaseUrl()) {\n    const role = ['exegetical', 'theological', 'homiletical', 'scholar'].includes(agentType)",
+    "  if (false) {\n    const role = ['exegetical', 'theological', 'homiletical', 'scholar'].includes(agentType)",
+  )
+  expectFailures({ ...canonical, electronMain }, [
+    'electron/main.js agent-chat must route exegetical/theological/homiletical through hosted.sermonAssist before any local key lookup',
+  ])
+})
+
+check('sending the wrong agent role from agent-chat fails closed', () => {
+  const electronMain = replaceRequired(
+    canonical.electronMain,
+    "        agent: role,\n        question,\n        history,\n      })\n      // AgentChat assigns",
+    "        agent: 'scholar',\n        question,\n        history,\n      })\n      // AgentChat assigns",
+  )
+  expectFailures({ ...canonical, electronMain }, [
+    'electron/main.js agent-chat must route exegetical/theological/homiletical through hosted.sermonAssist before any local key lookup',
+  ])
+})
+
+check('asking for the local key before the hosted agent branch fails closed', () => {
+  const electronMain = replaceRequired(
+    canonical.electronMain,
+    "  requireFeature('gen.agents')\n\n  // ── HOSTED",
+    "  requireFeature('gen.agents')\n  const apiKey = requireSecret('ANTHROPIC_KEY', 'Anthropic')\n\n  // ── HOSTED",
+  )
+  expectFailures({ ...canonical, electronMain }, [
+    'electron/main.js agent-chat must route exegetical/theological/homiletical through hosted.sermonAssist before any local key lookup',
   ])
 })
 

@@ -336,9 +336,12 @@ const withEnv = async (url, fn) => {
       { hostedBaseUrl: () => 'https://api.example.com' },
     )
 
+    // One definition, three consumers: the read-only context IPC, scholar-chat,
+    // and (since 2026-08-19) agent-chat — Exegetical / Theological / Homiletical
+    // ground themselves through the SAME resolver rather than a private copy.
     ok('main owns one shared Scholar context resolver',
-      mainSource.includes('const resolveScholarChatContext = (passageContext) =>')
-        && (mainSource.match(/resolveScholarChatContext\(passageContext\)/g) || []).length === 2)
+      (mainSource.match(/const resolveScholarChatContext = \(passageContext\) =>/g) || []).length === 1
+        && (mainSource.match(/resolveScholarChatContext\(passageContext\)/g) || []).length === 3)
     registry.rememberStudy('John 3:16', 'analysis-1')
     ok('an analysis claim stays rideable without pretending a finished study exists',
       registry.recallStudy('John 3:16') === 'analysis-1'

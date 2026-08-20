@@ -277,7 +277,11 @@ body:has(.mobile-app), body:has(.mobile-intro) {
 .tablet-sync-conflict button:disabled { opacity: .5; }
 .tablet-desk-notice { position: absolute; z-index: 47; top: 122px; left: 14px; display: flex; align-items: center; gap: 10px; max-width: calc(100% - 28px); padding: 10px 12px; border: 1px solid rgba(229, 190, 73, .55); color: #f5f2e8; background: rgba(65, 42, 10, .96); box-shadow: 0 18px 45px rgba(0, 0, 0, .55); font: 800 8px/1.35 'Saira', sans-serif; letter-spacing: .06em; }
 .tablet-desk-notice button { width: 28px; height: 28px; flex: 0 0 auto; border: 1px solid rgba(229, 190, 73, .35); color: #e5be49; background: transparent; font-size: 16px; }
-.tablet-sermon-desk > .react-flow { position: absolute; inset: 112px 0 0; width: auto; height: auto; }
+/* React Flow forces inline height:100% of the PARENT, so with top:112px the
+   canvas bottom ran 112px past the desk — which is why the bottom-anchored
+   FIELD MAP clipped off-screen on real iPads. The height must subtract the
+   command bar, and must out-specify React Flow's own inline style. */
+.tablet-sermon-desk > .react-flow { position: absolute; inset: 112px 0 0; width: 100% !important; height: calc(100% - 112px) !important; }
 .tablet-sermon-desk .react-flow__pane { cursor: grab; }
 .tablet-sermon-desk .react-flow__pane:active { cursor: grabbing; }
 .tablet-sermon-desk .react-flow__node { cursor: default; }

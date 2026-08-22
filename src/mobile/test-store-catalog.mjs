@@ -26,7 +26,8 @@ const check = (name, condition, detail = '') => {
 
 const iosDefinitions = catalog.products.filter((product) => product.plan !== 'heavy_annual')
 const iosProducts = iosDefinitions.map((definition) => ({ identifier: definition.appleProductId }))
-const androidProducts = catalog.products.map((definition) => ({
+const androidDefinitions = catalog.products.filter((product) => product.plan !== 'heavy_annual')
+const androidProducts = androidDefinitions.map((definition) => ({
   identifier: definition.androidBasePlanId,
   planIdentifier: definition.googleProductId,
 }))
@@ -37,8 +38,12 @@ check(
   JSON.stringify(requireCompleteStoreCatalog(iosDefinitions, iosProducts, 'ios')) === JSON.stringify([0, 1, 2, 3, 4]),
 )
 check(
-  'all six Google Play base plans resolve in catalog order',
-  JSON.stringify(requireCompleteStoreCatalog(catalog.products, androidProducts, 'android')) === JSON.stringify([0, 1, 2, 3, 4, 5]),
+  'all five Google Play base plans resolve in catalog order (Heavy Annual is web-only: Play caps USD at $999.99)',
+  JSON.stringify(requireCompleteStoreCatalog(androidDefinitions, androidProducts, 'android')) === JSON.stringify([0, 1, 2, 3, 4]),
+)
+check(
+  'Heavy Annual is excluded from the Android definitions',
+  !androidDefinitions.some((definition) => definition.plan === 'heavy_annual'),
 )
 
 console.log('\nPARTIAL CATALOG FAILS CLOSED')

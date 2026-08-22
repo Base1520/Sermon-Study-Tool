@@ -375,12 +375,12 @@ const googleConsoleRows = catalog.products.map((product) => {
 })
 
 check(
-  /platform === ['"]ios['"]\s*\?\s*catalog\.products\.filter\(\(product\) => product\.plan !== ['"]heavy_annual['"]\)\s*:\s*catalog\.products/.test(mobileStore) &&
+  /function catalogForPlatform\(platform: StorePlatform\) \{\s*void platform\s*return catalog\.products\.filter\(\(product\) => product\.plan !== ['"]heavy_annual['"]\)/.test(mobileStore) &&
     /const definitions = catalogForPlatform\(platform\)/.test(mobileStore) &&
     /productIdentifiers: \[\.\.\.new Set\(definitions\.map/.test(mobileStore) &&
     /const productIndexes = requireCompleteStoreCatalog\(definitions, products, platform\)/.test(mobileStore) &&
     /return definitions\.map/.test(mobileStore),
-  'iOS excludes the uneconomic Heavy Annual plan from both StoreKit requests and rendered plans',
+  'both native stores exclude the web-only Heavy Annual plan from store requests and rendered plans (Apple ceiling; Play cap $999.99 USD)',
 )
 
 check(
@@ -1211,9 +1211,10 @@ check(
 )
 check(
   serverIndex.includes("releaseStage() !== 'full'")
-    // Declaration + Ask + sermon-assist stay in index; Quick + Guided moved.
-    && (serverIndex.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 3
-    && (generationRoutes.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 2,
+    // Declaration + Read + Ask + sermon-assist stay in index; Analyze, Quick,
+    // and Guided live in the extracted generation router.
+    && (serverIndex.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 4
+    && (generationRoutes.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 3,
   'The full store backend requires a verified account before generated spend',
 )
 check(accountRecovery.includes('account_recovery_request') && serverSchema.includes('CREATE TABLE IF NOT EXISTS account_recovery_request'), 'Known and unknown recovery emails share the same persistent cooldown ledger')
@@ -1274,7 +1275,12 @@ check(
 check(tabletDeskModel.includes('MAX_TABLET_DESK_NODES = 32') && tabletDesk.includes('DESK FULL') && tabletDesk.includes('NOTHING WAS DELETED'), 'The Infinite Desk refuses excess tiles visibly instead of dropping them')
 check(mobileApi.includes('MAX_STUDY_NOTES_CHARS = 20_000') && mobileApp.includes('maxLength={MAX_STUDY_NOTES_CHARS}') && mobileRoutes.includes('normalizeStudyNotes'), 'Field-note limits match across client and server without silent truncation')
 check(mobileApp.includes('archiveConfirmId') && mobileApp.includes('restoreStudy') && mobileApp.includes("showArchived ? 'HIDE' : 'SHOW'"), 'Archiving requires confirmation and exposes undo and restore controls')
-check(generationRoutes.includes('passage: existing.rows[0].passage') && localStudies.includes('syncedPassage?.verses'), 'Cross-device studies preserve verse divisions and copyright when reopening')
+check(
+  (generationRoutes.match(/passage: existingStudy\.passage \|\|/g) || []).length === 2 &&
+    localStudies.includes('syncedPassage?.verses') &&
+    localStudies.includes('syncedPassage?.copyright'),
+  'Cross-device studies preserve verse divisions and copyright when reopening',
+)
 check(!mobileApp.includes('IN-APP CHECKOUT IS WIRED, NOT LIVE IN THIS DEVELOPMENT BUILD'), 'Submitted UI contains no development-build checkout message')
 check(readiness.includes('configurationChecks(env, CORE_CONFIGURATION)'), 'Optional providers degrade independently instead of taking down every store')
 check(!mobileApp.includes("await openExternal(await createBillingPortal())\n      } else") || mobileApp.includes('if (nativePlatform) throw new Error'), 'Native builds do not route digital subscription management into Stripe checkout')

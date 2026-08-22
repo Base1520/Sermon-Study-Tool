@@ -38,10 +38,15 @@ export function isStoreFinalizationPendingError(error: unknown): error is StoreF
 
 type StorePlatform = 'ios' | 'android'
 
+// Heavy Annual ($1,649.99) is web-only. Apple's subscription ceiling could not
+// represent it profitably, and Google Play's hard price cap is $999.99 USD
+// (£810 / €940 / ₩600,000 — every currency rejected it on 2026-08-22), so
+// neither native store can carry it. Both platforms therefore request the same
+// five products; the catalog keeps the heavy_annual definition for web/Stripe
+// and defensive receipt recognition only.
 function catalogForPlatform(platform: StorePlatform) {
-  return platform === 'ios'
-    ? catalog.products.filter((product) => product.plan !== 'heavy_annual')
-    : catalog.products
+  void platform
+  return catalog.products.filter((product) => product.plan !== 'heavy_annual')
 }
 
 function nativePlatform(): StorePlatform | null {

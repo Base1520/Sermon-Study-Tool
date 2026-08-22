@@ -1,6 +1,6 @@
 # Store Products
 
-> PRICE LOCK — updated 2026-08-12: Starter is `$29.99 / $299.99`, Standard is `$49.99 / $499.99`, and Heavy is `$149.99` monthly on iOS. Heavy Annual remains `$1,649.99` on web and Google Play because Apple's subscription ceiling cannot represent it profitably.
+> PRICE LOCK — updated 2026-08-22: Starter is `$29.99 / $299.99`, Standard is `$49.99 / $499.99`, and Heavy is `$149.99` monthly on iOS **and Google Play**. Heavy Annual (`$1,649.99`) is **web-only**: Apple's subscription ceiling cannot represent it profitably, and Google Play's hard price cap is `$999.99` USD (£810 / €940 / ₩600,000 — every currency rejected it on 2026-08-22). Cole ruled 2026-08-22: Heavy Annual is purchased on desktop/web only, never in the mobile apps.
 
 ## Shared rules
 
@@ -29,7 +29,7 @@ Each product description should state its monthly study allowance and renewal pe
 
 ## Google Play
 
-Create one subscription product named `The Operator Access` with product ID `com.base1520.theoperator.subscription`. Add six auto-renewing base plans:
+Create one subscription product named `The Operator Access` with product ID `com.base1520.theoperator.subscription`. Add **five** auto-renewing base plans (created and Active 2026-08-22; `standard-annual` excludes South Korea because Play caps KRW at ₩600,000):
 
 | Base plan ID | Period | Price | Monthly allowance |
 |---|---:|---:|---:|
@@ -38,9 +38,9 @@ Create one subscription product named `The Operator Access` with product ID `com
 | `standard-monthly` | P1M | $49.99 | 80 |
 | `standard-annual` | P1Y | $499.99 | 80 |
 | `heavy-monthly` | P1M | $149.99 | 300 |
-| `heavy-annual` | P1Y | $1,649.99 | 300 |
+| ~~`heavy-annual`~~ | P1Y | ~~$1,649.99~~ | 300 | **NOT on Play** — Play's USD cap is $999.99; web-only (identifier kept in `iap-products.json` for defensive recognition) |
 
-Use the same benefits copy and pricing across each platform's purchasable catalog, app UI, website, and receipt-verification service. The deliberate platform exception is Heavy Annual: web and Google Play may offer `$1,649.99`; iOS must not request or render it. Keep its identifier in `server/src/iap-products.json` for Android mapping and defensive receipt recognition. Do not create legacy in-app products for digital access.
+Use the same benefits copy and pricing across each platform's purchasable catalog, app UI, website, and receipt-verification service. The deliberate platform exception is Heavy Annual: **web only** at `$1,649.99`; neither iOS nor Android may request or render it (`catalogForPlatform` excludes it for both since 2026-08-22). Keep its identifier in `server/src/iap-products.json` for web/Stripe and defensive receipt recognition. Do not create legacy in-app products for digital access.
 
 ## Before product creation
 

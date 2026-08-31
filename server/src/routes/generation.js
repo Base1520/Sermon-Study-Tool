@@ -94,6 +94,11 @@ function mount(app, db, {
         route: 'analyze',
         requestId,
         payload: { text, reference },
+        // main used `const studyId = newStudyId()` here and the shipped desktop
+        // sends no requestId, so a hard requirement would break Analyze for every
+        // installed copy. quick-study and guided-study below stay strict: they
+        // already 400 without one on main, and the mobile client sends it.
+        allowSynthetic: true,
       })
     } catch {
       return res.status(400).json({

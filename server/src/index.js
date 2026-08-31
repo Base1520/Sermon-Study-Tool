@@ -705,6 +705,10 @@ function sendIdempotentResult(res, result) {
   return res.status(result.status).json(result.body)
 }
 
+// allowSynthetic: ask and sermon-assist minted random ids on main
+// (`ask-${newStudyId()}`, `sermon-assist-${newStudyId()}`) and no shipped client
+// sends a requestId for either. Requiring one here would 400 every installed
+// desktop and the iOS build currently in App Review. See request-idempotency.js.
 function describeModelRequest(req, routeName, requestId, payload) {
   try {
     return requestIdempotency.describe({
@@ -712,6 +716,7 @@ function describeModelRequest(req, routeName, requestId, payload) {
       route: routeName,
       requestId,
       payload,
+      allowSynthetic: true,
     })
   } catch {
     return null

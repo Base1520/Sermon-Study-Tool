@@ -111,3 +111,69 @@ test('every study route binds saved output to payload identity and settlement', 
   assert.equal((source.match(/const settlement = await reconcilePersistedStudy\(\{ db, meter, engine, studyId \}\)/g) || []).length, 3)
   assert.equal((source.match(/markStudyReservationAccountingUncertain\(db, studyId\)/g) || []).length >= 4, true)
 })
+
+test('a missing requestId is refused by default and synthesised only where opted in', () => {
+  // Default posture is unchanged: no opt-in, no id, no reservation.
+  assert.throws(
+    () => describe({ ownerId: 'account-a', route: 'ask', payload: {} }),
+    /valid requestId/,
+  )
+  // A supplied id is never replaced, and is not flagged synthetic.
+  const supplied = describe({
+    ownerId: 'account-a', route: 'ask', requestId: 'request-00000001', payload: {}, allowSynthetic: true,
+  })
+  assert.equal(supplied.synthetic, false)
+  assert.equal(
+    supplied.id,
+    describe({ ownerId: 'account-a', route: 'ask', requestId: 'request-00000001', payload: {} }).id,
+    'opting in must not change the id derived from a real requestId',
+  )
+})
+
+test('synthesised requests are unique per call, so a legacy client can never collide with a stored row', () => {
+  const ids = new Set()
+  for (let i = 0; i < 500; i += 1) {
+    const built = describe({
+      ownerId: 'account-a',
+      route: 'ask',
+      // Every shape a legacy client can produce: absent, empty, or malformed.
+      requestId: [undefined, '', 'short', 'spaces are invalid'][i % 4],
+      payload: { question: 'identical every time' },
+      allowSynthetic: true,
+    })
+    assert.equal(built.synthetic, true)
+    ids.add(built.id)
+  }
+  // Identical owner, route and payload every iteration. Before this change these
+  // would have been one id; the whole point is that they are 500.
+  assert.equal(ids.size, 500, 'synthesised ids must never repeat')
+
+  // A synthesised id therefore never matches a stored row, so the replay and
+  // conflict branches stay unreachable — exactly main's pre-idempotency behaviour.
+  assert.equal(classifyAskRow(null, 'any-hash').kind, 'new')
+})
+
+test('only the three routes that minted their own ids on main may synthesise one', () => {
+  // Guard against a future edit quietly loosening quick-study or guided-study,
+  // which have always required a client requestId and whose shipped mobile client
+  // sends one. Loosening them would silently disable study idempotency.
+  const generation = fs.readFileSync(path.join(__dirname, 'routes/generation.js'), 'utf8')
+  const at = (marker) => {
+    const i = generation.indexOf(marker)
+    assert.ok(i >= 0, `${marker} not found`)
+    return i
+  }
+  const analyze = generation.slice(at("app.post('/v1/analyze'"), at("app.post('/v1/quick-study'"))
+  const strict = generation.slice(at("app.post('/v1/quick-study'"))
+  assert.ok(analyze.includes('allowSynthetic: true'), 'analyze must tolerate a legacy client')
+  assert.ok(!strict.includes('allowSynthetic'), 'quick-study and guided-study must keep requiring a requestId')
+  assert.equal((generation.match(/allowSynthetic/g) || []).length, 1)
+
+  // ask and sermon-assist share one helper in index.js.
+  const index = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8')
+  const helper = index.slice(
+    index.indexOf('function describeModelRequest('),
+    index.indexOf("app.post('/v1/ask'"),
+  )
+  assert.ok(helper.includes('allowSynthetic: true'), 'ask and sermon-assist must tolerate a legacy client')
+})

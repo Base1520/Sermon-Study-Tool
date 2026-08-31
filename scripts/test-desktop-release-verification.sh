@@ -16,6 +16,8 @@ require() {
 }
 
 node -e 'const command = "bash scripts/test-desktop-release-verification.sh"; const steps = require("./package.json").scripts["test:release"].split(/\s*&&\s*/); if (steps.filter((step) => step === command).length !== 1) throw new Error("test:release must invoke the desktop release verifier exactly once")'
+node server/src/test-usage-accounting.js
+node server/src/test-request-idempotency.js
 if ! release_source=$(< scripts/release.sh); then
   fail 'release.sh must be readable for structural verification'
 fi

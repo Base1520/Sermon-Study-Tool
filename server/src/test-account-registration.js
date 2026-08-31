@@ -189,7 +189,7 @@ function registrationDb({
       const account = [...state.accounts.values()].find((candidate) => candidate.id === params[0])
       return { rows: account ? [account] : [] }
     }
-    if (/UPDATE (study|study_reservation|ask_reservation|usage_event)/.test(sql)) {
+    if (/UPDATE (study|study_reservation|ask_reservation|usage_event|model_admission)/.test(sql)) {
       return { rows: [], rowCount: 1 }
     }
     if (/INSERT INTO download_lead/.test(sql)) return { rows: [], rowCount: 1 }
@@ -547,8 +547,8 @@ test('correct code atomically creates the account, preserves trial history, and 
   assert.ok(db.state.codes[0].consumed_at)
   assert.equal(db.state.codes[0].account_id, result.account.id)
   const claimedTables = db.state.statements
-    .filter(({ sql }) => /UPDATE (study|study_reservation|ask_reservation|usage_event)/.test(sql))
-  assert.equal(claimedTables.length, 4)
+    .filter(({ sql }) => /UPDATE (study|study_reservation|ask_reservation|usage_event|model_admission)/.test(sql))
+  assert.equal(claimedTables.length, 5)
   assert.equal(marketing.staged.length, 1)
   assert.equal(marketing.synced.length, 1)
 

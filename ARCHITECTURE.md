@@ -27,6 +27,9 @@ packaged-source drift can also cause a mismatch.
 |---|---|
 | The reading's content, sections, prompts, validation | `electron/plainread/pipeline.js`, `prompt.js`, `analyze.js`, `validate.js`, `verify.js` |
 | Metering: reservations, settle/refund, allowances, caps | `server/src/meter.js` (ledger primitives) + callers in `server/src/index.js` and `server/src/routes/generation.js`; `server/src/engine.js` records provider usage |
+| Duplicate generation, lost responses, or request-id conflicts | `server/src/request-idempotency.js` defines canonical request identity; generated routes persist request hashes before model work; desktop uses `electron/hosted/client.js` and mobile uses the content-hiding durable ledger in `src/mobile/modelRequestLedger.ts` |
+| A study was saved but its charge did not settle | `reconcilePersistedStudy` in `server/src/routes/generation.js` and the stale-reservation sweep in `server/src/meter.js`; saved output is settled or held as accounting-uncertain, never refunded and replayed free |
+| Model burst/concurrency admission | `server/src/model-admission.js` (durable cross-replica job ledger) + the shared spend lock in `server/src/meter.js`; defaults live in `server/src/schema.sql` settings |
 | Server `/v1/read` ride/retry/double-charge behavior | `server/src/read-resume.js` (decisions) + owner-bound study-row access in `server/src/engine.js` + `/v1/read` route in `index.js` |
 | Analyze, Quick Study, or Guided Study route wiring | `server/src/routes/generation.js` (route bodies) + shared claim/account policy in `server/src/index.js` |
 | Scholar/specialist answers, their prompts & safety rules | `server/src/sermon-assist.js` (both modes: grounded + general) |
@@ -40,6 +43,7 @@ packaged-source drift can also cause a mismatch.
 | Workspace state, view switching, top-level effects | `src/App.tsx` |
 | A desktop IPC action (`ipcMain.handle('name')`) | `electron/main.js` — grep the handler name |
 | Study id memory (reference → hosted study) | `rememberStudy`/`recallStudy` in `electron/main.js` (~lines 47–76) |
+| Database schema identity and migration transaction | `server/src/schema-version.js` + `server/src/migrate.js` + `server/src/readiness.js` |
 | Release pipeline, guards, verifiers | `package.json` scripts + `scripts/release.sh` + `scripts/check-*.sh` + `scripts/verify-*.sh` + `scripts/test-*.{sh,mjs}` + `.github/workflows/windows-release.yml` |
 | Store readiness state (always run the current board; static checks alone do not establish submission readiness) | `scripts/check-mobile-store-readiness.mjs` + `store/release-checklist.md` + `store/release-ledger.md` |
 | Mobile (Capacitor) app | `src/mobile/` + `capacitor.config.ts` + `vite.mobile.config.ts` + `ios/` + `android/` |

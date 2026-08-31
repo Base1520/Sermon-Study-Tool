@@ -65,6 +65,7 @@ function fakeDb() {
       // committed total is carried entirely by live reservations.
       return { rows: [{ reconciled: 0 }] }
     }
+    if (/AS uncertain/.test(sql)) return { rows: [{ uncertain: 0 }] }
     if (/SUM\(reserved_usd\).*AS in_flight/s.test(sql)) {
       let res = 0
       for (const r of periods.values()) res += r.reserved

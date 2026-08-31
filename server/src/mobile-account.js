@@ -90,6 +90,11 @@ async function claimAnonymousInstallData(client, accountId, installId) {
       WHERE account_id IS NULL AND install_id = $2`,
     [accountId, installId],
   )
+  await client.query(
+    `UPDATE model_admission SET account_id = $1
+      WHERE account_id IS NULL AND install_id = $2`,
+    [accountId, installId],
+  )
 }
 
 async function clearDeletionMarker(db, accountId) {
@@ -254,6 +259,11 @@ async function deleteAccountData(db, identity, {
     await client.query(
       `UPDATE ask_reservation
           SET account_id = NULL, install_id = NULL
+        WHERE account_id = $1 OR install_id = ANY($2::text[])`,
+      [account.id, installIds],
+    )
+    await client.query(
+      `DELETE FROM model_admission
         WHERE account_id = $1 OR install_id = ANY($2::text[])`,
       [account.id, installIds],
     )

@@ -163,8 +163,10 @@ export interface ReleaseStatus {
     account_recovery_email: boolean
     marketing_sync: boolean
     apple_iap: boolean
+    apple_iap_sandbox_review: boolean
     google_iap: boolean
     esv_mobile: boolean
+    review_access: boolean
   }
 }
 
@@ -228,14 +230,26 @@ export class OperatorApiError extends Error {
   status: number
   code: string
   payload: Record<string, unknown>
+  retryAfterSeconds: number | null
 
-  constructor(status: number, payload: Record<string, unknown>) {
+  constructor(status: number, payload: Record<string, unknown>, retryAfterSeconds: number | null = null) {
     super(String(payload.message || payload.body || payload.error || `Request failed (${status})`))
     this.name = 'OperatorApiError'
     this.status = status
-    this.code = String(payload.error || 'REQUEST_FAILED')
+    this.code = String(payload.error || payload.code || 'REQUEST_FAILED')
     this.payload = payload
+    this.retryAfterSeconds = retryAfterSeconds
   }
+}
+
+function retryAfterSeconds(response: Response) {
+  const raw = response.headers.get('retry-after')
+  if (!raw) return null
+  const seconds = Number(raw)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds)
+  const at = Date.parse(raw)
+  if (!Number.isFinite(at)) return null
+  return Math.max(0, Math.ceil((at - Date.now()) / 1000))
 }
 
 async function headers(extra: Record<string, string> = {}) {
@@ -264,7 +278,7 @@ async function jsonRequest<T>(path: string, init: RequestInit = {}): Promise<T> 
     headers: await headers((init.headers || {}) as Record<string, string>),
   })
   const body = await bodyOf(response)
-  if (!response.ok) throw new OperatorApiError(response.status, body)
+  if (!response.ok) throw new OperatorApiError(response.status, body, retryAfterSeconds(response))
   return body as T
 }
 
@@ -338,13 +352,13 @@ export async function runGuidedStudy(reference: string, translation: string, req
   }
 }
 
-export async function analyzePassage(text: string, reference: string) {
+export async function analyzePassage(text: string, reference: string, requestId: string) {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS)
   try {
     return await jsonRequest<{ analysis: PhrasingAnalysis; studyId: string; cached: boolean }>('/v1/analyze', {
       method: 'POST',
-      body: JSON.stringify({ text, reference }),
+      body: JSON.stringify({ text, reference, requestId }),
       signal: controller.signal,
     })
   } finally {
@@ -372,7 +386,9 @@ export async function readPassage({
     body: JSON.stringify({ analysis, reference, studyId, level }),
     signal: controller.signal,
   })
-  if (!response.ok) throw new OperatorApiError(response.status, await bodyOf(response))
+  if (!response.ok) {
+    throw new OperatorApiError(response.status, await bodyOf(response), retryAfterSeconds(response))
+  }
   if (!response.body) throw new OperatorApiError(502, { error: 'EMPTY_STREAM', message: 'The reading did not start.' })
 
   let quiet = window.setTimeout(() => controller.abort(), STREAM_SILENCE_MS)
@@ -410,7 +426,16 @@ export async function readPassage({
     window.clearTimeout(quiet)
   }
 
-  if (failure) throw new OperatorApiError(500, failure)
+  if (failure) {
+    const failureStatus = failure.code === 'ACCOUNTING_UNAVAILABLE'
+      ? 503
+      : failure.code === 'INPUT_TOO_LARGE'
+        ? 413
+        : failure.code === 'MODEL_BUSY'
+          ? 429
+          : 500
+    throw new OperatorApiError(failureStatus, failure)
+  }
   if (!document) throw new OperatorApiError(502, { error: 'INCOMPLETE_STREAM', message: 'The reading ended before it finished.' })
   return { document, studyId: returnedStudyId }
 }
@@ -419,14 +444,16 @@ export function askQuestion({
   studyId,
   question,
   history,
+  requestId,
 }: {
   studyId: string
   question: string
   history: ChatMessage[]
+  requestId: string
 }) {
   return jsonRequest<{ answer: string; refusal: string | null; suggested: string[] }>('/v1/ask', {
     method: 'POST',
-    body: JSON.stringify({ studyId, question, history, aiConsentVersion: AI_PROCESSING_CONSENT_VERSION }),
+    body: JSON.stringify({ studyId, question, history, requestId, aiConsentVersion: AI_PROCESSING_CONSENT_VERSION }),
   })
 }
 
@@ -435,18 +462,20 @@ export async function askSermonAgent({
   agent,
   question,
   history,
+  requestId,
 }: {
   studyId: string
   agent: TabletAgentRole
   question: string
   history: TabletAgentMessage[]
+  requestId: string
 }) {
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), SERMON_ASSIST_TIMEOUT_MS)
   try {
     return await jsonRequest<{ answer: string }>('/v1/sermon-assist', {
       method: 'POST',
-      body: JSON.stringify({ studyId, agent, question, history, aiConsentVersion: AI_PROCESSING_CONSENT_VERSION }),
+      body: JSON.stringify({ studyId, agent, question, history, requestId, aiConsentVersion: AI_PROCESSING_CONSENT_VERSION }),
       signal: controller.signal,
     })
   } finally {

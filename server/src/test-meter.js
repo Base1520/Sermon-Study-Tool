@@ -86,8 +86,11 @@ function fakeDb(initial = {}) {
       return { rows: [], rowCount: n }
     }
     if (/SELECT id FROM study\s/.test(sql)) return { rows: [] }
+    if (/FROM study_reservation reservation/.test(sql)) return { rows: [] }
     if (/SELECT id FROM study_reservation/.test(sql)) return { rows: [] }
     if (/SELECT id FROM ask_reservation/.test(sql)) return { rows: [] }
+    if (/UPDATE model_admission SET state = 'finished'/.test(sql)) return { rows: [], rowCount: 0 }
+    if (/DELETE FROM model_admission/.test(sql)) return { rows: [], rowCount: 0 }
     if (/SUM\(actual_usd\)/.test(sql)) {
       let a = 0, res = 0
       for (const r of rows.values()) { a += r.actual_usd; res += r.reserved_usd }
@@ -101,6 +104,7 @@ function fakeDb(initial = {}) {
       return { rows: [] }
     }
     if (/SUM\(usd\).*AS reconciled/s.test(sql)) return { rows: [{ reconciled: 0 }] }
+    if (/AS uncertain/.test(sql)) return { rows: [{ uncertain: 0 }] }
     if (/FROM study_reservation/.test(sql) && /SUM\(reserved_usd\)/.test(sql)) {
       return { rows: [{ in_flight: 0 }] }
     }
@@ -128,12 +132,14 @@ function fakeAskDb({ ceiling = 50, reconciled = 0, studyHeld = 0 } = {}) {
   const accounts = new Map()
   const installs = new Map()
   const reservations = new Map()
+  const admissions = new Map()
   let transactionTail = Promise.resolve()
 
   const db = {
     _accounts: accounts,
     _installs: installs,
     _reservations: reservations,
+    _admissions: admissions,
     connect: async () => {
       let unlock
       let turn
@@ -166,13 +172,56 @@ function fakeAskDb({ ceiling = 50, reconciled = 0, studyHeld = 0 } = {}) {
     if (/SELECT id FROM account/.test(sql) && /deleting_at IS NULL/.test(sql)) {
       return { rows: [{ id: params[0] }] }
     }
+    if (/SELECT key, value FROM settings/.test(sql)) {
+      return { rows: [
+        { key: 'model_admission_window_seconds', value: '60' },
+        { key: 'model_admission_global_requests', value: '1000' },
+        { key: 'model_admission_identity_requests', value: '1000' },
+        { key: 'model_admission_global_concurrency', value: '1000' },
+        { key: 'model_admission_identity_concurrency', value: '1000' },
+        { key: 'model_admission_global_provider_concurrency', value: '1000' },
+        { key: 'model_admission_identity_provider_concurrency', value: '1000' },
+      ] }
+    }
     if (/FROM settings/.test(sql)) return { rows: [{ value: String(ceiling) }] }
+    if (/FROM model_admission/.test(sql) && /global_recent/.test(sql)) {
+      const accountId = params[2]
+      const installId = params[3]
+      const all = [...admissions.values()]
+      const own = all.filter((row) => accountId
+        ? row.account_id === accountId || (!row.account_id && row.install_id === installId)
+        : !row.account_id && row.install_id === installId)
+      return { rows: [{
+        global_recent: all.length,
+        global_active: all.filter((row) => row.state === 'active').length,
+        global_provider_active: all.filter((row) => row.state === 'active')
+          .reduce((total, row) => total + row.provider_slots, 0),
+        identity_recent: own.length,
+        identity_active: own.filter((row) => row.state === 'active').length,
+        identity_provider_active: own.filter((row) => row.state === 'active')
+          .reduce((total, row) => total + row.provider_slots, 0),
+      }] }
+    }
+    if (/INSERT INTO model_admission/.test(sql)) {
+      admissions.set(params[0], {
+        id: params[0], account_id: params[1], install_id: params[2], route: params[3],
+        provider_slots: params[4], state: 'active',
+      })
+      return { rows: [], rowCount: 1 }
+    }
     if (/FROM usage_event/.test(sql) && /SUM\(usd\)/.test(sql)) {
       return { rows: [{ reconciled }] }
     }
     if (/FROM usage_period/.test(sql) && /SUM\(reserved_usd\)/.test(sql)) {
       return { rows: [{ in_flight: studyHeld }] }
     }
+    if (/AS uncertain/.test(sql) && /FROM ask_reservation/.test(sql)) {
+      const uncertain = [...reservations.values()]
+        .filter(row => row.accounting_uncertain && row.state !== 'held')
+        .reduce((sum, row) => sum + row.reserved_usd, 0)
+      return { rows: [{ uncertain }] }
+    }
+    if (/AS uncertain/.test(sql)) return { rows: [{ uncertain: 0 }] }
     if (/FROM study_reservation/.test(sql) && /SUM\(reserved_usd\)/.test(sql)) {
       return { rows: [{ in_flight: 0 }] }
     }
@@ -181,6 +230,14 @@ function fakeAskDb({ ceiling = 50, reconciled = 0, studyHeld = 0 } = {}) {
         .filter(row => row.state === 'held')
         .reduce((sum, row) => sum + row.reserved_usd, 0)
       return { rows: [{ in_flight: inFlight }] }
+    }
+    if (/SELECT state, request_hash, response\s+FROM ask_reservation/.test(sql)) {
+      const row = reservations.get(params[0])
+      return { rows: row ? [{
+        state: row.state,
+        request_hash: row.request_hash,
+        response: row.response,
+      }] : [] }
     }
     if (/SELECT COUNT\(\*\)::int AS count FROM ask_reservation/.test(sql)) {
       const count = [...reservations.values()]
@@ -205,6 +262,7 @@ function fakeAskDb({ ceiling = 50, reconciled = 0, studyHeld = 0 } = {}) {
       reservations.set(params[0], {
         id: params[0], account_id: params[1], install_id: params[2],
         access_kind: params[3], reserved_usd: params[4], state: 'held', stale: false,
+        accounting_uncertain: false, request_hash: params[5], response: null,
       })
       return { rows: [], rowCount: 1 }
     }
@@ -212,6 +270,8 @@ function fakeAskDb({ ceiling = 50, reconciled = 0, studyHeld = 0 } = {}) {
       const row = reservations.get(params[0])
       if (!row || row.state !== 'held') return { rows: [], rowCount: 0 }
       row.state = 'settled'
+      row.accounting_uncertain ||= Boolean(params[1])
+      row.response = params[2] || row.response
       return { rows: [], rowCount: 1 }
     }
     if (/UPDATE ask_reservation SET updated_at = now/.test(sql)) {
@@ -223,6 +283,7 @@ function fakeAskDb({ ceiling = 50, reconciled = 0, studyHeld = 0 } = {}) {
       if (!row || row.state !== 'held') return { rows: [], rowCount: 0 }
       if (params[1] && !row.stale) return { rows: [], rowCount: 0 }
       row.state = 'released'
+      row.accounting_uncertain ||= Boolean(params[1] || params[3])
       return { rows: [{
         account_id: row.account_id,
         install_id: row.install_id,
@@ -266,13 +327,16 @@ function durableStudyDb({ refreshStudyOnSelect = false } = {}) {
       periodStart = P.periodStart,
       stale = false,
       reading = false,
+      resultSaved = false,
       retries = 0,
     }) {
       reservations.set(id, {
         id, account_id: accountId, install_id: installId, access_kind: accessKind,
         period_start: periodStart, reserved_usd: STUDY_RESERVE_USD, state: 'held', stale,
+        accounting_uncertain: false,
       })
       if (reading) studies.set(id, { id, state: 'reading', stale, retries })
+      else if (resultSaved) studies.set(id, { id, state: 'done', stale, retries, analysis: {} })
     },
     query: run,
     async connect() {
@@ -305,7 +369,7 @@ function durableStudyDb({ refreshStudyOnSelect = false } = {}) {
       reservations.set(params[0], {
         id: params[0], account_id: params[1], install_id: params[2],
         access_kind: params[3], period_start: params[4], reserved_usd: params[5],
-        state: 'held', stale: false,
+        state: 'held', stale: false, accounting_uncertain: false,
       })
       return { rows: [], rowCount: 1 }
     }
@@ -313,6 +377,7 @@ function durableStudyDb({ refreshStudyOnSelect = false } = {}) {
       const row = reservations.get(params[0])
       if (!row || row.state !== 'held') return { rows: [], rowCount: 0 }
       row.state = 'settled'
+      row.accounting_uncertain ||= Boolean(params[1])
       return { rows: [{ account_id: row.account_id, period_start: row.period_start }], rowCount: 1 }
     }
     if (/SET state = 'held'/.test(sql) && /state = 'settled'/.test(sql)) {
@@ -327,6 +392,14 @@ function durableStudyDb({ refreshStudyOnSelect = false } = {}) {
       if (row?.state === 'held') row.stale = false
       return { rows: [], rowCount: row?.state === 'held' ? 1 : 0 }
     }
+    if (/SET accounting_uncertain = true, updated_at = now\(\)/.test(sql)) {
+      const row = reservations.get(params[0])
+      if (row?.state === 'held') {
+        row.accounting_uncertain = true
+        row.stale = false
+      }
+      return { rows: [], rowCount: row?.state === 'held' ? 1 : 0 }
+    }
     if (/UPDATE study SET updated_at = now/.test(sql)) {
       const row = studies.get(params[0])
       if (row?.state === 'reading') row.stale = false
@@ -337,6 +410,7 @@ function durableStudyDb({ refreshStudyOnSelect = false } = {}) {
       if (!row || !params[2].includes(row.state)) return { rows: [], rowCount: 0 }
       if (params[3] && !row.stale) return { rows: [], rowCount: 0 }
       row.state = params[1]
+      row.accounting_uncertain ||= Boolean(params[3] || params[5])
       return { rows: [{
         account_id: row.account_id, install_id: row.install_id,
         access_kind: row.access_kind, period_start: row.period_start,
@@ -358,6 +432,7 @@ function durableStudyDb({ refreshStudyOnSelect = false } = {}) {
       const row = reservations.get(params[0])
       if (!row || !['held', 'settled'].includes(row.state)) return { rows: [], rowCount: 0 }
       row.state = 'refunded'
+      row.accounting_uncertain = true
       return { rows: [{ id: row.id }], rowCount: 1 }
     }
     if (/SET actual_usd = actual_usd \+ \$3/.test(sql)) {
@@ -385,15 +460,29 @@ function durableStudyDb({ refreshStudyOnSelect = false } = {}) {
     if (/SELECT id FROM study\s/.test(sql)) {
       return { rows: [...studies.values()].filter(row => row.state === 'reading' && row.stale).map(({ id }) => ({ id })) }
     }
-    if (/SELECT id FROM study_reservation/.test(sql)) {
-      const selected = [...reservations.values()].filter(row => row.state === 'held' && row.stale).map(({ id }) => ({ id }))
+    if (/FROM study_reservation reservation/.test(sql)) {
+      const selected = [...reservations.values()]
+        .filter(row => row.state === 'held' && row.stale)
+        .map(({ id }) => ({ id, result_saved: Boolean(studies.get(id)?.analysis || studies.get(id)?.document) }))
       if (refreshStudyOnSelect) selected.forEach(({ id }) => { reservations.get(id).stale = false })
       return { rows: selected }
     }
+    if (/SELECT id FROM study_reservation/.test(sql)) return { rows: [] }
     if (/UPDATE usage_period\s+SET reserved_usd = 0/s.test(sql)) return { rows: [], rowCount: 0 }
     if (/SELECT id FROM ask_reservation/.test(sql)) return { rows: [] }
-    if (/FROM usage_event/.test(sql) && /SUM\(usd\)/.test(sql)) return { rows: [{ reconciled: 0 }] }
+    if (/UPDATE model_admission/.test(sql) && /state = 'finished'/.test(sql)) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (/DELETE FROM model_admission/.test(sql)) return { rows: [], rowCount: 0 }
+    if (/FROM usage_event/.test(sql) && /SUM\(usd\)/.test(sql)) return { rows: [{ reconciled: 0, usd: 0 }] }
     if (/FROM usage_period/.test(sql) && /SUM\(reserved_usd\)/.test(sql)) return { rows: [{ in_flight: 0 }] }
+    if (/AS uncertain/.test(sql) && /FROM study_reservation/.test(sql)) {
+      const uncertain = [...reservations.values()]
+        .filter(row => row.accounting_uncertain && row.state !== 'held')
+        .reduce((sum, row) => sum + row.reserved_usd, 0)
+      return { rows: [{ uncertain }] }
+    }
+    if (/AS uncertain/.test(sql)) return { rows: [{ uncertain: 0 }] }
     if (/FROM study_reservation/.test(sql) && /SUM\(reserved_usd\)/.test(sql)) {
       const inFlight = [...reservations.values()]
         .filter(row => row.state === 'held')
@@ -551,6 +640,7 @@ const P = { periodStart: '2026-08-01T00:00:00Z', periodEnd: '2026-09-01T00:00:00
       async query(sql) {
         if (/FROM settings/.test(sql)) return { rows: [{ value: '25 USD' }] }
         if (/FROM usage_event/.test(sql)) return { rows: [{ reconciled: 4200 }] }
+        if (/AS uncertain/.test(sql)) return { rows: [{ uncertain: 0 }] }
         if (/FROM (usage_period|study_reservation|ask_reservation)/.test(sql)) {
           return { rows: [{ in_flight: 0 }] }
         }
@@ -599,6 +689,7 @@ const P = { periodStart: '2026-08-01T00:00:00Z', periodEnd: '2026-09-01T00:00:00
       async query(sql) {
         if (/FROM settings/.test(sql)) return { rows: [{ value }] }
         if (/FROM usage_event/.test(sql)) return { rows: [{ reconciled: committed }] }
+        if (/AS uncertain/.test(sql)) return { rows: [{ uncertain: 0 }] }
         if (/FROM (usage_period|study_reservation|ask_reservation)/.test(sql)) {
           return { rows: [{ in_flight: 0 }] }
         }
@@ -670,6 +761,41 @@ const P = { periodStart: '2026-08-01T00:00:00Z', periodEnd: '2026-09-01T00:00:00
     ok('a duplicate failure cannot refund it twice', !replayed && db._accounts.get('free-account') === 0)
   }
 
+  console.log('\nAN ASK REQUEST ID CANNOT SPEND TWICE')
+  {
+    const db = fakeAskDb()
+    const first = await reserveAsk(db, {
+      id: 'ask-idempotent', accountId: 'free-account', installId: 'free-install',
+      recurringAccess: false, freeLimit: 5, dailyLimit: 100, requestHash: 'hash-one',
+    })
+    const duplicate = await reserveAsk(db, {
+      id: 'ask-idempotent', accountId: 'free-account', installId: 'free-install',
+      recurringAccess: false, freeLimit: 5, dailyLimit: 100, requestHash: 'hash-one',
+    })
+    const response = { answer: 'The text answers from its own argument.' }
+    const settled = await settleAskReservation(db, 'ask-idempotent', { response })
+    ok('the first request owns one reservation', first.ok && db._reservations.size === 1)
+    ok('the duplicate is identified before another free Ask is consumed',
+      !duplicate.ok && duplicate.reason === 'duplicate-request' && db._accounts.get('free-account') === 1)
+    ok('settlement stores the exact replayable answer atomically',
+      settled && db._reservations.get('ask-idempotent').response === response)
+  }
+
+  console.log('\nAN UNCERTAIN ASK REFUNDS THE USER BUT STAYS IN THE BRAKE')
+  {
+    const db = fakeAskDb()
+    await reserveAsk(db, {
+      id: 'uncertain-ask', accountId: 'free-account', installId: 'free-install',
+      recurringAccess: false, freeLimit: 5, dailyLimit: 100,
+    })
+    await releaseAskReservation(db, 'uncertain-ask', { accountingUncertain: true })
+    const reservation = db._reservations.get('uncertain-ask')
+    const spend = await committedSpend(db)
+    ok('the failed answer returns the free ask', db._accounts.get('free-account') === 0)
+    ok('the reservation records accounting uncertainty', reservation.accounting_uncertain === true)
+    ok('the worst-case ask remains committed for the brake', spend.uncertain === ASK_RESERVE_USD)
+  }
+
   console.log('\nTHE GLOBAL ASK CEILING CANNOT BE BURST THROUGH')
   {
     const db = fakeAskDb({ ceiling: 0.10 })
@@ -708,6 +834,22 @@ const P = { periodStart: '2026-08-01T00:00:00Z', periodEnd: '2026-09-01T00:00:00
     const duplicate = await refundStudyReservation(db, 'study-durable')
     ok('a stranded settled study restores its exact allowance once', refunded && period.used === 0)
     ok('a replay cannot refund the allowance twice', !duplicate && period.used === 0)
+  }
+
+  console.log('\nAN UNCERTAIN STUDY REFUNDS THE USER BUT STAYS IN THE BRAKE')
+  {
+    const db = durableStudyDb()
+    await reserveStudy(db, {
+      accountId: 'uncertain-account', allowance: 40,
+      reservationId: 'uncertain-study', ...P,
+    })
+    await releaseStudyReservation(db, 'uncertain-study', { accountingUncertain: true })
+    const reservation = db._reservations.get('uncertain-study')
+    const period = db._periods.get('uncertain-account|2026-08-01T00:00:00.000Z')
+    const spend = await committedSpend(db)
+    ok('the failed study returns its allowance', period.used === 0)
+    ok('the reservation records accounting uncertainty', reservation.accounting_uncertain === true)
+    ok('the worst-case study remains committed for the brake', spend.uncertain === STUDY_RESERVE_USD)
   }
 
   console.log('\nQUICK STUDIES HOLD ONLY THEIR REAL WORST CASE')
@@ -787,6 +929,19 @@ const P = { periodStart: '2026-08-01T00:00:00Z', periodEnd: '2026-09-01T00:00:00
     ok('an anonymous free study returns to its install counter', db._anonFree.get('anon-install') === 0)
     ok('running the sweeper again changes nothing', (await sweepStaleReservations(db)) === 0)
     ok('an explicit duplicate release changes nothing', !(await releaseStudyReservation(db, 'stale-paid')))
+  }
+
+  console.log('\nA SAVED RESULT IS SETTLED, NEVER REFUNDED BY THE SWEEPER')
+  {
+    const db = durableStudyDb()
+    db._periods.set('saved-account|2026-08-01T00:00:00.000Z', { used: 1, reserved: 0, actual: 0 })
+    db.seed({
+      id: 'saved-before-crash', accountId: 'saved-account', accessKind: 'recurring',
+      stale: true, resultSaved: true,
+    })
+    const swept = await sweepStaleReservations(db)
+    ok('the saved result is recovered as settled work', swept === 1 && db._reservations.get('saved-before-crash').state === 'settled')
+    ok('the customer keeps the one study charge', db._periods.get('saved-account|2026-08-01T00:00:00.000Z').used === 1)
   }
 
   console.log('\nA HEARTBEAT WINS THE SWEEPER RACE')

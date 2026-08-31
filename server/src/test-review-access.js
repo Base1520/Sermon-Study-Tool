@@ -8,13 +8,23 @@ const {
   provisionReviewAccess,
 } = require('./review-access')
 
-function fakeDb({ existing = false, studies = 0, subscriptions = 0 } = {}) {
-  const state = { committed: false, rolledBack: false, links: [], revokedDevices: false, expiredLinks: false }
+function fakeDb({ existing = false, studies = 0, subscriptions = 0, plan = 'free', status = 'none' } = {}) {
+  const state = {
+    committed: false,
+    rolledBack: false,
+    links: [],
+    revokedDevices: false,
+    expiredLinks: false,
+    planUpdates: 0,
+    accountInsert: null,
+  }
   const account = {
     id: 'review-account-id',
     deleting_at: null,
     stripe_customer_id: null,
     stripe_subscription_id: null,
+    plan,
+    status,
   }
   const client = {
     async query(sql, params = []) {
@@ -22,9 +32,16 @@ function fakeDb({ existing = false, studies = 0, subscriptions = 0 } = {}) {
       if (sql === 'COMMIT') { state.committed = true; return { rows: [] } }
       if (sql === 'ROLLBACK') { state.rolledBack = true; return { rows: [] } }
       if (/SELECT id, deleting_at/.test(sql)) return { rows: existing ? [account] : [] }
-      if (/INSERT INTO account/.test(sql)) return { rows: [account] }
+      if (/INSERT INTO account \(email, plan, status\)/.test(sql)) {
+        state.accountInsert = { email: params[0], plan: 'comp', status: 'active' }
+        return { rows: [{ ...account, plan: 'comp', status: 'active' }] }
+      }
       if (/SELECT\s+\(SELECT COUNT\(\*\)::int FROM study/s.test(sql)) {
         return { rows: [{ studies, subscriptions }] }
+      }
+      if (/UPDATE account SET plan = 'comp', status = 'active'/.test(sql)) {
+        state.planUpdates += 1
+        return { rows: [] }
       }
       if (/UPDATE device SET revoked_at/.test(sql)) { state.revokedDevices = true; return { rows: [] } }
       if (/UPDATE device_link SET expires_at/.test(sql)) { state.expiredLinks = true; return { rows: [] } }
@@ -58,10 +75,39 @@ test('provisions five one-time 45-day links only for the empty dedicated account
   assert.equal(new Date(result.expiresAt).getTime() - now.getTime(), REVIEW_LINK_TTL_MS)
   assert.equal(db.state.links.length, REVIEW_CODE_COUNT)
   assert.ok(db.state.links.every((link) => link.accountId === result.accountId))
+  assert.deepEqual(db.state.accountInsert, { email: REVIEW_ACCOUNT_EMAIL, plan: 'comp', status: 'active' })
+  assert.equal(db.state.planUpdates, 0)
   assert.equal(db.state.revokedDevices, true)
   assert.equal(db.state.expiredLinks, true)
   assert.equal(db.state.committed, true)
   assert.equal(db.state.rolledBack, false)
+})
+
+test('provisioning pins an existing review identity to comp and uses an exact retry-safe code set', async () => {
+  const db = fakeDb({ existing: true, plan: 'free', status: 'none' })
+  const provided = mintReviewLinkCodes({ randomBytes: deterministicRandomBytes() }).codes
+  const result = await provisionReviewAccess(db, { codes: provided })
+  assert.deepEqual(result.codes, provided)
+  assert.equal(db.state.planUpdates, 1)
+  assert.equal(db.state.links.length, REVIEW_CODE_COUNT)
+})
+
+test('provisioning rejects malformed, duplicate, and incomplete supplied code sets', async () => {
+  const valid = mintReviewLinkCodes({ randomBytes: deterministicRandomBytes() }).codes
+  for (const codes of [
+    'not-an-array',
+    valid.slice(0, REVIEW_CODE_COUNT - 1),
+    [...valid.slice(0, REVIEW_CODE_COUNT - 1), valid[0]],
+    [...valid.slice(0, REVIEW_CODE_COUNT - 1), 'OPR-AAAA-AAAI'],
+  ]) {
+    const db = fakeDb()
+    await assert.rejects(
+      () => provisionReviewAccess(db, { codes }),
+      (error) => error instanceof ReviewAccessError && /supplied review code set/.test(error.message),
+    )
+    assert.equal(db.state.committed, false)
+    assert.equal(db.state.rolledBack, true)
+  }
 })
 
 test('refuses every email except the dedicated review identity', async () => {
@@ -86,8 +132,25 @@ test('refuses to overwrite review study or billing data', async () => {
 const { mintReviewLinkCodes, parseReviewLinkHashes, seedReviewLinkHashes } = require('./review-access')
 const { sha256 } = require('./mobile')
 
-function seedFakeDb({ existing = false, plan = 'free', status = 'none', billing = false, deleting = false, alreadyPresent = [] } = {}) {
-  const state = { committed: false, rolledBack: false, links: [], planUpdates: 0, inserted: null }
+function seedFakeDb({
+  existing = false,
+  plan = 'free',
+  status = 'none',
+  billing = false,
+  deleting = false,
+  studies = 0,
+  subscriptions = 0,
+  alreadyPresent = [],
+} = {}) {
+  const state = {
+    committed: false,
+    rolledBack: false,
+    rolledBackToSavepoint: false,
+    releasedSavepoint: false,
+    links: [],
+    planUpdates: 0,
+    inserted: null,
+  }
   const account = {
     id: 'review-account-id',
     deleting_at: deleting ? new Date() : null,
@@ -101,10 +164,22 @@ function seedFakeDb({ existing = false, plan = 'free', status = 'none', billing 
       if (sql === 'BEGIN') return { rows: [] }
       if (sql === 'COMMIT') { state.committed = true; return { rows: [] } }
       if (sql === 'ROLLBACK') { state.rolledBack = true; return { rows: [] } }
+      if (sql === 'SAVEPOINT review_access_seed_helper') return { rows: [] }
+      if (sql === 'ROLLBACK TO SAVEPOINT review_access_seed_helper') {
+        state.rolledBackToSavepoint = true
+        return { rows: [] }
+      }
+      if (sql === 'RELEASE SAVEPOINT review_access_seed_helper') {
+        state.releasedSavepoint = true
+        return { rows: [] }
+      }
       if (/SELECT id, deleting_at/.test(sql)) return { rows: existing ? [account] : [] }
       if (/INSERT INTO account \(email, plan, status\)/.test(sql)) {
         state.inserted = { email: params[0] }
         return { rows: [{ ...account, plan: 'comp', status: 'active' }] }
+      }
+      if (/SELECT\s+\(SELECT COUNT\(\*\)::int FROM study/s.test(sql)) {
+        return { rows: [{ studies, subscriptions }] }
       }
       if (/UPDATE account SET plan = 'comp', status = 'active'/.test(sql)) { state.planUpdates += 1; return { rows: [] } }
       if (/INSERT INTO device_link/.test(sql)) {
@@ -116,7 +191,7 @@ function seedFakeDb({ existing = false, plan = 'free', status = 'none', billing 
     },
     release() {},
   }
-  return { state, connect: async () => client }
+  return { state, client, connect: async () => client }
 }
 
 test('mint yields the configured count of distinct valid codes and their sha256 hashes', () => {
@@ -182,6 +257,30 @@ test('seeding refuses an account that has touched billing or deletion, and rolls
     assert.equal(db.state.rolledBack, true)
     assert.equal(db.state.links.length, 0)
   }
+})
+
+test('seeding refuses study or subscription evidence before changing the account', async () => {
+  for (const evidence of [{ studies: 1 }, { subscriptions: 1 }]) {
+    const db = seedFakeDb({ existing: true, plan: 'free', status: 'none', ...evidence })
+    await assert.rejects(
+      () => seedReviewLinkHashes(db, { hashes: ['8'.repeat(64)] }),
+      (error) => error instanceof ReviewAccessError && /contains study or billing data/.test(error.message),
+    )
+    assert.equal(db.state.planUpdates, 0)
+    assert.equal(db.state.links.length, 0)
+    assert.equal(db.state.rolledBack, true)
+  }
+})
+
+test('seeding with a caller transaction contains failure inside its own savepoint', async () => {
+  const db = seedFakeDb({ existing: true, studies: 1 })
+  await assert.rejects(
+    () => seedReviewLinkHashes(db, { hashes: ['9'.repeat(64)], client: db.client }),
+    (error) => error instanceof ReviewAccessError && /contains study or billing data/.test(error.message),
+  )
+  assert.equal(db.state.rolledBack, false)
+  assert.equal(db.state.rolledBackToSavepoint, true)
+  assert.equal(db.state.releasedSavepoint, true)
 })
 
 test('seeding refuses malformed hashes and any email but the dedicated one; empty input is a no-op', async () => {

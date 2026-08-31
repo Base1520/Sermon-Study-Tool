@@ -46,7 +46,7 @@ function compDb({ adoptionFailure = false } = {}) {
         state.adoptedAccountId = params[0]
         return { rows: [], rowCount: 1 }
       }
-      if (/UPDATE (study_reservation|ask_reservation|usage_event)/.test(sql)) return { rows: [], rowCount: 1 }
+      if (/UPDATE (study_reservation|ask_reservation|usage_event|model_admission)/.test(sql)) return { rows: [], rowCount: 1 }
       if (/INSERT INTO device/.test(sql)) {
         state.tokenIssues += 1
         return { rows: [{ id: `device-${state.tokenIssues}`, created_at: new Date() }] }
@@ -85,7 +85,7 @@ function legacyDeviceDb() {
         state.adoptionUpdates += 1
         return { rows: [], rowCount: 1 }
       }
-      if (/UPDATE (study_reservation|ask_reservation|usage_event)/.test(sql)) {
+      if (/UPDATE (study_reservation|ask_reservation|usage_event|model_admission)/.test(sql)) {
         state.adoptionUpdates += 1
         return { rows: [], rowCount: 1 }
       }
@@ -156,7 +156,7 @@ test('a legacy bearer adopts once before any authenticated route continues', asy
 
   assert.equal(await ensureDeviceInstallDataClaimed(db, identity), true)
   assert.equal(db.state.accountId, 'acct-bound')
-  assert.equal(db.state.adoptionUpdates, 4)
+  assert.equal(db.state.adoptionUpdates, 5)
   assert.deepEqual(db.state.transactions, ['BEGIN', 'COMMIT'])
   assert.ok(identity.installDataClaimedAt instanceof Date)
   assert.equal(await ensureDeviceInstallDataClaimed(db, identity), false)

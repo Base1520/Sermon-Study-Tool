@@ -25,10 +25,17 @@ const {
   annualSavingsUsd,
 } = require('./entitlement')
 const meter = require('./meter')
+const modelAdmission = require('./model-admission')
+const requestIdempotency = require('./request-idempotency')
 const { invalidCodeResponse } = require('./access-code-policy')
 const engine = require('./engine')
 const readResume = require('./read-resume')
 const { checkGenerationInput } = require('../../electron/plainread/runtime')
+const {
+  PERSONAL_COUNSEL_ANSWER,
+  UNSAFE_ANSWER,
+  precheckQuestion,
+} = require('../../electron/plainread/ask')
 const { redeemAccessCode } = require('./redeem')
 const installDataAdoption = require('./install-data-adoption')
 const generation = require('./routes/generation')
@@ -183,8 +190,13 @@ async function claimStudy(req, {
   periodEnd,
   reservationId,
   reserveUsd = meter.STUDY_RESERVE_USD,
+  modelAdmissionRequest,
 }) {
   return meter.withGlobalSpendLock(db, async (client) => {
+    const installId = req.identity.installId
+    if (!accountId && !installId) {
+      return { status: 400, body: { error: 'x-install-id header required' } }
+    }
     if (accountId && !(await meter.accountAvailableForSpend(client, accountId))) {
       return { status: 409, body: {
         error: 'ACCOUNT_UNAVAILABLE',
@@ -206,6 +218,13 @@ async function claimStudy(req, {
         } }
       }
     }
+    const admissionInput = {
+      ...modelAdmissionRequest,
+      accountId,
+      installId,
+    }
+    const admission = await modelAdmission.check(client, admissionInput)
+    if (!admission.ok) return modelAdmission.refusal(admission)
     const ceiling = await meter.ceilingStatus(client)
     const projected = ceiling.committed + reserveUsd
     if (projected > ceiling.ceiling * 1.5) {
@@ -223,10 +242,9 @@ async function claimStudy(req, {
       } }
     }
 
+    let claim
     if (!accountId) {
-      const installId = req.identity.installId
-      if (!installId) return { status: 400, body: { error: 'x-install-id header required' } }
-      const claim = await meter.reserveAnonymousStudy(client, {
+      claim = await meter.reserveAnonymousStudy(client, {
         installId,
         identityHash: trialIdentityHash('install', installId),
         lifetimeStudies: ent.lifetimeStudies,
@@ -235,28 +253,28 @@ async function claimStudy(req, {
         reservationId,
         reserveUsd,
       })
-      return claim.ok
-        ? null
-        : { status: 402, body: { error: 'UPGRADE_REQUIRED', ...upgradePrompt(ent) } }
+      if (!claim.ok) {
+        return { status: 402, body: { error: 'UPGRADE_REQUIRED', ...upgradePrompt(ent) } }
+      }
+    } else {
+      claim = ent.plan === 'free'
+        ? await meter.reserveLifetimeStudy(client, {
+            accountId,
+            lifetimeStudies: ent.lifetimeStudies,
+            periodStart,
+            periodEnd,
+            reservationId,
+            reserveUsd,
+          })
+        : await meter.reserveStudy(client, {
+            accountId,
+            allowance: ent.allowance,
+            periodStart,
+            periodEnd,
+            reservationId,
+            reserveUsd,
+          })
     }
-
-    const claim = ent.plan === 'free'
-      ? await meter.reserveLifetimeStudy(client, {
-          accountId,
-          lifetimeStudies: ent.lifetimeStudies,
-          periodStart,
-          periodEnd,
-          reservationId,
-          reserveUsd,
-        })
-      : await meter.reserveStudy(client, {
-          accountId,
-          allowance: ent.allowance,
-          periodStart,
-          periodEnd,
-          reservationId,
-          reserveUsd,
-        })
     if (!claim.ok) {
       return { status: 402, body: {
         error: 'UPGRADE_REQUIRED',
@@ -265,8 +283,16 @@ async function claimStudy(req, {
         ...upgradePrompt(ent, { used: claim.used }),
       } }
     }
+    await modelAdmission.insert(client, admissionInput)
     return null
   })
+}
+
+function sendClaimRefusal(res, refusal) {
+  if (refusal.retryAfterSeconds) {
+    res.setHeader('Retry-After', String(refusal.retryAfterSeconds))
+  }
+  return res.status(refusal.status).json(refusal.body)
 }
 
 const newStudyId = () =>
@@ -293,10 +319,12 @@ generation.mount(app, db, {
   entitlementFor,
   billingPeriodFor,
   claimStudy,
+  sendClaimRefusal,
   newStudyId,
   requireGeneratedStudyAccount,
   AI_PROCESSING_CONSENT_VERSION,
   meter,
+  modelAdmission,
   engine,
   mobile,
 })
@@ -312,6 +340,7 @@ generation.mount(app, db, {
 const MAX_ANALYSIS_CHARS = 120_000
 
 app.post('/v1/read', route(async (req, res) => {
+  if (!requireGeneratedStudyAccount(req, res)) return
   const { analysis, reference, level, studyId: priorStudyId } = req.body || {}
   if (!analysis || !reference) {
     return res.status(400).json({ error: 'analysis and reference are required' })
@@ -385,6 +414,7 @@ app.post('/v1/read', route(async (req, res) => {
     studyId: priorStudyId, accountId, installId: req.identity.installId,
   })
   let freshStudyId = null
+  const modelAdmissionId = `read-${newStudyId()}`
 
   if (!ridesPriorClaim) {
     // The shared cache admits only verifier-approved documents, while the
@@ -418,11 +448,12 @@ app.post('/v1/read', route(async (req, res) => {
         const id = newStudyId()
         const refused = await claimStudy(req, {
           ent, accountId, periodStart, periodEnd, reservationId: id,
+          modelAdmissionRequest: { id: modelAdmissionId, route: 'read' },
         })
-        return refused ? { response: { status: refused.status, body: refused.body } } : { freshStudyId: id }
+        return refused ? { response: refused } : { freshStudyId: id }
       },
     })
-    if (outcome.response) return res.status(outcome.response.status).json(outcome.response.body)
+    if (outcome.response) return sendClaimRefusal(res, outcome.response)
     freshStudyId = outcome.freshStudyId
   }
 
@@ -435,8 +466,13 @@ app.post('/v1/read', route(async (req, res) => {
     // the hold, terminal-vs-transient-vs-unknown, strand or reset — lives and
     // is behaviorally tested in read-resume.js. `held` deliberately does not
     // exist in this route; two audits proved any wiring around it bypassable.
-    const ride = await readResume.rideOrResolve(db, studyId)
-    if (!ride.ok) return res.status(ride.status).json(ride.body)
+    const ride = await readResume.rideOrResolve(db, studyId, {
+      id: modelAdmissionId,
+      route: 'read',
+      accountId,
+      installId: req.identity.installId,
+    })
+    if (!ride.ok) return sendClaimRefusal(res, ride)
   }
   if (!ridesPriorClaim) {
     try {
@@ -447,11 +483,12 @@ app.post('/v1/read', route(async (req, res) => {
       if (!opened) throw new Error('The reading claim could not be opened.')
     } catch (error) {
       await meter.releaseStudyReservation(db, studyId).catch(() => {})
+      await modelAdmission.finish(db, modelAdmissionId).catch(() => {})
       throw error
     }
   }
   let settled = false
-  const release = async (actualUsd) => {
+  const release = async (actualUsd, { accountingUncertain = false } = {}) => {
     // A reading that failed must leave the claim rideable again, or a man pays a
     // second study to retry something he never received.
     //
@@ -468,6 +505,7 @@ app.post('/v1/read', route(async (req, res) => {
     await meter.settleStudyReservation(db, {
       reservationId: studyId,
       actualUsd,
+      accountingUncertain,
     })
 
     if (state === 'stranded') {
@@ -504,8 +542,9 @@ app.post('/v1/read', route(async (req, res) => {
   // idle-timeout somewhere in the path will kill a request that is working fine.
   const beat = setInterval(() => send({ type: 'ping' }), 15000)
   const reservationHeartbeat = studyId
-    ? setInterval(() => {
+      ? setInterval(() => {
         meter.heartbeatStudyReservation(db, studyId).catch(() => {})
+        modelAdmission.heartbeat(db, modelAdmissionId).catch(() => {})
       }, meter.RESERVATION_HEARTBEAT_MS)
     : null
   reservationHeartbeat?.unref?.()
@@ -519,6 +558,7 @@ app.post('/v1/read', route(async (req, res) => {
   // the whole study here would bill that half twice.
   let spentBefore = 0
 
+  try {
   try {
     spentBefore = accountId ? await engine.studyCost(db, studyId) : 0
     const doc = await engine.runPlainRead(db, {
@@ -562,14 +602,17 @@ app.post('/v1/read', route(async (req, res) => {
      * So before reporting a failure, look for the thing the failure would have
      * produced. Costs one indexed lookup on a path that is already over.
      */
+    let accountingUncertain = engine.isUsageAccountingError(e)
     const salvaged = await engine.cachedDocument(db, analysis, level).catch(() => null)
     if (salvaged) {
-      const actualUsd = accountId
-        ? (await engine.studyCost(db, studyId).catch(() => 0)) - spentBefore
-        : 0
+      let actualUsd = 0
+      if (accountId) {
+        try { actualUsd = (await engine.studyCost(db, studyId)) - spentBefore } catch { accountingUncertain = true }
+      }
       await meter.settleStudyReservation(db, {
         reservationId: studyId,
         actualUsd,
+        accountingUncertain,
       })
       settled = true
       await engine.finishStudy(db, studyId, { analysis, document: salvaged, level }).catch(() => {})
@@ -577,13 +620,27 @@ app.post('/v1/read', route(async (req, res) => {
       return res.end()
     }
 
-    const actualUsd = accountId
-      ? Math.max((await engine.studyCost(db, studyId).catch(() => 0)) - spentBefore, 0)
-      : 0
-    await release(actualUsd)   // a study that never ran must not eat the allowance
-    const code = e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'GENERATION_FAILED'
-    send({ type: 'error', code, message: e?.message || 'The reading could not be completed.' })
+    let actualUsd = 0
+    if (accountId) {
+      try { actualUsd = Math.max((await engine.studyCost(db, studyId)) - spentBefore, 0) } catch { accountingUncertain = true }
+    }
+    await release(actualUsd, { accountingUncertain })
+    const code = accountingUncertain
+      ? 'ACCOUNTING_UNAVAILABLE'
+      : (e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'GENERATION_FAILED')
+    send({
+      type: 'error',
+      code,
+      message: accountingUncertain
+        ? 'The Operator paused that reading because usage could not be recorded safely. Try again in a moment.'
+        : (e?.message || 'The reading could not be completed.'),
+    })
     res.end()
+  }
+  } finally {
+    clearInterval(beat)
+    if (reservationHeartbeat) clearInterval(reservationHeartbeat)
+    await modelAdmission.finish(db, modelAdmissionId).catch(() => {})
   }
 }))
 
@@ -610,9 +667,60 @@ const FREE_LIFETIME_ASKS = 5
  */
 const MAX_ASK_CHARS = 60_000
 
+function sendAskClaimRefusal(res, claim, { specialist = false } = {}) {
+  if (claim.reason === 'identity-required') {
+    return res.status(400).json({ error: 'x-install-id header required' })
+  }
+  if (claim.reason === 'model-admission') {
+    return sendClaimRefusal(res, modelAdmission.refusal(claim))
+  }
+  if (claim.reason === 'service-paused' || claim.reason === 'free-tier-paused') {
+    return res.status(503).json({
+      error: claim.reason === 'service-paused' ? 'SERVICE_PAUSED' : 'FREE_TIER_PAUSED',
+      message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
+    })
+  }
+  if (claim.reason === 'account-unavailable') return res.status(409).json({
+    error: 'ACCOUNT_UNAVAILABLE',
+    message: 'This account is being deleted and cannot start new work.',
+  })
+  if (claim.reason === 'daily-limit') return res.status(429).json({
+    error: 'ASK_LIMIT',
+    ...(specialist ? {} : { headline: "That's a lot of questions for one day." }),
+    message: specialist
+      ? 'The specialist-question limit resets in a few hours. Your study and agent threads stay available.'
+      : 'The limit resets in a few hours. Everything you have studied stays available.',
+  })
+  return res.status(429).json({
+    error: 'FREE_ASK_LIMIT',
+    ...(specialist ? {} : { headline: 'You have worked this free study all the way through.' }),
+    message: specialist
+      ? `Your ${FREE_LIFETIME_ASKS} included follow-up questions are used. The study and every answer stay in your library.`
+      : `Your ${FREE_LIFETIME_ASKS} free follow-up questions are used. The study and every answer stay in your library.`,
+  })
+}
+
+function sendIdempotentResult(res, result) {
+  if (result.retryAfterSeconds) res.setHeader('Retry-After', String(result.retryAfterSeconds))
+  return res.status(result.status).json(result.body)
+}
+
+function describeModelRequest(req, routeName, requestId, payload) {
+  try {
+    return requestIdempotency.describe({
+      ownerId: req.identity.account?.id || req.identity.installId,
+      route: routeName,
+      requestId,
+      payload,
+    })
+  } catch {
+    return null
+  }
+}
+
 app.post('/v1/ask', route(async (req, res) => {
   if (!requireGeneratedStudyAccount(req, res)) return
-  const { studyId, question, history, vaultNotes, aiConsentVersion } = req.body || {}
+  const { studyId, question, history, vaultNotes, requestId, aiConsentVersion } = req.body || {}
   if (aiConsentVersion !== AI_PROCESSING_CONSENT_VERSION) {
     return res.status(400).json({
       error: 'AI_CONSENT_REQUIRED',
@@ -640,55 +748,72 @@ app.post('/v1/ask', route(async (req, res) => {
   if (String(question).length > 2000) {
     return res.status(413).json({ error: 'INPUT_TOO_LARGE', message: 'That question is too long.' })
   }
+  const safetyPrecheck = precheckQuestion(String(question).trim(), history)
+  if (safetyPrecheck === 'unsafe') {
+    return res.json({ answer: UNSAFE_ANSWER, refusal: 'unsafe', suggested: [] })
+  }
+  if (safetyPrecheck === 'personal-counsel') {
+    return res.json({ answer: PERSONAL_COUNSEL_ANSWER, refusal: 'personal-counsel', suggested: [] })
+  }
 
+  const idempotency = describeModelRequest(req, 'ask', requestId, {
+    studyId,
+    question: String(question).trim(),
+    history,
+    vaultNotes,
+  })
+  if (!idempotency) {
+    return res.status(400).json({
+      error: 'REQUEST_ID_REQUIRED',
+      message: 'A valid requestId is required for a generated answer.',
+    })
+  }
   const ent = entitlementFor(req.identity.account)
   const recurringAskAccess = Boolean(req.identity.account && ent.paying)
-  const askReservationId = `ask-${newStudyId()}`
+  const askReservationId = idempotency.id
   const claim = await meter.reserveAsk(db, {
     id: askReservationId,
     accountId,
     installId,
+    modelRoute: 'ask',
     recurringAccess: recurringAskAccess,
     freeLimit: FREE_LIFETIME_ASKS,
     dailyLimit: MAX_ASKS_PER_DAY,
+    requestHash: idempotency.requestHash,
   })
-  if (!claim.ok) {
-    if (claim.reason === 'service-paused' || claim.reason === 'free-tier-paused') {
-      return res.status(503).json({
-        error: claim.reason === 'service-paused' ? 'SERVICE_PAUSED' : 'FREE_TIER_PAUSED',
-        message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
-      })
-    }
-    if (claim.reason === 'account-unavailable') return res.status(409).json({
-      error: 'ACCOUNT_UNAVAILABLE',
-      message: 'This account is being deleted and cannot start new work.',
-    })
-    if (claim.reason === 'daily-limit') return res.status(429).json({
-      error: 'ASK_LIMIT',
-      headline: "That's a lot of questions for one day.",
-      message: 'The limit resets in a few hours. Everything you have studied stays available.',
-    })
-    return res.status(429).json({
-      error: 'FREE_ASK_LIMIT',
-      headline: 'You have worked this free study all the way through.',
-      message: `Your ${FREE_LIFETIME_ASKS} free follow-up questions are used. The study and every answer stay in your library.`,
-    })
+  if (!claim.ok && claim.reason === 'duplicate-request') {
+    return sendIdempotentResult(
+      res,
+      requestIdempotency.classifyAskRow(claim.reservation, idempotency.requestHash),
+    )
   }
+  if (!claim.ok) return sendAskClaimRefusal(res, claim)
 
   const reservationHeartbeat = setInterval(() => {
     meter.heartbeatAskReservation(db, askReservationId).catch(() => {})
+    modelAdmission.heartbeat(db, askReservationId).catch(() => {})
   }, meter.RESERVATION_HEARTBEAT_MS)
   reservationHeartbeat.unref?.()
+  let answerProduced = false
   try {
     const answer = await engine.runAsk(db, {
       doc, analysis, question, history, vaultNotes, accountId, installId,
     })
-    await meter.settleAskReservation(db, askReservationId)
+    answerProduced = true
+    const settled = await meter.settleAskReservation(db, askReservationId, { response: answer })
+    if (!settled) throw new Error('The answer could not be settled safely.')
     res.json(answer)
   } catch (e) {
-    await meter.releaseAskReservation(db, askReservationId).catch(() => {})
-    res.status(500).json({ error: 'ASK_FAILED', message: e?.message || 'That question could not be answered.' })
+    const accountingUncertain = engine.isUsageAccountingError(e) || answerProduced
+    await meter.releaseAskReservation(db, askReservationId, { accountingUncertain }).catch(() => {})
+    res.status(accountingUncertain ? 503 : 500).json({
+      error: accountingUncertain ? 'ACCOUNTING_UNAVAILABLE' : 'ASK_FAILED',
+      message: accountingUncertain
+        ? 'The Operator paused that answer because usage could not be recorded safely. Try again in a moment.'
+        : (e?.message || 'That question could not be answered.'),
+    })
   } finally {
+    await modelAdmission.finish(db, askReservationId).catch(() => {})
     clearInterval(reservationHeartbeat)
   }
 }))
@@ -697,7 +822,7 @@ const SERMON_AGENT_ROLES = new Set(['exegetical', 'theological', 'homiletical', 
 
 app.post('/v1/sermon-assist', route(async (req, res) => {
   if (!requireGeneratedStudyAccount(req, res)) return
-  const { studyId, agent, question, history, aiConsentVersion } = req.body || {}
+  const { studyId, agent, question, history, requestId, aiConsentVersion } = req.body || {}
   if (aiConsentVersion !== AI_PROCESSING_CONSENT_VERSION) {
     return res.status(400).json({
       error: 'AI_CONSENT_REQUIRED',
@@ -719,9 +844,24 @@ app.post('/v1/sermon-assist', route(async (req, res) => {
   if (JSON.stringify({ history }).length > MAX_ASK_CHARS) {
     return res.status(413).json({ error: 'INPUT_TOO_LARGE', message: 'That agent conversation is too large.' })
   }
+  const safetyPrecheck = precheckQuestion(String(question).trim(), history)
+  if (safetyPrecheck === 'unsafe') return res.json({ answer: UNSAFE_ANSWER })
+  if (safetyPrecheck === 'personal-counsel') return res.json({ answer: PERSONAL_COUNSEL_ANSWER })
 
   const accountId = req.identity.account?.id ?? null
   const installId = req.identity.installId
+  const idempotency = describeModelRequest(req, 'sermon-assist', requestId, {
+    studyId: studyId || null,
+    agent,
+    question: String(question).trim(),
+    history,
+  })
+  if (!idempotency) {
+    return res.status(400).json({
+      error: 'REQUEST_ID_REQUIRED',
+      message: 'A valid requestId is required for a specialist answer.',
+    })
+  }
   let access = null
   if (!generalMode) {
     access = await resolveOwnedStudyDocument(db, {
@@ -732,40 +872,31 @@ app.post('/v1/sermon-assist', route(async (req, res) => {
 
   const ent = entitlementFor(req.identity.account)
   const recurringAskAccess = Boolean(req.identity.account && ent.paying)
-  const askReservationId = `sermon-assist-${newStudyId()}`
+  const askReservationId = idempotency.id
   const claim = await meter.reserveAsk(db, {
     id: askReservationId,
     accountId,
     installId,
+    modelRoute: 'sermon-assist',
     recurringAccess: recurringAskAccess,
     freeLimit: FREE_LIFETIME_ASKS,
     dailyLimit: MAX_ASKS_PER_DAY,
+    requestHash: idempotency.requestHash,
   })
-  if (!claim.ok) {
-    if (claim.reason === 'service-paused' || claim.reason === 'free-tier-paused') {
-      return res.status(503).json({
-        error: claim.reason === 'service-paused' ? 'SERVICE_PAUSED' : 'FREE_TIER_PAUSED',
-        message: 'The Operator is paused for a moment. Nothing you have studied is affected.',
-      })
-    }
-    if (claim.reason === 'account-unavailable') return res.status(409).json({
-      error: 'ACCOUNT_UNAVAILABLE',
-      message: 'This account is being deleted and cannot start new work.',
-    })
-    if (claim.reason === 'daily-limit') return res.status(429).json({
-      error: 'ASK_LIMIT',
-      message: 'The specialist-question limit resets in a few hours. Your study and agent threads stay available.',
-    })
-    return res.status(429).json({
-      error: 'FREE_ASK_LIMIT',
-      message: `Your ${FREE_LIFETIME_ASKS} included follow-up questions are used. The study and every answer stay in your library.`,
-    })
+  if (!claim.ok && claim.reason === 'duplicate-request') {
+    return sendIdempotentResult(
+      res,
+      requestIdempotency.classifyAskRow(claim.reservation, idempotency.requestHash),
+    )
   }
+  if (!claim.ok) return sendAskClaimRefusal(res, claim, { specialist: true })
 
   const reservationHeartbeat = setInterval(() => {
     meter.heartbeatAskReservation(db, askReservationId).catch(() => {})
+    modelAdmission.heartbeat(db, askReservationId).catch(() => {})
   }, meter.RESERVATION_HEARTBEAT_MS)
   reservationHeartbeat.unref?.()
+  let answerProduced = false
   try {
     const result = await engine.runSermonAssist(db, {
       agent,
@@ -777,15 +908,21 @@ app.post('/v1/sermon-assist', route(async (req, res) => {
       installId,
       general: generalMode,
     })
-    await meter.settleAskReservation(db, askReservationId)
+    answerProduced = true
+    const settled = await meter.settleAskReservation(db, askReservationId, { response: result })
+    if (!settled) throw new Error('The specialist answer could not be settled safely.')
     res.json(result)
   } catch (error) {
-    await meter.releaseAskReservation(db, askReservationId).catch(() => {})
-    res.status(500).json({
-      error: 'SERMON_ASSIST_FAILED',
-      message: error?.message || 'That specialist could not answer right now.',
+    const accountingUncertain = engine.isUsageAccountingError(error) || answerProduced
+    await meter.releaseAskReservation(db, askReservationId, { accountingUncertain }).catch(() => {})
+    res.status(accountingUncertain ? 503 : 500).json({
+      error: accountingUncertain ? 'ACCOUNTING_UNAVAILABLE' : 'SERMON_ASSIST_FAILED',
+      message: accountingUncertain
+        ? 'The Operator paused that answer because usage could not be recorded safely. Try again in a moment.'
+        : (error?.message || 'That specialist could not answer right now.'),
     })
   } finally {
+    await modelAdmission.finish(db, askReservationId).catch(() => {})
     clearInterval(reservationHeartbeat)
   }
 }))

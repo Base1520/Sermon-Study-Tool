@@ -35,6 +35,7 @@ const QUICK_STUDY_RESERVE_USD = 0.03
 const GUIDED_STUDY_RESERVE_USD = 0.05
 const ASK_RESERVE_USD = 0.08
 const GLOBAL_SPEND_LOCK_ID = 15202026
+const modelAdmission = require('./model-admission')
 
 /** Synthetic owner for reservations made before a caller has an account. */
 const ANON_LEDGER_ACCOUNT = '00000000-0000-0000-0000-000000000001'
@@ -74,13 +75,35 @@ async function reserveAsk(db, {
   id,
   accountId,
   installId,
+  modelRoute = 'ask',
   recurringAccess,
   freeLimit,
   dailyLimit,
+  requestHash = null,
 }) {
   return withGlobalSpendLock(db, async (client) => {
+    if (!accountId && !installId) return { ok: false, reason: 'identity-required' }
     if (accountId && !(await accountAvailableForSpend(client, accountId))) {
       return { ok: false, reason: 'account-unavailable' }
+    }
+    const existingRequest = await client.query(
+      `SELECT state, request_hash, response
+         FROM ask_reservation
+        WHERE id = $1
+        LIMIT 1`,
+      [id],
+    )
+    if (existingRequest.rows.length) {
+      return { ok: false, reason: 'duplicate-request', reservation: existingRequest.rows[0] }
+    }
+    const admissionInput = { id, route: modelRoute, accountId, installId }
+    const admission = await modelAdmission.check(client, admissionInput)
+    if (!admission.ok) {
+      return {
+        ok: false,
+        reason: 'model-admission',
+        retryAfterSeconds: admission.retryAfterSeconds,
+      }
     }
     const ceiling = await ceilingStatus(client)
     const projected = ceiling.committed + ASK_RESERVE_USD
@@ -127,19 +150,25 @@ async function reserveAsk(db, {
     }
 
     await client.query(
-      `INSERT INTO ask_reservation (id, account_id, install_id, access_kind, reserved_usd)
-            VALUES ($1, $2, $3, $4, $5)`,
-      [id, accountId || null, installId || null, accessKind, ASK_RESERVE_USD],
+      `INSERT INTO ask_reservation (
+         id, account_id, install_id, access_kind, reserved_usd, request_hash
+       ) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, accountId || null, installId || null, accessKind, ASK_RESERVE_USD, requestHash],
     )
-    return { ok: true, id, accessKind }
+    await modelAdmission.insert(client, admissionInput)
+    return { ok: true, id, accessKind, modelAdmissionId: id }
   })
 }
 
-async function settleAskReservation(db, id) {
+async function settleAskReservation(db, id, { accountingUncertain = false, response = null } = {}) {
   const { rowCount } = await db.query(
-    `UPDATE ask_reservation SET state = 'settled', updated_at = now()
+    `UPDATE ask_reservation
+        SET state = 'settled',
+            accounting_uncertain = accounting_uncertain OR $2::boolean,
+            response = COALESCE($3::jsonb, response),
+            updated_at = now()
       WHERE id = $1 AND state = 'held'`,
-    [id],
+    [id, accountingUncertain, response],
   )
   return rowCount > 0
 }
@@ -153,16 +182,19 @@ async function heartbeatAskReservation(db, id) {
   return rowCount > 0
 }
 
-async function releaseAskReservation(db, id, { staleOnly = false } = {}) {
+async function releaseAskReservation(db, id, { staleOnly = false, accountingUncertain = false } = {}) {
   const client = await db.connect()
   try {
     await client.query('BEGIN')
     const { rows } = await client.query(
-      `UPDATE ask_reservation SET state = 'released', updated_at = now()
+      `UPDATE ask_reservation
+          SET state = 'released',
+              accounting_uncertain = accounting_uncertain OR $2::boolean OR $4::boolean,
+              updated_at = now()
         WHERE id = $1 AND state = 'held'
           AND (NOT $2::boolean OR updated_at < now() - ($3 || ' minutes')::interval)
         RETURNING account_id, install_id, access_kind`,
-      [id, staleOnly, RESERVATION_TTL_MINUTES],
+      [id, staleOnly, RESERVATION_TTL_MINUTES, accountingUncertain],
     )
     const released = rows[0]
     if (released?.access_kind === 'account_free') {
@@ -514,16 +546,18 @@ async function releaseStudy(db, { accountId, periodStart }) {
   )
 }
 
-async function settleStudyReservation(db, { reservationId, actualUsd = 0 }) {
+async function settleStudyReservation(db, { reservationId, actualUsd = 0, accountingUncertain = false }) {
   const client = await db.connect()
   try {
     await client.query('BEGIN')
     const { rows } = await client.query(
       `UPDATE study_reservation
-          SET state = 'settled', updated_at = now()
+          SET state = 'settled',
+              accounting_uncertain = accounting_uncertain OR $2::boolean,
+              updated_at = now()
         WHERE id = $1 AND state = 'held'
         RETURNING account_id, period_start`,
-      [reservationId],
+      [reservationId, accountingUncertain],
     )
     const reservation = rows[0]
     if (reservation?.account_id) {
@@ -564,6 +598,17 @@ async function studyReservationState(db, reservationId) {
     [reservationId],
   )
   return rows[0]?.state ?? null
+}
+
+async function markStudyReservationAccountingUncertain(db, reservationId) {
+  if (!reservationId) return false
+  const { rowCount } = await db.query(
+    `UPDATE study_reservation
+        SET accounting_uncertain = true, updated_at = now()
+      WHERE id = $1 AND state = 'held'`,
+    [reservationId],
+  )
+  return rowCount > 0
 }
 
 async function heartbeatStudyReservation(db, reservationId) {
@@ -628,17 +673,20 @@ async function transitionStudyReservation(db, {
   toState,
   refund,
   staleOnly = false,
+  accountingUncertain = false,
 }) {
   const client = await db.connect()
   try {
     await client.query('BEGIN')
     const { rows } = await client.query(
       `UPDATE study_reservation
-          SET state = $2, updated_at = now()
+          SET state = $2,
+              accounting_uncertain = accounting_uncertain OR $4::boolean OR $6::boolean,
+              updated_at = now()
         WHERE id = $1 AND state = ANY($3::text[])
           AND (NOT $4::boolean OR updated_at < now() - ($5 || ' minutes')::interval)
         RETURNING account_id, install_id, access_kind, period_start`,
-      [reservationId, toState, fromStates, staleOnly, RESERVATION_TTL_MINUTES],
+      [reservationId, toState, fromStates, staleOnly, RESERVATION_TTL_MINUTES, accountingUncertain],
     )
     const reservation = rows[0]
     if (reservation && refund) await refundReservationCounter(client, reservation)
@@ -652,13 +700,14 @@ async function transitionStudyReservation(db, {
   }
 }
 
-function releaseStudyReservation(db, reservationId, { staleOnly = false } = {}) {
+function releaseStudyReservation(db, reservationId, { staleOnly = false, accountingUncertain = false } = {}) {
   return transitionStudyReservation(db, {
     reservationId,
     fromStates: ['held'],
     toState: 'released',
     refund: true,
     staleOnly,
+    accountingUncertain,
   })
 }
 
@@ -693,7 +742,8 @@ async function recoverStaleReading(db, studyId) {
 
     if (reservation && nextState === 'stranded' && ['held', 'settled'].includes(reservation.state)) {
       const refunded = await client.query(
-        `UPDATE study_reservation SET state = 'refunded', updated_at = now()
+        `UPDATE study_reservation
+            SET state = 'refunded', accounting_uncertain = true, updated_at = now()
           WHERE id = $1 AND state IN ('held', 'settled')
           RETURNING id`,
         [studyId],
@@ -701,7 +751,8 @@ async function recoverStaleReading(db, studyId) {
       if (refunded.rows.length) await refundReservationCounter(client, reservation)
     } else if (reservation?.state === 'held') {
       await client.query(
-        `UPDATE study_reservation SET state = 'settled', updated_at = now()
+        `UPDATE study_reservation
+            SET state = 'settled', accounting_uncertain = true, updated_at = now()
           WHERE id = $1 AND state = 'held'`,
         [studyId],
       )
@@ -743,14 +794,32 @@ async function sweepStaleReservations(db) {
     if (await recoverStaleReading(db, row.id)) recoveredReadings += 1
   }
   const staleStudies = await db.query(
-    `SELECT id FROM study_reservation
-      WHERE state = 'held'
-        AND updated_at < now() - ($1 || ' minutes')::interval`,
+    `SELECT reservation.id,
+            (study.analysis IS NOT NULL OR study.document IS NOT NULL) AS result_saved
+       FROM study_reservation reservation
+       LEFT JOIN study ON study.id = reservation.id
+      WHERE reservation.state = 'held'
+        AND reservation.updated_at < now() - ($1 || ' minutes')::interval`,
     [RESERVATION_TTL_MINUTES],
   )
   let releasedStudies = 0
   for (const row of staleStudies.rows) {
-    if (await releaseStudyReservation(db, row.id, { staleOnly: true })) releasedStudies += 1
+    if (row.result_saved) {
+      try {
+        const { rows } = await db.query(
+          `SELECT COALESCE(SUM(usd), 0) AS usd FROM usage_event WHERE study_id = $1`,
+          [row.id],
+        )
+        if (await settleStudyReservation(db, {
+          reservationId: row.id,
+          actualUsd: Number(rows[0]?.usd || 0),
+        })) releasedStudies += 1
+      } catch {
+        await markStudyReservationAccountingUncertain(db, row.id).catch(() => {})
+      }
+    } else if (await releaseStudyReservation(db, row.id, { staleOnly: true })) {
+      releasedStudies += 1
+    }
   }
   const { rowCount } = await db.query(
     `UPDATE usage_period
@@ -769,7 +838,8 @@ async function sweepStaleReservations(db) {
   for (const row of staleAsks.rows) {
     if (await releaseAskReservation(db, row.id, { staleOnly: true })) releasedAsks += 1
   }
-  return recoveredReadings + releasedStudies + rowCount + releasedAsks
+  const sweptAdmissions = await modelAdmission.sweep(db)
+  return recoveredReadings + releasedStudies + rowCount + releasedAsks + sweptAdmissions
 }
 
 /**
@@ -832,11 +902,28 @@ async function committedSpend(db, { hours = 24 } = {}) {
         AND updated_at > now() - ($1 || ' minutes')::interval`,
     [RESERVATION_TTL_MINUTES],
   )
+  const uncertainStudies = await db.query(
+    `SELECT COALESCE(SUM(reserved_usd), 0) AS uncertain
+       FROM study_reservation
+      WHERE accounting_uncertain = true
+        AND state <> 'held'
+        AND updated_at > now() - ($1 || ' hours')::interval`,
+    [hours],
+  )
+  const uncertainAsks = await db.query(
+    `SELECT COALESCE(SUM(reserved_usd), 0) AS uncertain
+       FROM ask_reservation
+      WHERE accounting_uncertain = true
+        AND state <> 'held'
+        AND updated_at > now() - ($1 || ' hours')::interval`,
+    [hours],
+  )
   const reconciled = Number(spent.rows[0].reconciled)
   const inFlight = Number(held.rows[0].in_flight) +
     Number(studyHeld.rows[0].in_flight) +
     Number(askHeld.rows[0].in_flight)
-  return { reconciled, inFlight, committed: reconciled + inFlight }
+  const uncertain = Number(uncertainStudies.rows[0].uncertain) + Number(uncertainAsks.rows[0].uncertain)
+  return { reconciled, inFlight, uncertain, committed: reconciled + inFlight + uncertain }
 }
 
 /**
@@ -891,6 +978,7 @@ module.exports = {
   settleStudyReservation,
   holdStudyReservationForReading,
   studyReservationState,
+  markStudyReservationAccountingUncertain,
   heartbeatStudyReservation,
   releaseStudyReservation,
   refundStudyReservation,

@@ -181,6 +181,12 @@ ALTER TABLE account_registration_code
   ADD COLUMN IF NOT EXISTS account_id uuid REFERENCES account(id) ON DELETE CASCADE;
 ALTER TABLE account_registration_code
   ADD COLUMN IF NOT EXISTS source_ip_hash text;
+-- Legacy registration challenges predate the source-IP throttle and expire in
+-- minutes. Remove those incomplete challenge rows rather than preserving a
+-- permanent NULL bypass, then make the throttle identity structurally required.
+DELETE FROM account_registration_code WHERE source_ip_hash IS NULL;
+ALTER TABLE account_registration_code
+  ALTER COLUMN source_ip_hash SET NOT NULL;
 CREATE INDEX IF NOT EXISTS account_registration_code_lookup_idx
   ON account_registration_code(email_hash, install_hash, created_at DESC);
 CREATE INDEX IF NOT EXISTS account_registration_code_account_idx
@@ -227,10 +233,12 @@ CREATE TABLE IF NOT EXISTS study_reservation (
   access_kind  text NOT NULL CHECK (access_kind IN ('recurring', 'topup', 'account_free', 'anon_free')),
   period_start timestamptz NOT NULL,
   reserved_usd numeric(10,4) NOT NULL DEFAULT 0.75,
+  accounting_uncertain boolean NOT NULL DEFAULT false,
   state        text NOT NULL DEFAULT 'held' CHECK (state IN ('held', 'settled', 'released', 'refunded')),
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE study_reservation ADD COLUMN IF NOT EXISTS accounting_uncertain boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS study_reservation_account_idx ON study_reservation(account_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS study_reservation_install_idx ON study_reservation(install_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS study_reservation_held_idx ON study_reservation(state, updated_at);
@@ -268,13 +276,44 @@ CREATE TABLE IF NOT EXISTS ask_reservation (
   install_id   text,
   access_kind  text NOT NULL CHECK (access_kind IN ('recurring', 'account_free', 'anon_free')),
   reserved_usd numeric(10,4) NOT NULL DEFAULT 0.08,
+  accounting_uncertain boolean NOT NULL DEFAULT false,
+  request_hash text,
+  response     jsonb,
   state        text NOT NULL DEFAULT 'held' CHECK (state IN ('held', 'settled', 'released')),
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE ask_reservation ADD COLUMN IF NOT EXISTS accounting_uncertain boolean NOT NULL DEFAULT false;
+ALTER TABLE ask_reservation ADD COLUMN IF NOT EXISTS request_hash text;
+ALTER TABLE ask_reservation ADD COLUMN IF NOT EXISTS response jsonb;
 CREATE INDEX IF NOT EXISTS ask_reservation_account_idx ON ask_reservation(account_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ask_reservation_install_idx ON ask_reservation(install_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ask_reservation_held_idx ON ask_reservation(state, updated_at);
+
+CREATE TABLE IF NOT EXISTS model_admission (
+  id           text PRIMARY KEY,
+  account_id   uuid REFERENCES account(id) ON DELETE CASCADE,
+  install_id   text,
+  route        text NOT NULL CHECK (route IN ('analyze', 'quick-study', 'guided-study', 'read', 'ask', 'sermon-assist')),
+  provider_slots integer NOT NULL DEFAULT 1 CHECK (provider_slots BETWEEN 1 AND 3),
+  state        text NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'finished')),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  CHECK (account_id IS NOT NULL OR install_id IS NOT NULL)
+);
+ALTER TABLE model_admission
+  ADD COLUMN IF NOT EXISTS provider_slots integer NOT NULL DEFAULT 1
+    CHECK (provider_slots BETWEEN 1 AND 3);
+CREATE INDEX IF NOT EXISTS model_admission_account_idx ON model_admission(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS model_admission_install_idx ON model_admission(install_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS model_admission_active_idx ON model_admission(state, updated_at);
+CREATE INDEX IF NOT EXISTS model_admission_created_idx ON model_admission(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS schema_migration (
+  schema_version text PRIMARY KEY,
+  schema_sha256  text NOT NULL CHECK (schema_sha256 ~ '^[0-9a-f]{64}$'),
+  applied_at     timestamptz NOT NULL DEFAULT now()
+);
 
 -- ── Settings ────────────────────────────────────────────────────────────────
 -- The kill switch lives HERE and not in an environment variable, so it can be
@@ -286,6 +325,15 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 INSERT INTO settings (key, value) VALUES ('daily_ceiling_usd', '50')
   ON CONFLICT (key) DO NOTHING;
+INSERT INTO settings (key, value) VALUES
+  ('model_admission_window_seconds', '60'),
+  ('model_admission_global_requests', '30'),
+  ('model_admission_identity_requests', '6'),
+  ('model_admission_global_concurrency', '8'),
+  ('model_admission_identity_concurrency', '2'),
+  ('model_admission_global_provider_concurrency', '16'),
+  ('model_admission_identity_provider_concurrency', '6')
+ON CONFLICT (key) DO NOTHING;
 
 -- The synthetic account that holds the FREE tier's in-flight reservations.
 -- usage_period.account_id has a foreign key, so the row has to exist; free work
@@ -471,6 +519,7 @@ ALTER TABLE study ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
 -- extra steps, each one spending real Opus tokens.
 ALTER TABLE study ADD COLUMN IF NOT EXISTS refunded_at timestamptz;
 ALTER TABLE study ADD COLUMN IF NOT EXISTS analysis jsonb;
+ALTER TABLE study ADD COLUMN IF NOT EXISTS request_hash text;
 ALTER TABLE study ADD COLUMN IF NOT EXISTS document jsonb;
 ALTER TABLE study ADD COLUMN IF NOT EXISTS level text;
 ALTER TABLE study ADD COLUMN IF NOT EXISTS notes text;

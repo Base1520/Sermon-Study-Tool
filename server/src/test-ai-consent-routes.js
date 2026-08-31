@@ -57,7 +57,7 @@ for (const dependency of [
   assert.match(mountSource, new RegExp(`\\n\\s{2}${dependency},`), `generation mount must pass ${dependency}`)
   assert.match(moduleMountSource, new RegExp(`\\n\\s{2}${dependency},`), `generation module must receive ${dependency}`)
 }
-assert.match(generation, /module\.exports = \{ mount \}/, 'generation module must export its mount seam')
+assert.match(generation, /module\.exports = \{ mount, reconcilePersistedStudy \}/, 'generation module must export its mount seam')
 
 const analyzeRoute = routeSource(
   generation,
@@ -68,12 +68,18 @@ const analyzeRoute = routeSource(
 const inputCheck = analyzeRoute.indexOf('checkGenerationInput({ text, reference })')
 const claim = analyzeRoute.indexOf('claimStudy(req, {')
 const open = analyzeRoute.indexOf('engine.openStudy(db, {')
+assert.ok(analyzeRoute.indexOf('requireGeneratedStudyAccount(req, res)') < inputCheck,
+  'Analyze must require an account in a full release before processing input')
 assert.ok(inputCheck >= 0 && inputCheck < claim && claim < open,
   'Analyze must reject oversized input before any claim or study row')
 
+const readRoute = routeSource(server, 'index.js', "app.post('/v1/read'", '/**\n * Ask a question about a reading.')
+assert.match(readRoute, /requireGeneratedStudyAccount\(req, res\)/,
+  'Read must require an account in a full release before generated work')
+
 for (const [source, owner, start, end] of [
   [generation, 'routes/generation.js', "app.post('/v1/quick-study'", "app.post('/v1/guided-study'"],
-  [generation, 'routes/generation.js', "app.post('/v1/guided-study'", 'module.exports = { mount }'],
+  [generation, 'routes/generation.js', "app.post('/v1/guided-study'", 'module.exports = { mount, reconcilePersistedStudy }'],
   [server, 'index.js', "app.post('/v1/ask'", 'const SERMON_AGENT_ROLES'],
   [server, 'index.js', "app.post('/v1/sermon-assist'", "app.get('/v1/studies/:id/commentary'"],
 ]) {
@@ -87,5 +93,9 @@ const askClientStart = client.indexOf('export function askQuestion')
 const askClientEnd = client.indexOf('export async function askSermonAgent', askClientStart)
 const askClient = client.slice(askClientStart, askClientEnd)
 assert.match(askClient, /aiConsentVersion:\s*AI_PROCESSING_CONSENT_VERSION/)
+assert.match(client, /this\.code = String\(payload\.error \|\| payload\.code \|\| 'REQUEST_FAILED'\)/,
+  'streamed errors must preserve their code')
+assert.match(client, /retryAfterSeconds\(response\)/,
+  'HTTP refusals must preserve Retry-After guidance')
 
 console.log('mobile AI-consent and generation extraction contract passed')

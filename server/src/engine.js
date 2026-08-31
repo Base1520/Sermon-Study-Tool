@@ -43,6 +43,10 @@ const { answerSermonAgent } = require('./sermon-assist')
 const quickStudyInFlight = new Map()
 const guidedStudyInFlight = new Map()
 
+function withHostedRetry(operation, baseDelayMs = 2000) {
+  return withRetry(operation, 2, baseDelayMs)
+}
+
 /**
  * A cache backed by Postgres, shaped like the one the engine expects.
  *
@@ -94,6 +98,7 @@ function makeRecorder(db, { accountId, studyId, reference, installId }, pending)
   return (label, usage, model) => {
     if (!usage) return null
     const priced = priceCall(usage, model)
+    pending.estimatedUsd = Number(pending.estimatedUsd || 0) + priced.costUsd
     // Never let accounting delay or break a study in progress — but DO keep the
     // promise. Settlement sums these rows the instant the engine returns, and a
     // fire-and-forget insert can lose that race: studyCost() reads zero, the
@@ -108,19 +113,49 @@ function makeRecorder(db, { accountId, studyId, reference, installId }, pending)
        priced.inputTokens, priced.outputTokens,
        priced.cacheWriteTokens, priced.cacheReadTokens,
        priced.costUsd, reference ?? null, installId ?? null],
-    ).catch((e) => console.error('[usage] write failed:', e.message))
+    ).then(
+      () => null,
+      (error) => error,
+    )
     pending?.push(write)
     return priced
   }
 }
 
+class UsageAccountingError extends Error {
+  constructor(message, { estimatedUsd = 0, cause = null } = {}) {
+    super(message, cause ? { cause } : undefined)
+    this.name = 'UsageAccountingError'
+    this.code = 'USAGE_ACCOUNTING_FAILED'
+    this.estimatedUsd = Math.max(Number(estimatedUsd) || 0, 0)
+  }
+}
+
+async function drainUsageWrites(pending) {
+  const failures = (await Promise.all(pending)).filter(Boolean)
+  if (failures.length) {
+    throw new UsageAccountingError('Model usage could not be recorded safely.', {
+      estimatedUsd: pending.estimatedUsd,
+      cause: failures[0],
+    })
+  }
+}
+
+function isUsageAccountingError(error) {
+  return error?.code === 'USAGE_ACCOUNTING_FAILED'
+}
+
 /** Total what a study actually cost, for settling its reservation. */
 async function studyCost(db, studyId) {
-  const { rows } = await db.query(
-    `SELECT COALESCE(SUM(usd), 0) AS usd FROM usage_event WHERE study_id = $1`,
-    [studyId],
-  )
-  return Number(rows[0].usd)
+  try {
+    const { rows } = await db.query(
+      `SELECT COALESCE(SUM(usd), 0) AS usd FROM usage_event WHERE study_id = $1`,
+      [studyId],
+    )
+    return Number(rows[0].usd)
+  } catch (error) {
+    throw new UsageAccountingError('Model usage could not be totaled safely.', { cause: error })
+  }
 }
 
 /**
@@ -149,21 +184,23 @@ async function runPlainRead(db, { analysis: rawAnalysis, requestedReference, lev
   const preloaded = await preloadCache(db, [cacheKeyFor(analysis, level)])
   const cache = makeCache(preloaded, (k, v) => writes.push(writeCache(db, k, v)))
 
-  const doc = await plainRead({
-    analysis,
-    requestedReference,
-    ...(level ? { level } : {}),
-    apiKey: process.env.ANTHROPIC_API_KEY,
-    createClient: (key) => new Anthropic.default({ apiKey: key }),
-    cache,
-    retry: withRetry,
-    parse: parseModelJSON,
-    onSection,
-    onUsage: record,
-  })
-
-  await Promise.allSettled([...writes, ...pending])
-  return doc
+  try {
+    return await plainRead({
+      analysis,
+      requestedReference,
+      ...(level ? { level } : {}),
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      createClient: (key) => new Anthropic.default({ apiKey: key, maxRetries: 0 }),
+      cache,
+      retry: withHostedRetry,
+      parse: parseModelJSON,
+      onSection,
+      onUsage: record,
+    })
+  } finally {
+    await Promise.allSettled(writes)
+    await drainUsageWrites(pending)
+  }
 }
 
 /**
@@ -183,20 +220,23 @@ async function runAnalyze(db, { text, reference, accountId, studyId, installId, 
 
   const pending = []
   const record = makeRecorder(db, { accountId, studyId, reference, installId }, pending)
-  const analysis = await analyzePassage({
-    text,
-    reference,
-    apiKey: process.env.ANTHROPIC_API_KEY,
-    createClient: (k) => new Anthropic.default({ apiKey: k }),
-    retry: withRetry,
-    parse: parseModelJSON,
-    onStage,
-    onUsage: record,
-  })
+  try {
+    const analysis = await analyzePassage({
+      text,
+      reference,
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      createClient: (k) => new Anthropic.default({ apiKey: k, maxRetries: 0 }),
+      retry: withHostedRetry,
+      parse: parseModelJSON,
+      onStage,
+      onUsage: record,
+    })
 
-  await writeCache(db, key, analysis)
-  await Promise.allSettled(pending)   // settlement reads these rows next
-  return { analysis, cached: false }
+    await writeCache(db, key, analysis)
+    return { analysis, cached: false }
+  } finally {
+    await drainUsageWrites(pending)
+  }
 }
 
 /**
@@ -243,8 +283,8 @@ async function runQuickStudy(db, { text, reference, translation, accountId, stud
         reference,
         translation,
         apiKey: process.env.ANTHROPIC_API_KEY,
-        createClient: (apiKey) => new Anthropic.default({ apiKey }),
-        retry: withRetry,
+        createClient: (apiKey) => new Anthropic.default({ apiKey, maxRetries: 0 }),
+        retry: withHostedRetry,
         parse: parseModelJSON,
         onUsage: record,
       })
@@ -254,7 +294,7 @@ async function runQuickStudy(db, { text, reference, translation, accountId, stud
     } finally {
       // A response that fails validation still consumed model tokens. Drain
       // usage writes before the route totals and refunds anything.
-      await Promise.allSettled(pending)
+      await drainUsageWrites(pending)
     }
   })()
 
@@ -301,8 +341,8 @@ async function runGuidedStudy(db, { text, reference, translation, accountId, stu
         reference,
         translation,
         apiKey: process.env.ANTHROPIC_API_KEY,
-        createClient: (apiKey) => new Anthropic.default({ apiKey }),
-        retry: withRetry,
+        createClient: (apiKey) => new Anthropic.default({ apiKey, maxRetries: 0 }),
+        retry: withHostedRetry,
         parse: parseModelJSON,
         onUsage: record,
       })
@@ -310,7 +350,7 @@ async function runGuidedStudy(db, { text, reference, translation, accountId, stu
       await writeCache(db, key, { document, analysis })
       return { document, analysis, cached: false }
     } finally {
-      await Promise.allSettled(pending)
+      await drainUsageWrites(pending)
     }
   })()
 
@@ -339,16 +379,18 @@ async function runAsk(db, { doc, analysis, question, history, vaultNotes, accoun
     accountId, studyId: `ask-${Date.now().toString(36)}`,
     reference: analysis?.reference, installId,
   }, pending)
-  const answer = await askAboutPassage({
-    doc, analysis, question, history, vaultNotes,
-    apiKey: process.env.ANTHROPIC_API_KEY,
-    createClient: (k) => new Anthropic.default({ apiKey: k }),
-    retry: withRetry,
-    parse: parseModelJSON,
-    onUsage: record,
-  })
-  await Promise.allSettled(pending)
-  return answer
+  try {
+    return await askAboutPassage({
+      doc, analysis, question, history, vaultNotes,
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      createClient: (k) => new Anthropic.default({ apiKey: k, maxRetries: 0 }),
+      retry: withHostedRetry,
+      parse: parseModelJSON,
+      onUsage: record,
+    })
+  } finally {
+    await drainUsageWrites(pending)
+  }
 }
 
 async function runSermonAssist(db, { agent, doc, analysis, question, history, accountId, installId, general = false }) {
@@ -359,20 +401,22 @@ async function runSermonAssist(db, { agent, doc, analysis, question, history, ac
     reference: analysis?.reference || doc?.reference || null,
     installId,
   }, pending)
-  const answer = await answerSermonAgent({
-    agent,
-    doc,
-    analysis,
-    question,
-    history,
-    general,
-    apiKey: process.env.ANTHROPIC_API_KEY,
-    createClient: (key) => new Anthropic.default({ apiKey: key }),
-    retry: withRetry,
-    onUsage: record,
-  })
-  await Promise.allSettled(pending)
-  return answer
+  try {
+    return await answerSermonAgent({
+      agent,
+      doc,
+      analysis,
+      question,
+      history,
+      general,
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      createClient: (key) => new Anthropic.default({ apiKey: key, maxRetries: 0 }),
+      retry: withHostedRetry,
+      onUsage: record,
+    })
+  } finally {
+    await drainUsageWrites(pending)
+  }
 }
 
 /** How many questions this caller has asked in the last day. The bound on asks. */
@@ -418,12 +462,12 @@ async function cachedDocument(db, analysis, level) {
  * (someone studies a passage another user already ran) a free user spent their
  * one lifetime credit and was then refused the reading.
  */
-async function openStudy(db, { studyId, accountId, installId, reference }) {
+async function openStudy(db, { studyId, accountId, installId, reference, requestHash = null }) {
   await db.query(
-    `INSERT INTO study (id, account_id, install_id, reference, state)
-          VALUES ($1, $2, $3, $4, 'analyzed')
+    `INSERT INTO study (id, account_id, install_id, reference, state, request_hash)
+          VALUES ($1, $2, $3, $4, 'analyzed', $5)
      ON CONFLICT (id) DO NOTHING`,
-    [studyId, accountId ?? null, installId ?? null, reference ?? null],
+    [studyId, accountId ?? null, installId ?? null, reference ?? null, requestHash],
   )
 }
 
@@ -559,6 +603,22 @@ async function ownedStudyState(db, { studyId, accountId, installId }) {
   return rows[0]?.state ?? null
 }
 
+async function ownedStudyAnalysis(db, { studyId, accountId, installId }) {
+  if (!studyId) return null
+  const identity = accountId
+    ? { clause: 'account_id = $2', param: accountId }
+    : { clause: 'install_id = $2 AND account_id IS NULL', param: installId }
+  if (!identity.param) return null
+
+  const { rows } = await db.query(
+    `SELECT state, analysis, request_hash
+       FROM study
+      WHERE id = $1 AND ${identity.clause}`,
+    [studyId, identity.param],
+  )
+  return rows[0] || null
+}
+
 /**
  * Recover the document already delivered for a study this caller owns.
  *
@@ -627,9 +687,12 @@ async function releaseStudyForRetry(db, studyId) {
 }
 
 module.exports = {
-  runPlainRead, runAnalyze, runQuickStudy, runGuidedStudy, makeRecorder, makeCache, preloadCache, writeCache,
+  runPlainRead, runAnalyze, runQuickStudy, runGuidedStudy, makeRecorder, drainUsageWrites,
+  UsageAccountingError, isUsageAccountingError, makeCache, preloadCache, writeCache,
   studyCost, openStudy, saveStudyAnalysis, saveStudyDocument,
   claimStudyForReading, resetStudyReadingClaim, strandStudyReadingClaim, ownedStudyState, ownedStudyDocument,
   finishStudy, releaseStudyForRetry,
   runAsk, runSermonAssist, askCountToday, MAX_RETRIES_PER_STUDY, cachedDocument,
+  ownedStudyAnalysis,
+  withHostedRetry,
 }

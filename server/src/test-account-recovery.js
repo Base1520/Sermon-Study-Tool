@@ -174,7 +174,7 @@ function recoveryDb({
       if (oldest) oldest.revoked_at = new Date()
       return { rows: [], rowCount: oldest ? 1 : 0 }
     }
-    if (/UPDATE (study|study_reservation|ask_reservation|usage_event)/.test(sql)) {
+    if (/UPDATE (study|study_reservation|ask_reservation|usage_event|model_admission)/.test(sql)) {
       return { rows: [], rowCount: 1 }
     }
     throw new Error(`Unhandled recovery SQL: ${sql}`)
@@ -331,8 +331,8 @@ test('correct code is one-time and binds the replacement device', async () => {
     accountId: 'acct-1', installId: 'install-new', label: 'New iPad', platform: 'ios',
   })
   const claimedTables = db.state.statements
-    .filter(({ sql }) => /UPDATE (study|study_reservation|ask_reservation|usage_event)/.test(sql))
-  assert.equal(claimedTables.length, 4)
+    .filter(({ sql }) => /UPDATE (study|study_reservation|ask_reservation|usage_event|model_admission)/.test(sql))
+  assert.equal(claimedTables.length, 5)
   assert.ok(claimedTables.every(({ params }) => params[0] === 'acct-1' && params[1] === 'install-new'))
   assert.ok(db.state.codes[0].consumed_at)
 

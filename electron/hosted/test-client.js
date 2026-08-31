@@ -109,10 +109,16 @@ const withEnv = async (url, fn) => {
   {
     await withEnv('https://api.example.com', async () => {
       let sent = null
-      await withFetch(async (_u, opts) => { sent = opts.headers; return jsonResponse({ analysis: {}, studyId: 's1' }) },
+      let analyzeBody = null
+      await withFetch(async (_u, opts) => {
+        sent = opts.headers
+        analyzeBody = JSON.parse(opts.body)
+        return jsonResponse({ analysis: {}, studyId: 's1' })
+      },
         () => client.analyze(fakeStore(), { text: 't', reference: 'John 3:16' }))
       ok('the install id always rides along', !!sent['x-install-id'])
       ok('an anonymous caller sends no bearer token', !sent.authorization)
+      ok('analyze sends a durable request id', typeof analyzeBody?.requestId === 'string' && analyzeBody.requestId.length >= 12)
 
       let sent2 = null
       await withFetch(async (_u, opts) => { sent2 = opts.headers; return jsonResponse({ analysis: {}, studyId: 's1' }) },
@@ -278,6 +284,7 @@ const withEnv = async (url, fn) => {
       )
       ok('ask sends aiConsentVersion', body?.aiConsentVersion === serverConstant,
         `sent ${JSON.stringify(body?.aiConsentVersion)}, server wants ${JSON.stringify(serverConstant)}`)
+      ok('ask sends a durable request id', typeof body?.requestId === 'string' && body.requestId.length >= 12)
     })
 
     await withEnv('https://api.example.com', async () => {
@@ -290,6 +297,7 @@ const withEnv = async (url, fn) => {
         `sent ${JSON.stringify(body?.aiConsentVersion)}, server wants ${JSON.stringify(serverConstant)}`)
       ok('the Scholar asks for the scholar agent', body?.agent === 'scholar')
       ok('the Scholar carries the studyId the answer is grounded in', body?.studyId === 's1')
+      ok('the Scholar sends a durable request id', typeof body?.requestId === 'string' && body.requestId.length >= 12)
     })
 
     await withEnv('https://api.example.com', async () => {
@@ -307,6 +315,80 @@ const withEnv = async (url, fn) => {
         bodies.length === 4 && bodies.every((item) => Object.hasOwn(item, 'studyId') && item.studyId === null))
       ok('null-id requests preserve each requested specialist discipline',
         bodies.map((item) => item.agent).join(',') === 'exegetical,theological,homiletical,scholar')
+    })
+  }
+
+  console.log('\nA LOST RESPONSE CANNOT BUY THE SAME ANSWER TWICE')
+  {
+    await withEnv('https://api.example.com', async () => {
+      const store = fakeStore()
+      const ids = []
+      let first = true
+      await withFetch(async (_u, opts) => {
+        ids.push(JSON.parse(opts.body).requestId)
+        if (first) {
+          first = false
+          throw new TypeError('synthetic lost response')
+        }
+        return jsonResponse({ answer: 'recovered' })
+      }, async () => {
+        try {
+          await client.ask(store, { studyId: 's1', question: 'q', history: [] })
+        } catch {}
+        await client.ask(store, { studyId: 's1', question: 'q', history: [] })
+        await client.ask(store, { studyId: 's1', question: 'q', history: [] })
+      })
+      ok('a network-lost response retries with the same request id', ids[0] === ids[1])
+      ok('a completed answer clears the id for a deliberate later question', ids[2] !== ids[1])
+    })
+  }
+
+  console.log('\nRETRY IDS FOLLOW THE SERVER RECOVERY CONTRACT')
+  {
+    await withEnv('https://api.example.com', async () => {
+      const store = fakeStore()
+      const ids = []
+      let first = true
+      await withFetch(async (_u, opts) => {
+        ids.push(JSON.parse(opts.body).requestId)
+        if (first) {
+          first = false
+          return jsonResponse({
+            error: 'ACCOUNTING_UNAVAILABLE',
+            message: 'The study was saved and is reconciling.',
+          }, 503)
+        }
+        return jsonResponse({ analysis: {}, studyId: 's1' })
+      }, async () => {
+        try {
+          await client.analyze(store, { text: 't', reference: 'John 3:16' })
+        } catch {}
+        await client.analyze(store, { text: 't', reference: 'John 3:16' })
+      })
+      ok('a saved study awaiting accounting retries with the same request id', ids[0] === ids[1])
+    })
+
+    await withEnv('https://api.example.com', async () => {
+      const store = fakeStore()
+      const ids = []
+      let first = true
+      await withFetch(async (_u, opts) => {
+        ids.push(JSON.parse(opts.body).requestId)
+        if (first) {
+          first = false
+          return jsonResponse({
+            error: 'REQUEST_RESULT_UNAVAILABLE',
+            message: 'The completed answer is unavailable. Contact support.',
+          }, 409)
+        }
+        return jsonResponse({ answer: 'new attempt' })
+      }, async () => {
+        try {
+          await client.ask(store, { studyId: 's1', question: 'q', history: [] })
+        } catch {}
+        await client.ask(store, { studyId: 's1', question: 'q', history: [] })
+      })
+      ok('a terminal missing result clears the poisoned request id', ids[0] !== ids[1])
     })
   }
 

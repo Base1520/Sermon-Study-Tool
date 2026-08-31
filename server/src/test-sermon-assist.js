@@ -148,6 +148,7 @@ async function test(name, operation) {
         agent: 'scholar',
         question: 'What makes an interpretation responsible?',
         history: [],
+        requestId: 'sermon-assist-route-test-0001',
         aiConsentVersion: 'operator-ai-processing-v1',
       },
     })

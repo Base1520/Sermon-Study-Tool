@@ -8,21 +8,35 @@
  * this module registers route bodies and owns no server or database lifecycle.
  */
 
-const crypto = require('crypto')
+const requestIdempotency = require('../request-idempotency')
 
 const QUICK_STUDY_TRANSLATIONS = new Set(['kjv', 'asv', 'web', 'ylt', 'esv'])
-const QUICK_REQUEST_ID = /^[a-f0-9-]{20,80}$/i
 
-function quickStudyId(req, requestId) {
-  const owner = req.identity.account?.id || req.identity.installId || 'anonymous'
-  const digest = crypto.createHash('sha256').update(`${owner}:${requestId}`).digest('hex').slice(0, 32)
-  return `quick-${digest}`
-}
+async function reconcilePersistedStudy({ db, meter, engine, studyId }) {
+  let state
+  try {
+    state = await meter.studyReservationState(db, studyId)
+  } catch {
+    return { ok: false, retryable: true, state: 'unknown' }
+  }
+  if (state === 'settled') return { ok: true, state }
+  if (state !== 'held') return { ok: false, retryable: false, state }
 
-function guidedStudyId(req, requestId) {
-  const owner = req.identity.account?.id || req.identity.installId || 'anonymous'
-  const digest = crypto.createHash('sha256').update(`${owner}:${requestId}`).digest('hex').slice(0, 32)
-  return `guided-${digest}`
+  try {
+    const actualUsd = await engine.studyCost(db, studyId)
+    if (await meter.settleStudyReservation(db, { reservationId: studyId, actualUsd })) {
+      return { ok: true, state: 'settled' }
+    }
+    state = await meter.studyReservationState(db, studyId)
+    if (state === 'settled') return { ok: true, state }
+    if (state !== 'held') return { ok: false, retryable: false, state }
+  } catch {
+    // The saved result is the customer's, but it is not deliverable until its
+    // charge is known. Keep the allowance held and keep the global brake aware.
+  }
+
+  await meter.markStudyReservationAccountingUncertain(db, studyId).catch(() => {})
+  return { ok: false, retryable: true, state: 'held' }
 }
 
 function mount(app, db, {
@@ -31,10 +45,12 @@ function mount(app, db, {
   entitlementFor,
   billingPeriodFor,
   claimStudy,
+  sendClaimRefusal,
   newStudyId,
   requireGeneratedStudyAccount,
   AI_PROCESSING_CONSENT_VERSION,
   meter,
+  modelAdmission,
   engine,
   mobile,
 }) {
@@ -46,7 +62,8 @@ function mount(app, db, {
   // THIS is where a study is charged. /v1/read then rides the same reservation, so
   // the full flow costs one study and not two. See the studyId branch below.
   app.post('/v1/analyze', route(async (req, res) => {
-    const { text, reference } = req.body || {}
+    if (!requireGeneratedStudyAccount(req, res)) return
+    const { text, reference, requestId } = req.body || {}
     if (!text || !reference) {
       return res.status(400).json({ error: 'text and reference are required' })
     }
@@ -69,18 +86,75 @@ function mount(app, db, {
       })
     }
 
-    const ent = entitlementFor(req.identity.account)
     const accountId = req.identity.account?.id ?? null
+    let idempotency
+    try {
+      idempotency = requestIdempotency.describe({
+        ownerId: accountId || req.identity.installId,
+        route: 'analyze',
+        requestId,
+        payload: { text, reference },
+      })
+    } catch {
+      return res.status(400).json({
+        error: 'REQUEST_ID_REQUIRED',
+        message: 'A valid requestId is required for a generated study.',
+      })
+    }
+    const studyId = idempotency.id
+    const prior = await engine.ownedStudyAnalysis(db, {
+      studyId,
+      accountId,
+      installId: req.identity.installId,
+    })
+    if (prior) {
+      if (prior.request_hash !== idempotency.requestHash) {
+        return res.status(409).json({
+          error: 'REQUEST_ID_REUSED',
+          message: 'That request identifier was already used for different content. Try again.',
+        })
+      }
+      if (prior.analysis) {
+        const settlement = await reconcilePersistedStudy({ db, meter, engine, studyId })
+        if (settlement.ok) {
+          return res.json({ analysis: prior.analysis, studyId, cached: true, idempotent: true })
+        }
+        return res.status(settlement.retryable ? 503 : 409).json({
+          error: settlement.retryable ? 'ACCOUNTING_UNAVAILABLE' : 'REQUEST_RESULT_UNAVAILABLE',
+          message: settlement.retryable
+            ? 'The study is saved, but its usage record is still being reconciled. Try again in a moment.'
+            : 'That study result could not be matched to a valid charge. Contact support before trying it again.',
+        })
+      }
+      const reservationState = await meter.studyReservationState(db, studyId)
+      if (reservationState === 'held') {
+        res.setHeader('Retry-After', '5')
+        return res.status(409).json({
+          error: 'REQUEST_IN_PROGRESS',
+          message: 'That study is still being built. Try again in a moment.',
+        })
+      }
+      return res.status(409).json({
+        error: reservationState === 'settled' ? 'REQUEST_RESULT_UNAVAILABLE' : 'REQUEST_CLOSED',
+        message: reservationState === 'settled'
+          ? 'That study was charged but its result could not be recovered. Contact support before trying it again.'
+          : 'That study attempt closed without a result. Try again to open a new attempt.',
+      })
+    }
+
+    const ent = entitlementFor(req.identity.account)
     const { periodStart, periodEnd } = billingPeriodFor(req.identity.account)
-    const studyId = newStudyId()
+    const modelAdmissionId = `analyze-${studyId}`
 
     const refused = await claimStudy(req, {
       ent, accountId, periodStart, periodEnd, reservationId: studyId,
+      modelAdmissionRequest: { id: modelAdmissionId, route: 'analyze' },
     })
-    if (refused) return res.status(refused.status).json(refused.body)
+    if (refused) return sendClaimRefusal(res, refused)
 
     const reservationHeartbeat = setInterval(() => {
       meter.heartbeatStudyReservation(db, studyId).catch(() => {})
+      modelAdmission.heartbeat(db, modelAdmissionId).catch(() => {})
     }, meter.RESERVATION_HEARTBEAT_MS)
     reservationHeartbeat.unref?.()
 
@@ -88,39 +162,75 @@ function mount(app, db, {
     // hit spends nothing and writes no usage rows; inferring ownership from usage
     // meant a cached analysis produced a study its owner could not prove — and
     // being served from cache is the COMMON case, not the rare one.
+    let analysisProduced = false
+    let analysisSaved = false
     try {
       await engine.openStudy(db, {
-        studyId, accountId, installId: req.identity.installId, reference,
+        studyId,
+        accountId,
+        installId: req.identity.installId,
+        reference,
+        requestHash: idempotency.requestHash,
       })
       const { analysis, cached } = await engine.runAnalyze(db, {
         text, reference, accountId, studyId, installId: req.identity.installId,
       })
-      await engine.saveStudyAnalysis(db, {
+      analysisProduced = true
+      const saved = await engine.saveStudyAnalysis(db, {
         studyId,
         accountId,
         installId: req.identity.installId,
         analysis,
-      }).catch(() => {})
+      })
+      if (!saved) throw new Error('The study result could not be saved safely.')
+      analysisSaved = true
       const actualUsd = await engine.studyCost(db, studyId)
-      await meter.settleStudyReservation(db, {
+      const settled = await meter.settleStudyReservation(db, {
         reservationId: studyId,
         actualUsd,
-      }).catch(() => {})
+      })
+      if (!settled) throw new Error('The study could not be settled safely.')
       res.json({ analysis, studyId, cached })
     } catch (e) {
       // "No result returned" is NOT "no money spent". The fan-out runs up to three
       // calls in parallel and only two are fatal, so a failure here routinely lands
       // AFTER real tokens were billed. Book what was actually spent before handing
       // the credit back, or a retry loop burns money the ceiling never sees.
-      const spent = await engine.studyCost(db, studyId).catch(() => 0)
-      await meter.releaseStudyReservation(db, studyId).catch(() => {})
-      if (accountId) {
-        await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+      const usageAccountingFailed = engine.isUsageAccountingError(e)
+      let accountingUncertain = usageAccountingFailed || analysisProduced
+      let spent = 0
+      try { spent = await engine.studyCost(db, studyId) } catch { accountingUncertain = true }
+      if (analysisSaved) {
+        await meter.markStudyReservationAccountingUncertain(db, studyId).catch(() => {})
+      } else {
+        await meter.releaseStudyReservation(db, studyId, { accountingUncertain }).catch(() => {})
+        await db.query(
+          `UPDATE study SET state = 'failed', updated_at = now()
+            WHERE id = $1 AND analysis IS NULL`,
+          [studyId],
+        ).catch(() => {})
+        if (accountId) {
+          await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+        }
       }
-      const code = e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'ANALYSIS_FAILED'
-      res.status(code === 'INPUT_TOO_LARGE' ? 413 : 500)
-         .json({ error: code, message: e?.message || 'The analysis could not be completed.' })
+      const code = analysisSaved || usageAccountingFailed
+        ? 'ACCOUNTING_UNAVAILABLE'
+        : analysisProduced
+          ? 'GENERATION_STATE_UNAVAILABLE'
+        : (e?.code === 'INPUT_TOO_LARGE' ? 'INPUT_TOO_LARGE' : 'ANALYSIS_FAILED')
+      res.status(code === 'INPUT_TOO_LARGE' ? 413 : (accountingUncertain ? 503 : 500))
+         .json({
+           error: code,
+           message: analysisSaved
+             ? 'The study is saved, but its usage record is still being reconciled. Try again in a moment.'
+             : usageAccountingFailed
+             ? 'The Operator paused that study because usage could not be recorded safely. Try again in a moment.'
+             : analysisProduced
+               ? 'The Operator finished the model work but could not save the study safely. Try again in a moment.'
+             : (e?.message || 'The analysis could not be completed.'),
+         })
     } finally {
+      await modelAdmission.finish(db, modelAdmissionId).catch(() => {})
       clearInterval(reservationHeartbeat)
     }
   }))
@@ -145,14 +255,21 @@ function mount(app, db, {
     if (!QUICK_STUDY_TRANSLATIONS.has(normalizedTranslation)) {
       return res.status(400).json({ error: 'a supported translation is required' })
     }
-    if (typeof requestId !== 'string' || !QUICK_REQUEST_ID.test(requestId)) {
+    const accountId = req.identity.account?.id ?? null
+    let idempotency
+    try {
+      idempotency = requestIdempotency.describe({
+        ownerId: accountId || req.identity.installId,
+        route: 'quick-study',
+        requestId,
+        payload: { reference: reference.trim(), translation: normalizedTranslation },
+      })
+    } catch {
       return res.status(400).json({ error: 'a valid requestId is required' })
     }
-
-    const accountId = req.identity.account?.id ?? null
-    const studyId = quickStudyId(req, requestId)
+    const studyId = idempotency.id
     const existing = await db.query(
-      `SELECT state, analysis, document, passage
+      `SELECT state, analysis, document, passage, request_hash
          FROM study
         WHERE id = $1
           AND (($2::uuid IS NOT NULL AND account_id = $2)
@@ -160,13 +277,29 @@ function mount(app, db, {
         LIMIT 1`,
       [studyId, accountId, req.identity.installId || ''],
     )
-    if (existing.rows[0]?.document && existing.rows[0]?.analysis) {
-      const storedAnalysis = existing.rows[0].analysis
+    const existingStudy = existing.rows[0] || null
+    if (existingStudy && existingStudy.request_hash !== idempotency.requestHash) {
+      return res.status(409).json({
+        error: 'REQUEST_ID_REUSED',
+        message: 'That request identifier was already used for different content. Try again.',
+      })
+    }
+    if (existingStudy?.document && existingStudy?.analysis) {
+      const settlement = await reconcilePersistedStudy({ db, meter, engine, studyId })
+      if (!settlement.ok) {
+        return res.status(settlement.retryable ? 503 : 409).json({
+          error: settlement.retryable ? 'ACCOUNTING_UNAVAILABLE' : 'REQUEST_RESULT_UNAVAILABLE',
+          message: settlement.retryable
+            ? 'The Quick Study is saved, but its usage record is still being reconciled. Try again in a moment.'
+            : 'That Quick Study could not be matched to a valid charge. Contact support before trying it again.',
+        })
+      }
+      const storedAnalysis = existingStudy.analysis
       return res.json({
-        document: existing.rows[0].document,
+        document: existingStudy.document,
         analysis: storedAnalysis,
         studyId,
-        passage: existing.rows[0].passage || {
+        passage: existingStudy.passage || {
           reference: storedAnalysis.reference,
           translation: storedAnalysis.translation || normalizedTranslation,
           text: storedAnalysis.passageText || '',
@@ -177,8 +310,8 @@ function mount(app, db, {
         idempotent: true,
       })
     }
-    if (existing.rows.length) {
-      const failed = existing.rows[0].state === 'failed'
+    if (existingStudy) {
+      const failed = existingStudy.state === 'failed'
       return res.status(failed ? 500 : 409).json({
         error: failed ? 'QUICK_STUDY_FAILED' : 'STUDY_IN_PROGRESS',
         message: failed
@@ -212,6 +345,7 @@ function mount(app, db, {
 
     const ent = entitlementFor(req.identity.account)
     const { periodStart, periodEnd } = billingPeriodFor(req.identity.account)
+    const modelAdmissionId = `quick-${studyId}`
     const refused = await claimStudy(req, {
       ent,
       accountId,
@@ -219,17 +353,21 @@ function mount(app, db, {
       periodEnd,
       reservationId: studyId,
       reserveUsd: meter.QUICK_STUDY_RESERVE_USD,
+      modelAdmissionRequest: { id: modelAdmissionId, route: 'quick-study' },
     })
-    if (refused) return res.status(refused.status).json(refused.body)
+    if (refused) return sendClaimRefusal(res, refused)
 
     const reservationHeartbeat = setInterval(() => {
       meter.heartbeatStudyReservation(db, studyId).catch(() => {})
+      modelAdmission.heartbeat(db, modelAdmissionId).catch(() => {})
     }, meter.RESERVATION_HEARTBEAT_MS)
     reservationHeartbeat.unref?.()
 
+    let resultSaved = false
     try {
       await engine.openStudy(db, {
         studyId, accountId, installId: req.identity.installId, reference: passage.reference,
+        requestHash: idempotency.requestHash,
       })
       const result = await engine.runQuickStudy(db, {
         text: passage.text,
@@ -249,6 +387,7 @@ function mount(app, db, {
         passage,
       })
       if (!saved) throw new Error('The Quick Study could not be saved.')
+      resultSaved = true
       const actualUsd = await engine.studyCost(db, studyId)
       const settled = await meter.settleStudyReservation(db, {
         reservationId: studyId,
@@ -257,21 +396,31 @@ function mount(app, db, {
       if (!settled) throw new Error('The Quick Study could not be settled safely.')
       res.json({ ...result, studyId, passage })
     } catch (e) {
-      const spent = await engine.studyCost(db, studyId).catch(() => 0)
-      await meter.releaseStudyReservation(db, studyId).catch(() => {})
-      await db.query(
-        `UPDATE study SET state = 'failed', updated_at = now()
-          WHERE id = $1 AND state <> 'done'`,
-        [studyId],
-      ).catch(() => {})
-      if (accountId) {
-        await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+      let accountingUncertain = engine.isUsageAccountingError(e)
+      let spent = 0
+      try { spent = await engine.studyCost(db, studyId) } catch { accountingUncertain = true }
+      if (resultSaved) {
+        accountingUncertain = true
+        await meter.markStudyReservationAccountingUncertain(db, studyId).catch(() => {})
+      } else {
+        await meter.releaseStudyReservation(db, studyId, { accountingUncertain }).catch(() => {})
+        await db.query(
+          `UPDATE study SET state = 'failed', updated_at = now()
+            WHERE id = $1 AND state <> 'done'`,
+          [studyId],
+        ).catch(() => {})
+        if (accountId) {
+          await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+        }
       }
-      res.status(500).json({
-        error: 'QUICK_STUDY_FAILED',
-        message: e?.message || 'The quick study could not be completed.',
+      res.status(accountingUncertain ? 503 : 500).json({
+        error: accountingUncertain ? 'ACCOUNTING_UNAVAILABLE' : 'QUICK_STUDY_FAILED',
+        message: accountingUncertain
+          ? 'The Operator paused that study because usage could not be recorded safely. Try again in a moment.'
+          : (e?.message || 'The quick study could not be completed.'),
       })
     } finally {
+      await modelAdmission.finish(db, modelAdmissionId).catch(() => {})
       clearInterval(reservationHeartbeat)
     }
   }))
@@ -295,14 +444,21 @@ function mount(app, db, {
     if (!QUICK_STUDY_TRANSLATIONS.has(normalizedTranslation)) {
       return res.status(400).json({ error: 'a supported translation is required' })
     }
-    if (typeof requestId !== 'string' || !QUICK_REQUEST_ID.test(requestId)) {
+    const accountId = req.identity.account?.id ?? null
+    let idempotency
+    try {
+      idempotency = requestIdempotency.describe({
+        ownerId: accountId || req.identity.installId,
+        route: 'guided-study',
+        requestId,
+        payload: { reference: reference.trim(), translation: normalizedTranslation },
+      })
+    } catch {
       return res.status(400).json({ error: 'a valid requestId is required' })
     }
-
-    const accountId = req.identity.account?.id ?? null
-    const studyId = guidedStudyId(req, requestId)
+    const studyId = idempotency.id
     const existing = await db.query(
-      `SELECT state, analysis, document, passage
+      `SELECT state, analysis, document, passage, request_hash
          FROM study
         WHERE id = $1
           AND (($2::uuid IS NOT NULL AND account_id = $2)
@@ -310,13 +466,29 @@ function mount(app, db, {
         LIMIT 1`,
       [studyId, accountId, req.identity.installId || ''],
     )
-    if (existing.rows[0]?.document && existing.rows[0]?.analysis) {
-      const storedAnalysis = existing.rows[0].analysis
+    const existingStudy = existing.rows[0] || null
+    if (existingStudy && existingStudy.request_hash !== idempotency.requestHash) {
+      return res.status(409).json({
+        error: 'REQUEST_ID_REUSED',
+        message: 'That request identifier was already used for different content. Try again.',
+      })
+    }
+    if (existingStudy?.document && existingStudy?.analysis) {
+      const settlement = await reconcilePersistedStudy({ db, meter, engine, studyId })
+      if (!settlement.ok) {
+        return res.status(settlement.retryable ? 503 : 409).json({
+          error: settlement.retryable ? 'ACCOUNTING_UNAVAILABLE' : 'REQUEST_RESULT_UNAVAILABLE',
+          message: settlement.retryable
+            ? 'The guided study is saved, but its usage record is still being reconciled. Try again in a moment.'
+            : 'That guided study could not be matched to a valid charge. Contact support before trying it again.',
+        })
+      }
+      const storedAnalysis = existingStudy.analysis
       return res.json({
-        document: existing.rows[0].document,
+        document: existingStudy.document,
         analysis: storedAnalysis,
         studyId,
-        passage: existing.rows[0].passage || {
+        passage: existingStudy.passage || {
           reference: storedAnalysis.reference,
           translation: storedAnalysis.translation || normalizedTranslation,
           text: storedAnalysis.passageText || '',
@@ -327,8 +499,8 @@ function mount(app, db, {
         idempotent: true,
       })
     }
-    if (existing.rows.length) {
-      const failed = existing.rows[0].state === 'failed'
+    if (existingStudy) {
+      const failed = existingStudy.state === 'failed'
       return res.status(failed ? 500 : 409).json({
         error: failed ? 'GUIDED_STUDY_FAILED' : 'STUDY_IN_PROGRESS',
         message: failed
@@ -362,6 +534,7 @@ function mount(app, db, {
 
     const ent = entitlementFor(req.identity.account)
     const { periodStart, periodEnd } = billingPeriodFor(req.identity.account)
+    const modelAdmissionId = `guided-${studyId}`
     const refused = await claimStudy(req, {
       ent,
       accountId,
@@ -369,17 +542,21 @@ function mount(app, db, {
       periodEnd,
       reservationId: studyId,
       reserveUsd: meter.GUIDED_STUDY_RESERVE_USD,
+      modelAdmissionRequest: { id: modelAdmissionId, route: 'guided-study' },
     })
-    if (refused) return res.status(refused.status).json(refused.body)
+    if (refused) return sendClaimRefusal(res, refused)
 
     const reservationHeartbeat = setInterval(() => {
       meter.heartbeatStudyReservation(db, studyId).catch(() => {})
+      modelAdmission.heartbeat(db, modelAdmissionId).catch(() => {})
     }, meter.RESERVATION_HEARTBEAT_MS)
     reservationHeartbeat.unref?.()
 
+    let resultSaved = false
     try {
       await engine.openStudy(db, {
         studyId, accountId, installId: req.identity.installId, reference: passage.reference,
+        requestHash: idempotency.requestHash,
       })
       const result = await engine.runGuidedStudy(db, {
         text: passage.text,
@@ -399,6 +576,7 @@ function mount(app, db, {
         passage,
       })
       if (!saved) throw new Error('The guided study could not be saved.')
+      resultSaved = true
       const actualUsd = await engine.studyCost(db, studyId)
       const settled = await meter.settleStudyReservation(db, {
         reservationId: studyId,
@@ -407,24 +585,34 @@ function mount(app, db, {
       if (!settled) throw new Error('The guided study could not be settled safely.')
       res.json({ ...result, studyId, passage })
     } catch (e) {
-      const spent = await engine.studyCost(db, studyId).catch(() => 0)
-      await meter.releaseStudyReservation(db, studyId).catch(() => {})
-      await db.query(
-        `UPDATE study SET state = 'failed', updated_at = now()
-          WHERE id = $1 AND state <> 'done'`,
-        [studyId],
-      ).catch(() => {})
-      if (accountId) {
-        await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+      let accountingUncertain = engine.isUsageAccountingError(e)
+      let spent = 0
+      try { spent = await engine.studyCost(db, studyId) } catch { accountingUncertain = true }
+      if (resultSaved) {
+        accountingUncertain = true
+        await meter.markStudyReservationAccountingUncertain(db, studyId).catch(() => {})
+      } else {
+        await meter.releaseStudyReservation(db, studyId, { accountingUncertain }).catch(() => {})
+        await db.query(
+          `UPDATE study SET state = 'failed', updated_at = now()
+            WHERE id = $1 AND state <> 'done'`,
+          [studyId],
+        ).catch(() => {})
+        if (accountId) {
+          await meter.recordAdditionalSpend(db, { accountId, periodStart, actualUsd: spent }).catch(() => {})
+        }
       }
-      res.status(500).json({
-        error: 'GUIDED_STUDY_FAILED',
-        message: e?.message || 'The guided study could not be completed.',
+      res.status(accountingUncertain ? 503 : 500).json({
+        error: accountingUncertain ? 'ACCOUNTING_UNAVAILABLE' : 'GUIDED_STUDY_FAILED',
+        message: accountingUncertain
+          ? 'The Operator paused that study because usage could not be recorded safely. Try again in a moment.'
+          : (e?.message || 'The guided study could not be completed.'),
       })
     } finally {
+      await modelAdmission.finish(db, modelAdmissionId).catch(() => {})
       clearInterval(reservationHeartbeat)
     }
   }))
 }
 
-module.exports = { mount }
+module.exports = { mount, reconcilePersistedStudy }

@@ -69,7 +69,7 @@ function fakePool({ activeDevices = 1, sameInstallMatches = 0, accountExists = t
         state.linkUsed = true
         return { rows: [{ account_id: 'acct-1' }] }
       }
-      if (/UPDATE\s+(study|study_reservation|ask_reservation|usage_event)/.test(sql)) {
+      if (/UPDATE\s+(study|study_reservation|ask_reservation|usage_event|model_admission)/.test(sql)) {
         state.claimedTables.push(sql.match(/UPDATE\s+([a-z_]+)/i)?.[1])
         return { rows: [], rowCount: 1 }
       }
@@ -212,7 +212,7 @@ function fakePool({ activeDevices = 1, sameInstallMatches = 0, accountExists = t
     pool.state.issued[0].installId === 'phone-1' && pool.state.issued[0].platform === 'ios')
   check('device labels are normalized', pool.state.issued[0].label === 'Cole iPhone')
   check('linking claims every anonymous server record for that install',
-    pool.state.claimedTables.join(',') === 'study,study_reservation,ask_reservation,usage_event')
+    pool.state.claimedTables.join(',') === 'study,study_reservation,ask_reservation,usage_event,model_admission')
 
   let replayError = null
   try {

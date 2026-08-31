@@ -23,6 +23,7 @@
 //                 reset, say try again, decide nothing.
 const meter = require('./meter')
 const engine = require('./engine')
+const modelAdmission = require('./model-admission')
 
 const TERMINAL = new Set(['released', 'refunded'])
 
@@ -80,11 +81,31 @@ async function resolveFailedReadHold(db, studyId) {
  * question and returns the answer, and everything behind that question is
  * exercised by the behavioral suite.
  */
-async function rideOrResolve(db, studyId) {
+async function rideOrResolve(db, studyId, modelAdmissionRequest) {
+  let admission
+  try {
+    admission = await modelAdmission.reserve(db, modelAdmissionRequest, meter.withGlobalSpendLock)
+  } catch {
+    await engine.resetStudyReadingClaim(db, studyId).catch(() => {})
+    return {
+      ok: false,
+      kind: 'admission-unavailable',
+      status: 503,
+      body: {
+        error: 'ADMISSION_UNAVAILABLE',
+        message: 'The Operator could not safely open that reading. Try again in a moment.',
+      },
+    }
+  }
+  if (!admission.ok) {
+    await engine.resetStudyReadingClaim(db, studyId).catch(() => {})
+    return { ok: false, kind: 'admission-refused', ...modelAdmission.refusal(admission) }
+  }
   let held
   try {
     held = await meter.holdStudyReservationForReading(db, studyId)
   } catch {
+    await modelAdmission.finish(db, modelAdmissionRequest.id).catch(() => {})
     // The route has already moved this study from analyzed -> reading. A
     // thrown hold query proves nothing about the reservation: it may still be
     // settled, or the write may have landed and only its response was lost.
@@ -92,7 +113,8 @@ async function rideOrResolve(db, studyId) {
     const resolved = await resolveUnknownReservation(db, studyId)
     return { ok: false, ...resolved }
   }
-  if (held) return { ok: true }
+  if (held) return { ok: true, modelAdmissionId: modelAdmissionRequest.id }
+  await modelAdmission.finish(db, modelAdmissionRequest.id).catch(() => {})
   const resolved = await resolveFailedReadHold(db, studyId)
   return { ok: false, ...resolved }
 }

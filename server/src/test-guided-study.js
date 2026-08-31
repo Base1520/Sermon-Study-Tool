@@ -216,7 +216,7 @@ async function test(name, fn) {
     // follows the implementation instead of silently slicing an empty index.js.
     const source = fs.readFileSync(path.join(__dirname, 'routes/generation.js'), 'utf8')
     const start = source.indexOf("app.post('/v1/guided-study'")
-    const end = source.indexOf('module.exports = { mount }', start)
+    const end = source.indexOf('module.exports = { mount, reconcilePersistedStudy }', start)
     const route = source.slice(start, end)
     assert.match(route, /mobile\.fetchPassage/)
     assert.match(route, /requestId/)

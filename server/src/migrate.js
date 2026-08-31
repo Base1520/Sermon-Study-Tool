@@ -1,27 +1,61 @@
-// Apply schema.sql. Idempotent — every statement is CREATE ... IF NOT EXISTS.
-const fs = require('fs'); const path = require('path'); const { Pool } = require('pg')
+const { Pool } = require('pg')
+const { SCHEMA_VERSION, readSchemaSql, schemaSha256 } = require('./schema-version')
+
+const MIGRATION_LOCK_ID = 15202027
+
 ;(async () => {
   const db = new Pool({ connectionString: process.env.DATABASE_URL })
-  const { rows: existingTables } = await db.query(`SELECT to_regclass('public.account') AS account_table`)
-  if (existingTables[0]?.account_table) {
-    const { rows: duplicates } = await db.query(
-      `SELECT lower(email) AS normalized_email, count(*)::int AS account_count
-         FROM account
-        GROUP BY lower(email)
-       HAVING count(*) > 1
-        ORDER BY count(*) DESC, lower(email)
-        LIMIT 20`,
+  const client = await db.connect()
+  try {
+  await client.query('BEGIN')
+  await client.query("SET LOCAL lock_timeout = '5s'")
+  await client.query("SET LOCAL statement_timeout = '120s'")
+  await client.query("SET LOCAL idle_in_transaction_session_timeout = '120s'")
+  await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_ID])
+  const sql = readSchemaSql()
+  const schemaHash = schemaSha256(sql)
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS schema_migration (
+      schema_version text PRIMARY KEY,
+      schema_sha256 text NOT NULL CHECK (schema_sha256 ~ '^[0-9a-f]{64}$'),
+      applied_at timestamptz NOT NULL DEFAULT now()
     )
-    if (duplicates.length) {
-      const summary = duplicates
-        .map((row) => `${row.normalized_email} (${row.account_count})`)
-        .join(', ')
-      throw new Error(`Case-only duplicate Operator accounts must be reconciled before migration: ${summary}`)
-    }
+  `)
+  const { rows: appliedMigrations } = await client.query(
+    `SELECT schema_sha256 FROM schema_migration WHERE schema_version = $1 FOR UPDATE`,
+    [SCHEMA_VERSION],
+  )
+  if (appliedMigrations.length && appliedMigrations[0].schema_sha256 !== schemaHash) {
+    throw new Error(`Schema ${SCHEMA_VERSION} changed without a version bump`)
   }
-  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8')
-  await db.query(sql)
-  console.log('schema applied')
+
+  const schemaAlreadyApplied = appliedMigrations.length === 1
+  if (!schemaAlreadyApplied) {
+    const { rows: existingTables } = await client.query(`SELECT to_regclass('public.account') AS account_table`)
+    if (existingTables[0]?.account_table) {
+      const { rows: duplicates } = await client.query(
+        `SELECT lower(email) AS normalized_email, count(*)::int AS account_count
+           FROM account
+          GROUP BY lower(email)
+         HAVING count(*) > 1
+          ORDER BY count(*) DESC, lower(email)
+          LIMIT 20`,
+      )
+      if (duplicates.length) {
+        const summary = duplicates
+          .map((row) => `${row.normalized_email} (${row.account_count})`)
+          .join(', ')
+        throw new Error(`Case-only duplicate Operator accounts must be reconciled before migration: ${summary}`)
+      }
+    }
+    await client.query(sql)
+    await client.query(
+      `INSERT INTO schema_migration (schema_version, schema_sha256)
+            VALUES ($1, $2)
+       ON CONFLICT (schema_version) DO NOTHING`,
+      [SCHEMA_VERSION, schemaHash],
+    )
+  }
 
   /**
    * Comp codes come from the ENVIRONMENT, never from this file.
@@ -66,7 +100,7 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
   }
 
   for (const [code, plan, label, usesMax] of CODES) {
-    await db.query(
+    await client.query(
       `INSERT INTO access_code (code, plan, label, uses_max) VALUES ($1,$2,$3,$4)
        ON CONFLICT (code) DO NOTHING`, [code, plan, label, usesMax])
   }
@@ -90,11 +124,15 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
   }
   if (reviewHashes.length) {
     const { seedReviewLinkHashes, ReviewAccessError, REVIEW_ACCOUNT_EMAIL } = require('./review-access')
+    await client.query('SAVEPOINT review_access_seed')
     try {
-      const seeded = await seedReviewLinkHashes(db, { hashes: reviewHashes })
+      const seeded = await seedReviewLinkHashes(db, { hashes: reviewHashes, client })
+      await client.query('RELEASE SAVEPOINT review_access_seed')
       console.log(`review link codes seeded on ${REVIEW_ACCOUNT_EMAIL} (${seeded.inserted} new, ${seeded.existing} already present)`)
     } catch (error) {
       if (!(error instanceof ReviewAccessError)) throw error
+      await client.query('ROLLBACK TO SAVEPOINT review_access_seed')
+      await client.query('RELEASE SAVEPOINT review_access_seed')
       console.error(`[review-access] not seeded: ${error.message}`)
     }
   } else {
@@ -106,7 +144,7 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean)
   if (adminEmails.length) {
-    const { rowCount: adminsGranted } = await db.query(
+    const { rowCount: adminsGranted } = await client.query(
       `UPDATE account SET is_admin = true WHERE lower(email) = ANY($1::text[])`,
       [adminEmails],
     )
@@ -125,7 +163,7 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
    * so an attempt to use one leaves a row behind and simply fails.
    */
   const BURNED = ['OPERATOR-COLE', 'OPERATOR-RIKKI', 'OPERATOR-BETA']
-  const { rowCount } = await db.query(
+  const { rowCount } = await client.query(
     `UPDATE access_code SET revoked_at = now()
       WHERE code = ANY($1) AND revoked_at IS NULL`, [BURNED])
   if (rowCount) console.log(`revoked ${rowCount} leaked comp code(s)`)
@@ -140,15 +178,15 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
    *
    * Scoped strictly to accounts created BY those codes, via access_code_use.
    */
-  const { rows: burnedAccounts } = await db.query(
+  const { rows: burnedAccounts } = await client.query(
     `SELECT DISTINCT account_id FROM access_code_use
       WHERE code = ANY($1) AND account_id IS NOT NULL`, [BURNED])
   if (burnedAccounts.length) {
     const ids = burnedAccounts.map((r) => r.account_id)
-    const { rowCount: devicesRevoked } = await db.query(
+    const { rowCount: devicesRevoked } = await client.query(
       `UPDATE device SET revoked_at = now()
         WHERE account_id = ANY($1) AND revoked_at IS NULL`, [ids])
-    const { rowCount: accountsDowngraded } = await db.query(
+    const { rowCount: accountsDowngraded } = await client.query(
       `UPDATE account SET plan = 'free', status = 'none'
         WHERE id = ANY($1) AND plan = 'comp'`, [ids])
     if (devicesRevoked || accountsDowngraded) {
@@ -158,5 +196,13 @@ const fs = require('fs'); const path = require('path'); const { Pool } = require
     }
   }
 
-  await db.end()
+  await client.query('COMMIT')
+  console.log(`schema ${schemaAlreadyApplied ? 'verified' : 'applied'} (${SCHEMA_VERSION} ${schemaHash.slice(0, 12)})`)
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+    await db.end()
+  }
 })().catch((e) => { console.error(e.message); process.exit(1) })

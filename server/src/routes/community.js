@@ -52,8 +52,14 @@ function mount(app, db, { route, auth, redeemAccessCode, invalidCodeResponse }) 
    *
    * NOT PUBLIC. Every row is a named beta tester's free-text report about a
    * pastor's Bible-study habits, and it was readable by anyone who guessed the
-   * URL. Reading it requires a comp account — which in practice means Cole, Rikki
-   * or a beta code holder, since comp is not for sale.
+   * URL.
+   *
+   * ADMIN ACCOUNTS ONLY — `account.is_admin`, granted at migrate time from
+   * OPERATOR_ADMIN_EMAILS. This comment used to say "a comp account, which in
+   * practice means Cole, Rikki or a beta code holder"; that stopped being true
+   * in 1.4.2, when the gate below moved from `plan === 'comp'` to `isAdmin`.
+   * A comp code mints a throwaway `<hash>@comp.invalid` account, which can
+   * never appear in an admin-email list — so comp holders are NOT admins.
    */
   app.get('/v1/feedback', route(async (req, res) => {
     if (!req.identity.account?.isAdmin) {
@@ -84,7 +90,16 @@ function mount(app, db, { route, auth, redeemAccessCode, invalidCodeResponse }) 
    * - Only Scripture references and counts leave here. A reference is public;
    *   who asked about it is not.
    *
-   * Comp accounts only, same as the feedback feed.
+   * ADMIN ACCOUNTS ONLY (`account.is_admin`), same as the feedback feed.
+   * NOT comp accounts — the comment here said "comp accounts only" for long
+   * enough that the vault's corpus-promoter burned nine scheduled passes
+   * against a comp token, correctly getting 403 every time.
+   *
+   * Admin is granted in migrate.js off OPERATOR_ADMIN_EMAILS, and note the
+   * two conditions that must BOTH hold: the variable has to be set in the
+   * deployed environment, AND an account row with that email must already
+   * exist (the grant is an UPDATE, not an upsert — it silently matches zero
+   * rows for an email that never signed up).
    */
   app.get('/v1/corpus', route(async (req, res) => {
     if (!req.identity.account?.isAdmin) {

@@ -2,7 +2,7 @@ const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 const { Pool } = require('pg')
-const { generateDeviceLinkCode, sha256 } = require('./mobile')
+const { generateDeviceLinkCode, normalizeDeviceLinkCode, sha256 } = require('./mobile')
 
 const REVIEW_ACCOUNT_EMAIL = 'app-review@base1520.com'
 const REVIEW_CODE_COUNT = 5
@@ -18,6 +18,7 @@ async function provisionReviewAccess(db, {
   email = REVIEW_ACCOUNT_EMAIL,
   now = new Date(),
   randomBytes = crypto.randomBytes,
+  codes: providedCodes = null,
 } = {}) {
   const normalizedEmail = reviewEmail(email)
   if (normalizedEmail !== REVIEW_ACCOUNT_EMAIL) {
@@ -28,7 +29,7 @@ async function provisionReviewAccess(db, {
   try {
     await client.query('BEGIN')
     let accountResult = await client.query(
-      `SELECT id, deleting_at, stripe_customer_id, stripe_subscription_id
+      `SELECT id, deleting_at, stripe_customer_id, stripe_subscription_id, plan, status
          FROM account
         WHERE lower(email) = $1
         FOR UPDATE`,
@@ -37,9 +38,9 @@ async function provisionReviewAccess(db, {
     let created = false
     if (!accountResult.rows.length) {
       accountResult = await client.query(
-        `INSERT INTO account (email)
-              VALUES ($1)
-           RETURNING id, deleting_at, stripe_customer_id, stripe_subscription_id`,
+        `INSERT INTO account (email, plan, status)
+              VALUES ($1, 'comp', 'active')
+           RETURNING id, deleting_at, stripe_customer_id, stripe_subscription_id, plan, status`,
         [normalizedEmail],
       )
       created = true
@@ -59,6 +60,12 @@ async function provisionReviewAccess(db, {
     if (Number(evidence.studies || 0) > 0 || Number(evidence.subscriptions || 0) > 0) {
       throw new ReviewAccessError('The dedicated review account contains study or billing data; refusing to alter it.')
     }
+    if (account.plan !== 'comp' || account.status !== 'active') {
+      await client.query(
+        `UPDATE account SET plan = 'comp', status = 'active' WHERE id = $1`,
+        [account.id],
+      )
+    }
 
     await client.query(
       `UPDATE device SET revoked_at = now()
@@ -72,16 +79,35 @@ async function provisionReviewAccess(db, {
     )
 
     const expiresAt = new Date(now.getTime() + REVIEW_LINK_TTL_MS)
+    const hasProvidedCodes = providedCodes !== null
+    const requestedCodes = hasProvidedCodes && Array.isArray(providedCodes) ? providedCodes : []
+    if (hasProvidedCodes && (
+      !Array.isArray(providedCodes) ||
+      requestedCodes.length !== REVIEW_CODE_COUNT ||
+      new Set(requestedCodes).size !== REVIEW_CODE_COUNT ||
+      requestedCodes.some((code) => normalizeDeviceLinkCode(code) !== code)
+    )) {
+      throw new ReviewAccessError('The supplied review code set is invalid.')
+    }
     const codes = []
     const seen = new Set()
-    for (let attempt = 0; codes.length < REVIEW_CODE_COUNT && attempt < 50; attempt += 1) {
-      const code = generateDeviceLinkCode(randomBytes)
+    const maxAttempts = hasProvidedCodes ? REVIEW_CODE_COUNT : 50
+    for (let attempt = 0; codes.length < REVIEW_CODE_COUNT && attempt < maxAttempts; attempt += 1) {
+      const code = hasProvidedCodes ? requestedCodes[attempt] : generateDeviceLinkCode(randomBytes)
       if (seen.has(code)) continue
       seen.add(code)
+      const conflictClause = hasProvidedCodes
+        ? `DO UPDATE SET
+             account_id = EXCLUDED.account_id,
+             created_by_device_id = NULL,
+             used_at = NULL,
+             expires_at = EXCLUDED.expires_at
+           WHERE device_link.account_id = EXCLUDED.account_id`
+        : 'DO NOTHING'
       const inserted = await client.query(
         `INSERT INTO device_link (code_hash, account_id, created_by_device_id, expires_at)
               VALUES ($1, $2, NULL, $3)
-         ON CONFLICT (code_hash) DO NOTHING
+         ON CONFLICT (code_hash) ${conflictClause}
          RETURNING code_hash`,
         [sha256(code), account.id, expiresAt],
       )
@@ -155,6 +181,7 @@ async function seedReviewLinkHashes(db, {
   hashes,
   email = REVIEW_ACCOUNT_EMAIL,
   now = new Date(),
+  client: providedClient = null,
 } = {}) {
   const normalizedEmail = reviewEmail(email)
   if (normalizedEmail !== REVIEW_ACCOUNT_EMAIL) {
@@ -168,9 +195,12 @@ async function seedReviewLinkHashes(db, {
     return { accountId: null, accountCreated: false, inserted: 0, existing: 0 }
   }
 
-  const client = await db.connect()
+  const client = providedClient || await db.connect()
+  const ownsTransaction = !providedClient
+  const savepoint = 'review_access_seed_helper'
   try {
-    await client.query('BEGIN')
+    if (ownsTransaction) await client.query('BEGIN')
+    else await client.query(`SAVEPOINT ${savepoint}`)
     let accountResult = await client.query(
       `SELECT id, deleting_at, stripe_customer_id, stripe_subscription_id, plan, status
          FROM account
@@ -192,6 +222,16 @@ async function seedReviewLinkHashes(db, {
     if (account.deleting_at || account.stripe_customer_id || account.stripe_subscription_id) {
       throw new ReviewAccessError('The dedicated review account is not empty; refusing to alter it.')
     }
+    const { rows: evidenceRows } = await client.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM study WHERE account_id = $1) AS studies,
+         (SELECT COUNT(*)::int FROM billing_subscription WHERE account_id = $1) AS subscriptions`,
+      [account.id],
+    )
+    const evidence = evidenceRows[0] || {}
+    if (Number(evidence.studies || 0) > 0 || Number(evidence.subscriptions || 0) > 0) {
+      throw new ReviewAccessError('The dedicated review account contains study or billing data; refusing to alter it.')
+    }
     if (account.plan !== 'comp' || account.status !== 'active') {
       await client.query(
         `UPDATE account SET plan = 'comp', status = 'active' WHERE id = $1`,
@@ -211,7 +251,8 @@ async function seedReviewLinkHashes(db, {
       )
       if (result.rows.length) inserted += 1
     }
-    await client.query('COMMIT')
+    if (ownsTransaction) await client.query('COMMIT')
+    else await client.query(`RELEASE SAVEPOINT ${savepoint}`)
     return {
       accountId: account.id,
       accountCreated: created,
@@ -220,10 +261,14 @@ async function seedReviewLinkHashes(db, {
       expiresAt: expiresAt.toISOString(),
     }
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (ownsTransaction) await client.query('ROLLBACK').catch(() => {})
+    else {
+      await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`).catch(() => {})
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`).catch(() => {})
+    }
     throw error
   } finally {
-    client.release()
+    if (ownsTransaction) client.release()
   }
 }
 
@@ -253,11 +298,27 @@ async function main() {
     throw new ReviewAccessError('REVIEW_ACCESS_OUTPUT must be an absolute private file path.')
   }
   const db = new Pool({ connectionString: process.env.DATABASE_URL })
+  const minted = mintReviewLinkCodes()
+  fs.writeFileSync(outputPath, `${JSON.stringify({
+    email: REVIEW_ACCOUNT_EMAIL,
+    status: 'provisioning',
+    codes: minted.codes,
+  }, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+  fs.chmodSync(outputPath, 0o600)
   try {
-    const result = await provisionReviewAccess(db)
-    fs.writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+    const result = await provisionReviewAccess(db, { codes: minted.codes })
+    fs.writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 })
     fs.chmodSync(outputPath, 0o600)
     console.log(`Review access written to ${outputPath}.`)
+  } catch (error) {
+    fs.writeFileSync(outputPath, `${JSON.stringify({
+      email: REVIEW_ACCOUNT_EMAIL,
+      status: 'uncertain',
+      codes: minted.codes,
+      error: error.message,
+    }, null, 2)}\n`, { mode: 0o600 })
+    fs.chmodSync(outputPath, 0o600)
+    throw error
   } finally {
     await db.end()
   }

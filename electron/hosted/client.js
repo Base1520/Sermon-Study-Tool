@@ -52,6 +52,34 @@ class HostedRefusal extends Error {
   }
 }
 
+const PENDING_MODEL_REQUESTS_KEY = 'operator-pending-model-requests'
+
+function pendingModelRequest(store, route, payload) {
+  const fingerprint = crypto.createHash('sha256')
+    .update(JSON.stringify({ route, payload }))
+    .digest('hex')
+  const ledger = { ...(store?.get(PENDING_MODEL_REQUESTS_KEY, {}) || {}) }
+  const id = ledger[fingerprint] || crypto.randomUUID()
+  ledger[fingerprint] = id
+  store?.set(PENDING_MODEL_REQUESTS_KEY, ledger)
+  return {
+    id,
+    clear() {
+      const current = { ...(store?.get(PENDING_MODEL_REQUESTS_KEY, {}) || {}) }
+      delete current[fingerprint]
+      store?.set(PENDING_MODEL_REQUESTS_KEY, current)
+    },
+  }
+}
+
+function retainPendingRequest(error, { accountingRetry = false } = {}) {
+  if (error instanceof HostedRefusal) {
+    return error.code === 'REQUEST_IN_PROGRESS' ||
+      (accountingRetry && error.code === 'ACCOUNTING_UNAVAILABLE')
+  }
+  return error?.name === 'AbortError' || error instanceof TypeError
+}
+
 /**
  * Identity that survives a restart but belongs to nobody.
  *
@@ -110,27 +138,33 @@ async function readJsonOrText(res) {
 async function analyze(store, { text, reference, signal }) {
   const base = hostedBaseUrl()
   if (!base) throw new Error('analyze: OPERATOR_API_URL is not set')
+  const pending = pendingModelRequest(store, 'analyze', { text, reference })
 
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), ANALYZE_TIMEOUT_MS)
   signal?.addEventListener('abort', () => ctl.abort(), { once: true })
 
-  let res
   try {
-    res = await fetch(`${base}/v1/analyze`, {
-      method: 'POST',
-      headers: headers(store),
-      body: JSON.stringify({ text, reference }),
-      signal: ctl.signal,
-    })
-  } finally {
-    clearTimeout(timer)
-  }
+    let res
+    try {
+      res = await fetch(`${base}/v1/analyze`, {
+        method: 'POST',
+        headers: headers(store),
+        body: JSON.stringify({ text, reference, requestId: pending.id }),
+        signal: ctl.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
 
-  const body = await readJsonOrText(res)
-  if (res.status === 402 || res.status === 503) throw new HostedRefusal(body, res.status)
-  if (!res.ok) throw new Error(body?.message || `analysis failed (${res.status})`)
-  return { analysis: body.analysis, studyId: body.studyId, cached: body.cached }
+    const body = await readJsonOrText(res)
+    if (!res.ok) throw new HostedRefusal(body, res.status)
+    pending.clear()
+    return { analysis: body.analysis, studyId: body.studyId, cached: body.cached }
+  } catch (error) {
+    if (!retainPendingRequest(error, { accountingRetry: true })) pending.clear()
+    throw error
+  }
 }
 
 /**
@@ -310,28 +344,33 @@ const AI_PROCESSING_CONSENT_VERSION = 'operator-ai-processing-v1'
 async function ask(store, { doc, analysis, studyId, question, history, vaultNotes }) {
   const base = hostedBaseUrl()
   if (!base) throw new Error('ask: OPERATOR_API_URL is not set')
+  const pending = pendingModelRequest(store, 'ask', { studyId, question, history, vaultNotes })
 
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), ANALYZE_TIMEOUT_MS)
-  let res
   try {
-    res = await fetch(`${base}/v1/ask`, {
-      method: 'POST',
-      headers: headers(store),
-      body: JSON.stringify({
-        doc, analysis, studyId, question, history, vaultNotes,
-        aiConsentVersion: AI_PROCESSING_CONSENT_VERSION,
-      }),
-      signal: ctl.signal,
-    })
-  } finally { clearTimeout(timer) }
+    let res
+    try {
+      res = await fetch(`${base}/v1/ask`, {
+        method: 'POST',
+        headers: headers(store),
+        body: JSON.stringify({
+          doc, analysis, studyId, question, history, vaultNotes,
+          requestId: pending.id,
+          aiConsentVersion: AI_PROCESSING_CONSENT_VERSION,
+        }),
+        signal: ctl.signal,
+      })
+    } finally { clearTimeout(timer) }
 
-  const body = await readJsonOrText(res)
-  if (res.status === 402 || res.status === 429 || res.status === 503) {
-    throw new HostedRefusal(body, res.status)
+    const body = await readJsonOrText(res)
+    if (!res.ok) throw new HostedRefusal(body, res.status)
+    pending.clear()
+    return body
+  } catch (error) {
+    if (!retainPendingRequest(error)) pending.clear()
+    throw error
   }
-  if (!res.ok) throw new Error(body?.message || `that question could not be answered (${res.status})`)
-  return body
 }
 
 /**
@@ -357,30 +396,33 @@ async function ask(store, { doc, analysis, studyId, question, history, vaultNote
 async function sermonAssist(store, { studyId, agent, question, history }) {
   const base = hostedBaseUrl()
   if (!base) throw new Error('sermonAssist: OPERATOR_API_URL is not set')
+  const pending = pendingModelRequest(store, 'sermon-assist', { studyId, agent, question, history })
 
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), ANALYZE_TIMEOUT_MS)
-  let res
   try {
-    res = await fetch(`${base}/v1/sermon-assist`, {
-      method: 'POST',
-      headers: headers(store),
-      body: JSON.stringify({
-        studyId, agent, question, history,
-        aiConsentVersion: AI_PROCESSING_CONSENT_VERSION,
-      }),
-      signal: ctl.signal,
-    })
-  } finally { clearTimeout(timer) }
+    let res
+    try {
+      res = await fetch(`${base}/v1/sermon-assist`, {
+        method: 'POST',
+        headers: headers(store),
+        body: JSON.stringify({
+          studyId, agent, question, history,
+          requestId: pending.id,
+          aiConsentVersion: AI_PROCESSING_CONSENT_VERSION,
+        }),
+        signal: ctl.signal,
+      })
+    } finally { clearTimeout(timer) }
 
-  const body = await readJsonOrText(res)
-  // Same shape as ask(): a 402/429/503 is an offer or a limit, not a crash, and
-  // must reach the reader as the server worded it.
-  if (res.status === 402 || res.status === 429 || res.status === 503) {
-    throw new HostedRefusal(body, res.status)
+    const body = await readJsonOrText(res)
+    if (!res.ok) throw new HostedRefusal(body, res.status)
+    pending.clear()
+    return body
+  } catch (error) {
+    if (!retainPendingRequest(error)) pending.clear()
+    throw error
   }
-  if (!res.ok) throw new Error(body?.message || `that question could not be answered (${res.status})`)
-  return body
 }
 
 /**

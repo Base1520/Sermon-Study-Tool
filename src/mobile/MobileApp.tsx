@@ -37,6 +37,7 @@ import {
   type ReleaseStatus,
   type StudySummary,
 } from './api'
+import { openPendingModelRequest, type PendingModelRequest } from './modelRequestLedger'
 import { GuidedStudyDocument, isGuidedStudyDocument } from './GuidedStudyDocument'
 import { isQuickStudyDocument, QuickStudyDocument } from './QuickStudyDocument'
 import { useSermonRecorder } from './TabletRecorder'
@@ -131,12 +132,6 @@ const TERMS_URL = 'https://www.base1520.com/operator/terms/'
 const SUPPORT_URL = 'https://www.base1520.com/contact/'
 const PLANS_URL = 'https://www.base1520.com/operator/#plans'
 const TabletSermonDesk = lazy(() => import('./TabletSermonDesk').then((module) => ({ default: module.TabletSermonDesk })))
-
-function createStudyRequestId() {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
-  const bytes = crypto.getRandomValues(new Uint8Array(16))
-  return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
-}
 
 function isTabletDevice() {
   if ((import.meta.env.DEV || import.meta.env.VITE_OPERATOR_CAPTURE_DEVICE === 'tablet')
@@ -310,6 +305,7 @@ function AskSheet({
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const pendingRequest = useRef<({ key: string } & PendingModelRequest) | null>(null)
   const guidedStarters = 'mode' in doc && doc.mode === 'guided'
     ? doc.questions.map((item) => item.question).filter(Boolean).slice(0, 3)
     : []
@@ -327,11 +323,33 @@ function AskSheet({
     setQuestion('')
     setBusy(true)
     setError(null)
+    const requestKey = JSON.stringify({ studyId, question: clean, history: messages })
+    if (pendingRequest.current?.key !== requestKey) {
+      pendingRequest.current = {
+        key: requestKey,
+        ...await openPendingModelRequest('ask', requestKey),
+      }
+    }
     try {
-      const result = await askQuestion({ studyId, question: clean, history: messages })
+      const result = await askQuestion({
+        studyId,
+        question: clean,
+        history: messages,
+        requestId: pendingRequest.current.id,
+      })
+      pendingRequest.current.clear()
+      pendingRequest.current = null
       const answer = result.answer || result.refusal || 'I could not answer that from this passage.'
       setMessages([...next, { role: 'assistant', content: answer }])
     } catch (caught) {
+      const retain = !(caught instanceof OperatorApiError)
+        || caught.code === 'REQUEST_IN_PROGRESS'
+      if (!retain) {
+        pendingRequest.current?.clear()
+        pendingRequest.current = null
+      }
+      setMessages(messages)
+      setQuestion(clean)
       setError(errorMessage(caught))
     } finally {
       setBusy(false)
@@ -425,7 +443,7 @@ export default function MobileApp() {
   } | null>(null)
   const flushWorkspaceRemoteRef = useRef<() => Promise<void>>(async () => {})
   const studyRunLock = useRef(false)
-  const studyRequest = useRef<{ key: string; id: string } | null>(null)
+  const studyRequest = useRef<({ key: string } & PendingModelRequest) | null>(null)
   const studyAbort = useRef<AbortController | null>(null)
   const captureAutoRunStarted = useRef(false)
   const captureLatestOpened = useRef(false)
@@ -716,7 +734,10 @@ export default function MobileApp() {
       const requestKind = tablet ? 'guided' : 'quick'
       const requestKey = `${requestKind}|${requestedReference.toLowerCase()}|${translation}`
       if (!studyRequest.current || studyRequest.current.key !== requestKey) {
-        studyRequest.current = { key: requestKey, id: createStudyRequestId() }
+        studyRequest.current = {
+          key: requestKey,
+          ...await openPendingModelRequest(`${requestKind}-study`, requestKey),
+        }
       }
       if (!target || target.reference.toLowerCase() !== requestedReference.toLowerCase() || target.translation !== translation) {
         target = null
@@ -746,6 +767,7 @@ export default function MobileApp() {
         : await runQuickStudy(requestedReference, translation, requestId, controller.signal)
       if (controller.signal.aborted || studyRequest.current?.id !== requestId) return
       target = result.passage
+      studyRequest.current.clear()
       studyRequest.current = null
       setPassage(target)
       setReference(target.reference)
@@ -799,7 +821,11 @@ export default function MobileApp() {
       await refresh()
     } catch (caught) {
       if (controller?.signal.aborted || (requestId && studyRequest.current?.id !== requestId)) return
-      if (caught instanceof OperatorApiError && caught.code !== 'STUDY_IN_PROGRESS') studyRequest.current = null
+      if (caught instanceof OperatorApiError
+        && !['STUDY_IN_PROGRESS', 'ACCOUNTING_UNAVAILABLE'].includes(caught.code)) {
+        studyRequest.current?.clear()
+        studyRequest.current = null
+      }
       setError(errorMessage(caught))
       if (caught instanceof OperatorApiError && ['UPGRADE_REQUIRED', 'FREE_STUDY_SPENT'].includes(caught.code)) setTab('account')
     } finally {

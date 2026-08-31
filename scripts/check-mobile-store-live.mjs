@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -5,8 +6,10 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const metadata = JSON.parse(fs.readFileSync(path.join(root, 'store/metadata.json'), 'utf8'))
-const readinessSource = fs.readFileSync(path.join(root, 'server/src/readiness.js'), 'utf8')
-const expectedSchema = readinessSource.match(/const SCHEMA_VERSION = '([^']+)'/)?.[1] || ''
+const schemaVersionSource = fs.readFileSync(path.join(root, 'server/src/schema-version.js'), 'utf8')
+const schemaSource = fs.readFileSync(path.join(root, 'server/src/schema.sql'), 'utf8')
+const expectedSchema = schemaVersionSource.match(/SCHEMA_VERSION\s*=\s*'([^']+)'/)?.[1] || ''
+const expectedSchemaHash = crypto.createHash('sha256').update(schemaSource).digest('hex')
 const apiUrl = String(process.env.OPERATOR_API_URL || 'https://api-production-15e5e.up.railway.app').replace(/\/+$/, '')
 const platform = String(process.env.OPERATOR_STORE_PLATFORM || 'all').toLowerCase()
 const rawProbeMode = process.env.OPERATOR_LIVE_PROBE_MODE
@@ -76,9 +79,11 @@ try {
   check(health.version === metadata.app.version, 'Production API version matches the store candidate')
   check(Boolean(health.commit) && health.commit !== 'local', 'Production reports a deployed source commit')
   check(Boolean(expectedSchema) && health.schema === expectedSchema, 'Production schema marker matches the store candidate')
+  check(health.schemaHash === expectedSchemaHash, 'Production schema source hash matches the store candidate')
   check(health.releaseStage === 'full', 'Production release stage is full')
   check(health.ok === true, 'Production core readiness passes')
   check(health.capabilities?.account_recovery_email === true, 'Account recovery email is operational')
+  check(health.capabilities?.review_access === true, 'A usable store-review account or one-time link is operational')
   if (platform === 'all' || platform === 'apple') {
     check(health.capabilities?.apple_iap === true, 'Apple purchase verification is operational')
     check(health.capabilities?.apple_iap_sandbox_review === true, 'Apple sandbox reviewer allowlist is configured')

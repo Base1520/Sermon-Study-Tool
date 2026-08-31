@@ -1,6 +1,7 @@
 const { version } = require('../package.json')
+const { SCHEMA_VERSION, schemaSha256 } = require('./schema-version')
 
-const SCHEMA_VERSION = 'operator-account-bound-auth-v8'
+const SCHEMA_SHA256 = schemaSha256()
 
 const CORE_CONFIGURATION = [
   'ANTHROPIC_API_KEY',
@@ -81,6 +82,9 @@ function configurationChecks(env = process.env, keys = CORE_CONFIGURATION) {
     if (key === 'TRIAL_IDENTITY_SECRET') ready = String(env[key] || '').length >= 32
     if (key === 'ACCOUNT_RECOVERY_SECRET') ready = String(env[key] || '').length >= 32
     if (key === 'OPERATOR_RELEASE_STAGE') ready = Boolean(releaseStage(env))
+    if (key === 'STRIPE_SECRET_KEY') ready = /^sk_live_[A-Za-z0-9]+$/.test(String(env[key] || '').trim())
+    if (key === 'STRIPE_WEBHOOK_SECRET') ready = /^whsec_[A-Za-z0-9]+$/.test(String(env[key] || '').trim())
+    if (key.startsWith('STRIPE_PRICE_')) ready = /^price_[A-Za-z0-9]+$/.test(String(env[key] || '').trim())
     if (key === 'APPLE_APP_ID') {
       const appId = Number(String(env[key] || '').trim())
       ready = Number.isSafeInteger(appId) && appId > 0
@@ -125,6 +129,7 @@ function runtimeIdentity() {
     version,
     commit,
     schema: SCHEMA_VERSION,
+    schemaHash: SCHEMA_SHA256,
   }
 }
 
@@ -145,11 +150,20 @@ async function probeReadiness(db, env = process.env) {
       to_regclass('public.usage_period') IS NOT NULL AS usage_period_table,
       to_regclass('public.study_reservation') IS NOT NULL AS study_reservation_table,
       to_regclass('public.ask_reservation') IS NOT NULL AS ask_reservation_table,
+      to_regclass('public.model_admission') IS NOT NULL AS model_admission_table,
+      to_regclass('public.schema_migration') IS NOT NULL AS schema_migration_table,
+      to_regclass('public.settings') IS NOT NULL AS settings_table,
       to_regclass('public.usage_event') IS NOT NULL AS usage_event_table,
       to_regclass('public.study') IS NOT NULL AS study_table,
       to_regclass('public.anon_install') IS NOT NULL AS anon_install_table,
       to_regclass('public.document_cache') IS NOT NULL AS document_cache_table,
+      to_regclass('public.feedback') IS NOT NULL AS feedback_table,
       to_regclass('public.download_lead') IS NOT NULL AS download_lead_table,
+      to_regclass('public.som_purchase') IS NOT NULL AS som_purchase_table,
+      to_regclass('public.access_code') IS NOT NULL AS access_code_table,
+      to_regclass('public.access_code_use') IS NOT NULL AS access_code_use_table,
+      to_regclass('public.topup') IS NOT NULL AS topup_table,
+      to_regclass('public.topup_reconciliation_failure') IS NOT NULL AS topup_reconciliation_failure_table,
       EXISTS (
         SELECT 1 FROM information_schema.columns
          WHERE table_schema = 'public' AND table_name = 'account_registration_code' AND column_name = 'account_id'
@@ -158,6 +172,11 @@ async function probeReadiness(db, env = process.env) {
         SELECT 1 FROM information_schema.columns
          WHERE table_schema = 'public' AND table_name = 'account_registration_code' AND column_name = 'source_ip_hash'
       ) AS account_registration_source_ip_column,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'account_registration_code'
+           AND column_name = 'source_ip_hash' AND is_nullable = 'NO'
+      ) AS account_registration_source_ip_not_null,
       EXISTS (
         SELECT 1 FROM information_schema.columns
          WHERE table_schema = 'public' AND table_name = 'account' AND column_name = 'deleting_at'
@@ -181,11 +200,83 @@ async function probeReadiness(db, env = process.env) {
       EXISTS (
         SELECT 1 FROM information_schema.columns
          WHERE table_schema = 'public' AND table_name = 'study' AND column_name = 'workspace_revision'
-      ) AS study_workspace_revision_column
-  `)
+      ) AS study_workspace_revision_column,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'study' AND column_name = 'request_hash'
+      ) AS study_request_hash_column,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'study_reservation' AND column_name = 'accounting_uncertain'
+      ) AS study_reservation_accounting_uncertain_column,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'ask_reservation' AND column_name = 'accounting_uncertain'
+      ) AS ask_reservation_accounting_uncertain_column,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'ask_reservation' AND column_name = 'request_hash'
+      ) AS ask_reservation_request_hash_column,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'ask_reservation' AND column_name = 'response'
+      ) AS ask_reservation_response_column,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'model_admission'
+           AND column_name = 'provider_slots' AND is_nullable = 'NO'
+      ) AS model_admission_provider_slots_column,
+      EXISTS (
+        SELECT 1 FROM schema_migration
+         WHERE schema_version = $1 AND schema_sha256 = $2
+      ) AS schema_migration_exact,
+      COALESCE((
+        SELECT COUNT(*) = 7 AND BOOL_AND(
+          CASE WHEN key = 'model_admission_window_seconds'
+            THEN value ~ '^[1-9][0-9]*$'
+            ELSE value ~ '^[0-9]+$'
+          END
+        )
+          FROM settings
+         WHERE key IN (
+           'model_admission_window_seconds',
+           'model_admission_global_requests',
+           'model_admission_identity_requests',
+           'model_admission_global_concurrency',
+           'model_admission_identity_concurrency',
+           'model_admission_global_provider_concurrency',
+           'model_admission_identity_provider_concurrency'
+         )
+      ), false) AS model_admission_settings,
+      EXISTS (
+        SELECT 1
+          FROM account review_account
+         WHERE lower(review_account.email) = 'app-review@base1520.com'
+           AND review_account.plan = 'comp'
+           AND review_account.status = 'active'
+           AND review_account.deleting_at IS NULL
+           AND (
+             EXISTS (
+               SELECT 1 FROM device review_device
+                WHERE review_device.account_id = review_account.id
+                  AND review_device.revoked_at IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM device_link review_link
+                WHERE review_link.account_id = review_account.id
+                  AND review_link.used_at IS NULL
+                  AND review_link.expires_at > now()
+             )
+           )
+      ) AS review_access_ready
+  `, [SCHEMA_VERSION, SCHEMA_SHA256])
   const stage = releaseStage(env)
-  const checks = { ...(rows[0] || {}), ...configurationChecks(env, CORE_CONFIGURATION) }
-  const capabilities = capabilityChecks(env)
+  const { review_access_ready: reviewAccessReady = false, ...schemaChecks } = rows[0] || {}
+  const checks = { ...schemaChecks, ...configurationChecks(env, CORE_CONFIGURATION) }
+  const capabilities = {
+    ...capabilityChecks(env),
+    review_access: stage === 'full' && reviewAccessReady === true,
+  }
   const missing = Object.entries(checks)
     .filter(([, available]) => available !== true)
     .map(([name]) => name)
@@ -204,6 +295,7 @@ async function probeReadiness(db, env = process.env) {
 
 module.exports = {
   SCHEMA_VERSION,
+  SCHEMA_SHA256,
   CORE_CONFIGURATION,
   OPTIONAL_CONFIGURATION,
   releaseStage,

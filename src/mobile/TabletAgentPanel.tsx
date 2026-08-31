@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react'
-import { askSermonAgent } from './api'
+import { useMemo, useRef, useState } from 'react'
+import { askSermonAgent, OperatorApiError } from './api'
 import { copyToClipboard } from './clipboard'
+import { openPendingModelRequest, type PendingModelRequest } from './modelRequestLedger'
 import { ReportAiOutput } from './ReportAiOutput'
 import type { TabletAgentMessage, TabletAgentRole, TabletAgentThreads } from './tabletDeskModel'
 
@@ -59,6 +60,7 @@ export function TabletAgentPanel({
   const [question, setQuestion] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const pendingRequest = useRef<({ key: string } & PendingModelRequest) | null>(null)
   const [copiedMessage, setCopiedMessage] = useState<number | null>(null)
   const meta = TABLET_AGENT_META[agent]
   const messages = threads[agent]
@@ -74,13 +76,36 @@ export function TabletAgentPanel({
     setQuestion('')
     setError(null)
     setBusy(true)
+    const requestKey = JSON.stringify({ studyId, agent, question: prompt, history: prior })
+    if (pendingRequest.current?.key !== requestKey) {
+      pendingRequest.current = {
+        key: requestKey,
+        ...await openPendingModelRequest('sermon-assist', requestKey),
+      }
+    }
     try {
-      const result = await askSermonAgent({ studyId, agent, question: prompt, history: prior })
+      const result = await askSermonAgent({
+        studyId,
+        agent,
+        question: prompt,
+        history: prior,
+        requestId: pendingRequest.current.id,
+      })
+      pendingRequest.current.clear()
+      pendingRequest.current = null
       onThreadsChange({
         ...waitingThreads,
         [agent]: [...waitingThreads[agent], { role: 'assistant', content: result.answer }],
       })
     } catch (caught) {
+      const retain = !(caught instanceof OperatorApiError)
+        || caught.code === 'REQUEST_IN_PROGRESS'
+      if (!retain) {
+        pendingRequest.current?.clear()
+        pendingRequest.current = null
+      }
+      onThreadsChange(threads)
+      setQuestion(prompt)
       setError(messageError(caught))
     } finally {
       setBusy(false)

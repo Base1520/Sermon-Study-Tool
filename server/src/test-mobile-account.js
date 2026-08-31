@@ -105,6 +105,7 @@ function deletionDb({
       if (/INSERT INTO free_trial_tombstone/.test(sql)) return { rows: [], rowCount: params[0].length }
       if (/UPDATE usage_event/.test(sql)) return { rows: [], rowCount: 2 }
       if (/UPDATE ask_reservation/.test(sql) && /install_id = NULL/.test(sql)) return { rows: [], rowCount: 2 }
+      if (/DELETE FROM model_admission/.test(sql)) return { rows: [], rowCount: 2 }
       if (/DELETE FROM feedback/.test(sql)) return { rows: [], rowCount: 2 }
       if (/DELETE FROM access_code_use/.test(sql)) return { rows: [], rowCount: 1 }
       if (/DELETE FROM anon_install/.test(sql)) return { rows: [], rowCount: 2 }
@@ -189,10 +190,10 @@ test('every account transition can claim anonymous install work through one help
 
   await claimAnonymousInstallData(client, 'acct-1', 'install-phone')
 
-  assert.equal(statements.length, 4)
+  assert.equal(statements.length, 5)
   assert.deepEqual(
     statements.map(({ sql }) => sql.match(/UPDATE\s+([a-z_]+)/i)?.[1]),
-    ['study', 'study_reservation', 'ask_reservation', 'usage_event'],
+    ['study', 'study_reservation', 'ask_reservation', 'usage_event', 'model_admission'],
   )
   assert.ok(statements.every(({ params }) => params[0] === 'acct-1' && params[1] === 'install-phone'))
 })
@@ -346,21 +347,22 @@ test('confirmed deletion cancels Stripe before deleting data and archives Mailch
   assert.match(sqlOrder[17], /^INSERT INTO free_trial_tombstone/)
   assert.match(sqlOrder[18], /^UPDATE usage_event/)
   assert.match(sqlOrder[19], /^UPDATE ask_reservation/)
-  assert.match(sqlOrder[20], /^DELETE FROM feedback/)
-  assert.match(sqlOrder[21], /^DELETE FROM access_code_use/)
-  assert.match(sqlOrder[22], /^DELETE FROM anon_install/)
-  assert.match(sqlOrder[23], /^DELETE FROM account_recovery_request/)
-  assert.match(sqlOrder[24], /^DELETE FROM account_registration_code/)
-  assert.match(sqlOrder[25], /^DELETE FROM study/)
-  assert.match(sqlOrder[26], /^INSERT INTO marketing_deletion_outbox/)
-  assert.match(sqlOrder[27], /^DELETE FROM download_lead/)
-  assert.match(sqlOrder[28], /^DELETE FROM account/)
-  assert.equal(sqlOrder[29], 'COMMIT')
+  assert.match(sqlOrder[20], /^DELETE FROM model_admission/)
+  assert.match(sqlOrder[21], /^DELETE FROM feedback/)
+  assert.match(sqlOrder[22], /^DELETE FROM access_code_use/)
+  assert.match(sqlOrder[23], /^DELETE FROM anon_install/)
+  assert.match(sqlOrder[24], /^DELETE FROM account_recovery_request/)
+  assert.match(sqlOrder[25], /^DELETE FROM account_registration_code/)
+  assert.match(sqlOrder[26], /^DELETE FROM study/)
+  assert.match(sqlOrder[27], /^INSERT INTO marketing_deletion_outbox/)
+  assert.match(sqlOrder[28], /^DELETE FROM download_lead/)
+  assert.match(sqlOrder[29], /^DELETE FROM account/)
+  assert.equal(sqlOrder[30], 'COMMIT')
   const tombstone = db.state.statements[17]
   assert.equal(tombstone.params.flat().includes('pastor@example.com'), false)
   assert.equal(tombstone.params[2], 1)
   assert.equal(tombstone.params[3], 3)
-  for (const statementIndex of [19, 20, 21, 22]) {
+  for (const statementIndex of [19, 20, 21, 22, 23]) {
     assert.equal(
       db.state.statements[statementIndex].params.flat().includes('install-foreign'),
       false,

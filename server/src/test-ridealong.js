@@ -25,9 +25,11 @@ function fakeDb() {
   const accounts = new Map()   // id -> { topup_studies }
   const studies = new Map()
   const reservations = new Map() // id -> { state }
+  const admissions = new Map()
   let queue = Promise.resolve()
   const api = {
     _periods: periods, _events: events, _accounts: accounts, _studies: studies, _reservations: reservations,
+    _admissions: admissions,
     setTopUp: (id, n) => accounts.set(id, { topup_studies: n }),
     setStudy: (id, study) => studies.set(id, { id, ...study }),
     setReservation: (id, state) => reservations.set(id, { state }),
@@ -36,10 +38,59 @@ function fakeDb() {
     // A rejection belongs to the caller that asked; it must not poison the
     // serial queue for every query after it (a real row lock releases on error).
     query(sql, params) { const p = queue.then(() => run(sql, params)); queue = p.catch(() => {}); return p },
+    async connect() {
+      return { query: api.query, release() {} }
+    },
   }
   return api
 
   function run(sql, p) {
+    if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql) || /pg_advisory_xact_lock/.test(sql)) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (/SELECT key, value FROM settings/.test(sql)) {
+      if (api.failAdmissionChecks) throw new Error('synthetic admission storage failure')
+      return { rows: [
+        { key: 'model_admission_window_seconds', value: '60' },
+        { key: 'model_admission_global_requests', value: '30' },
+        { key: 'model_admission_identity_requests', value: '6' },
+        { key: 'model_admission_global_concurrency', value: '8' },
+        { key: 'model_admission_identity_concurrency', value: '2' },
+        { key: 'model_admission_global_provider_concurrency', value: '16' },
+        { key: 'model_admission_identity_provider_concurrency', value: '6' },
+      ] }
+    }
+    if (/FROM model_admission/.test(sql) && /global_recent/.test(sql)) {
+      const accountId = p[2]
+      const installId = p[3]
+      const all = [...admissions.values()]
+      const own = all.filter((row) => accountId
+        ? row.account_id === accountId || (!row.account_id && row.install_id === installId)
+        : !row.account_id && row.install_id === installId)
+      return { rows: [{
+        global_recent: all.length,
+        global_active: all.filter((row) => row.state === 'active').length,
+        global_provider_active: all.filter((row) => row.state === 'active')
+          .reduce((total, row) => total + row.provider_slots, 0),
+        identity_recent: own.length,
+        identity_active: own.filter((row) => row.state === 'active').length,
+        identity_provider_active: own.filter((row) => row.state === 'active')
+          .reduce((total, row) => total + row.provider_slots, 0),
+      }] }
+    }
+    if (/INSERT INTO model_admission/.test(sql)) {
+      admissions.set(p[0], {
+        id: p[0], account_id: p[1], install_id: p[2], route: p[3],
+        provider_slots: p[4], state: 'active',
+      })
+      return { rows: [], rowCount: 1 }
+    }
+    if (/UPDATE model_admission SET state = 'finished'/.test(sql)) {
+      const row = admissions.get(p[0])
+      if (!row || row.state !== 'active') return { rows: [], rowCount: 0 }
+      row.state = 'finished'
+      return { rows: [], rowCount: 1 }
+    }
     if (/SELECT id FROM account/.test(sql) && /deleting_at IS NULL/.test(sql)) {
       return { rows: [{ id: p[0] }], rowCount: 1 }
     }
@@ -130,6 +181,7 @@ function fakeDb() {
     if (/SUM\(usd\).*AS reconciled/s.test(sql)) {
       return { rows: [{ reconciled: events.reduce((n, e) => n + e.usd, 0) }] }
     }
+    if (/AS uncertain/.test(sql)) return { rows: [{ uncertain: 0 }] }
     if (/SUM\(reserved_usd\).*AS in_flight/s.test(sql)) {
       let res = 0
       for (const r of periods.values()) res += r.reserved
@@ -172,6 +224,13 @@ const studyCost = async (db, studyId) => {
 const ACCT = 'acct-1'
 const START = '2026-08-01T00:00:00Z'
 const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '2026-09-01T00:00:00Z' }
+let admissionSequence = 0
+const readAdmission = () => ({
+  id: `read-test-${++admissionSequence}`,
+  route: 'read',
+  accountId: ACCT,
+  installId: 'install-1',
+})
 
 ;(async () => {
   console.log('\nTHE FULL FLOW COSTS ONE STUDY, NOT TWO')
@@ -414,23 +473,23 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
     const db = fakeDb()
     db.setStudy('ride-ok', { account_id: ACCT, install_id: 'install-1', state: 'analyzed' })
     db.setReservation('ride-ok', 'settled')
-    const okRide = await readResume.rideOrResolve(db, 'ride-ok')
+    const okRide = await readResume.rideOrResolve(db, 'ride-ok', readAdmission())
     ok('settled money arms and the ride proceeds', okRide.ok === true)
     ok('the settled reservation is now held', db._reservations.get('ride-ok').state === 'held')
 
     db.setStudy('ride-dead', { account_id: ACCT, install_id: 'install-1', state: 'reading' })
     db.setReservation('ride-dead', 'refunded')
-    const dead = await readResume.rideOrResolve(db, 'ride-dead')
+    const dead = await readResume.rideOrResolve(db, 'ride-dead', readAdmission())
     ok('refunded money refuses and strands', dead.ok === false && dead.kind === 'stranded')
     ok('the dead study is stranded', db._studies.get('ride-dead').state === 'stranded')
 
     db.setStudy('ride-gone', { account_id: ACCT, install_id: 'install-1', state: 'reading' })
-    const gone = await readResume.rideOrResolve(db, 'ride-gone')
+    const gone = await readResume.rideOrResolve(db, 'ride-gone', readAdmission())
     ok('proven-absent money refuses and strands', gone.ok === false && gone.kind === 'stranded')
 
     db.setStudy('ride-race', { account_id: ACCT, install_id: 'install-1', state: 'reading' })
     db.setReservation('ride-race', 'held')
-    const race = await readResume.rideOrResolve(db, 'ride-race')
+    const race = await readResume.rideOrResolve(db, 'ride-race', readAdmission())
     ok('a transient state refuses and resets', race.ok === false && race.kind === 'reset')
     ok('the racing study is back to analyzed', db._studies.get('ride-race').state === 'analyzed')
 
@@ -440,12 +499,23 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
     // read fails, so the resolver must refuse as unknown.
     db.setReservation('ride-blind', 'held')
     db.failReservationReads = true
-    const blind = await readResume.rideOrResolve(db, 'ride-blind')
+    const blind = await readResume.rideOrResolve(db, 'ride-blind', readAdmission())
     db.failReservationReads = false
     ok('a failed read refuses as unknown, deciding nothing',
        blind.ok === false && blind.kind === 'unknown')
     ok('the blind study went back to analyzed, never stranded',
        db._studies.get('ride-blind').state === 'analyzed')
+
+    db.setStudy('ride-admission-down', { account_id: ACCT, install_id: 'install-1', state: 'reading' })
+    db.setReservation('ride-admission-down', 'settled')
+    db.failAdmissionChecks = true
+    const admissionDown = await readResume.rideOrResolve(db, 'ride-admission-down', readAdmission())
+    db.failAdmissionChecks = false
+    ok('admission storage failure is a service outage, not fake model congestion',
+       admissionDown.ok === false && admissionDown.status === 503 &&
+       admissionDown.body.error === 'ADMISSION_UNAVAILABLE')
+    ok('the bought study remains retryable after admission storage recovers',
+       db._studies.get('ride-admission-down').state === 'analyzed')
   }
 
   console.log('\nA FAILED HOLD QUERY DECIDES NOTHING')
@@ -461,7 +531,7 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
        await engine.claimStudyForReading(db, { studyId: 'ride-hold-blind', accountId: ACCT }) === true)
 
     db.failReservationHolds = true
-    const blindHold = await readResume.rideOrResolve(db, 'ride-hold-blind')
+    const blindHold = await readResume.rideOrResolve(db, 'ride-hold-blind', readAdmission())
     ok('a thrown hold query refuses as unknown instead of escaping',
        blindHold.ok === false && blindHold.kind === 'unknown' && blindHold.status === 409)
     ok('the claimed study is reset for the same-id retry',
@@ -472,7 +542,7 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
     db.failReservationHolds = false
     ok('after recovery the same study id claims again',
        await engine.claimStudyForReading(db, { studyId: 'ride-hold-blind', accountId: ACCT }) === true)
-    const retry = await readResume.rideOrResolve(db, 'ride-hold-blind')
+    const retry = await readResume.rideOrResolve(db, 'ride-hold-blind', readAdmission())
     ok('and its same reservation re-arms without a new charge',
        retry.ok === true && db._reservations.get('ride-hold-blind').state === 'held')
   }
@@ -495,7 +565,7 @@ const claim = { accountId: ACCT, allowance: 40, periodStart: START, periodEnd: '
     ok('index.js never strands or resets a reading claim directly',
        !active.includes('strandStudyReadingClaim') && !active.includes('resetStudyReadingClaim'))
     ok('index.js asks the one question exactly once',
-       (active.match(/readResume\.rideOrResolve\(db, studyId\)/g) || []).length === 1)
+       (active.match(/readResume\.rideOrResolve\(db, studyId, \{/g) || []).length === 1)
     ok('index.js never mints the reservation-unavailable answer itself',
        !active.includes("'STUDY_RESERVATION_UNAVAILABLE'"))
     ok('index.js never mints the restore-refusal answer itself',

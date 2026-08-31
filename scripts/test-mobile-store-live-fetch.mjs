@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -5,8 +6,10 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const metadata = JSON.parse(fs.readFileSync(path.join(root, 'store/metadata.json'), 'utf8'))
-const readinessSource = fs.readFileSync(path.join(root, 'server/src/readiness.js'), 'utf8')
-const schema = readinessSource.match(/const SCHEMA_VERSION = '([^']+)'/)?.[1] || ''
+const schemaVersionSource = fs.readFileSync(path.join(root, 'server/src/schema-version.js'), 'utf8')
+const schemaSource = fs.readFileSync(path.join(root, 'server/src/schema.sql'), 'utf8')
+const schema = schemaVersionSource.match(/SCHEMA_VERSION\s*=\s*'([^']+)'/)?.[1] || ''
+const schemaHash = crypto.createHash('sha256').update(schemaSource).digest('hex')
 const sourcePrivacy = fs.readFileSync(path.join(root, 'website/operator-privacy-addendum.html'), 'utf8')
 const variant = process.env.OPERATOR_TEST_PRIVACY_VARIANT || 'complete'
 const capabilityVariant = process.env.OPERATOR_TEST_CAPABILITY_VARIANT || 'all-ready'
@@ -80,6 +83,7 @@ const capabilitiesByVariant = {
     apple_iap_sandbox_review: true,
     google_iap: true,
     marketing_sync: true,
+    review_access: true,
   },
   'apple-only': {
     account_recovery_email: true,
@@ -87,6 +91,7 @@ const capabilitiesByVariant = {
     apple_iap_sandbox_review: true,
     google_iap: false,
     marketing_sync: true,
+    review_access: true,
   },
   'google-only': {
     account_recovery_email: true,
@@ -94,6 +99,15 @@ const capabilitiesByVariant = {
     apple_iap_sandbox_review: false,
     google_iap: true,
     marketing_sync: true,
+    review_access: true,
+  },
+  'no-review': {
+    account_recovery_email: true,
+    apple_iap: true,
+    apple_iap_sandbox_review: true,
+    google_iap: true,
+    marketing_sync: true,
+    review_access: false,
   },
 }
 const capabilities = capabilitiesByVariant[capabilityVariant]
@@ -130,6 +144,7 @@ globalThis.fetch = async (input, options = {}) => {
       version: metadata.app.version,
       commit: 'fixture-commit',
       schema,
+      schemaHash,
       releaseStage: 'full',
       ok: true,
       capabilities,

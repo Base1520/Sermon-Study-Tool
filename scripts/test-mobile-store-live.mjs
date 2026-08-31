@@ -88,7 +88,7 @@ test('the current checked-in privacy notice passes the actual live-store script'
   const result = run('complete')
   assert.equal(result.status, 0, result.stdout + result.stderr)
   assert.match(result.stdout, /^The Operator full live store readiness$/m)
-  assert.match(result.stdout, /40 passed · 0 warnings · 0 failed/)
+  assert.match(result.stdout, /42 passed · 0 warnings · 0 failed/)
 })
 
 test('an absent probe mode preserves the full twelve-request profile', () => {
@@ -96,7 +96,7 @@ test('an absent probe mode preserves the full twelve-request profile', () => {
   assert.equal(result.status, 0, result.stdout + result.stderr)
   assert.match(result.stdout, /PASS  Quick Study route is deployed/)
   assert.match(result.stdout, /PASS  Workspace sync route is deployed/)
-  assert.match(result.stdout, /40 passed · 0 warnings · 0 failed/)
+  assert.match(result.stdout, /42 passed · 0 warnings · 0 failed/)
 })
 
 test('the named npm commands pin full and public-get modes against ambient downgrade', () => {
@@ -116,7 +116,7 @@ test('an invalid store platform scope fails closed by name', () => {
   const result = run('complete', 'appple')
   assert.equal(result.status, 1, result.stdout + result.stderr)
   assert.match(result.stdout, /FAIL  Store platform scope is valid/)
-  assert.match(result.stdout, /37 passed · 0 warnings · 1 failed/)
+  assert.match(result.stdout, /39 passed · 0 warnings · 1 failed/)
 })
 
 test('Apple scope reads only Apple purchase capabilities', () => {
@@ -125,7 +125,7 @@ test('Apple scope reads only Apple purchase capabilities', () => {
   assert.match(result.stdout, /PASS  Apple purchase verification is operational/)
   assert.match(result.stdout, /PASS  Apple sandbox reviewer allowlist is configured/)
   assert.doesNotMatch(result.stdout, /Google purchase verification is operational/)
-  assert.match(result.stdout, /40 passed · 0 warnings · 0 failed/)
+  assert.match(result.stdout, /42 passed · 0 warnings · 0 failed/)
 })
 
 test('Google scope reads only Google purchase capability', () => {
@@ -134,7 +134,7 @@ test('Google scope reads only Google purchase capability', () => {
   assert.match(result.stdout, /PASS  Google purchase verification is operational/)
   assert.doesNotMatch(result.stdout, /Apple purchase verification is operational/)
   assert.doesNotMatch(result.stdout, /Apple sandbox reviewer allowlist is configured/)
-  assert.match(result.stdout, /39 passed · 0 warnings · 0 failed/)
+  assert.match(result.stdout, /41 passed · 0 warnings · 0 failed/)
 })
 
 test('Apple scope fails when its own purchase capabilities are unavailable', () => {
@@ -143,7 +143,7 @@ test('Apple scope fails when its own purchase capabilities are unavailable', () 
   assert.match(result.stdout, /FAIL  Apple purchase verification is operational/)
   assert.match(result.stdout, /FAIL  Apple sandbox reviewer allowlist is configured/)
   assert.doesNotMatch(result.stdout, /Google purchase verification is operational/)
-  assert.match(result.stdout, /38 passed · 0 warnings · 2 failed/)
+  assert.match(result.stdout, /40 passed · 0 warnings · 2 failed/)
 })
 
 test('Google scope fails when its own purchase capability is unavailable', () => {
@@ -152,7 +152,7 @@ test('Google scope fails when its own purchase capability is unavailable', () =>
   assert.match(result.stdout, /FAIL  Google purchase verification is operational/)
   assert.doesNotMatch(result.stdout, /Apple purchase verification is operational/)
   assert.doesNotMatch(result.stdout, /Apple sandbox reviewer allowlist is configured/)
-  assert.match(result.stdout, /38 passed · 0 warnings · 1 failed/)
+  assert.match(result.stdout, /40 passed · 0 warnings · 1 failed/)
 })
 
 test('public-get mode executes only the health and public-page GET slice', () => {
@@ -162,7 +162,7 @@ test('public-get mode executes only the health and public-page GET slice', () =>
   assert.doesNotMatch(result.stdout, /^The Operator (?:full )?live store readiness$/m)
   assert.match(result.stdout, /WARN  Public GET-only mode skips unauthenticated API route probes; this is partial evidence, not full live readiness/)
   assert.doesNotMatch(result.stdout, /Quick Study route|Workspace sync route/)
-  assert.match(result.stdout, /26 passed · 1 warnings · 0 failed/)
+  assert.match(result.stdout, /28 passed · 1 warnings · 0 failed/)
 })
 
 test('an invalid live probe mode fails closed without running route probes', () => {
@@ -205,9 +205,16 @@ for (const [variant, failure] of [
     const result = run(variant)
     assert.equal(result.status, 1, result.stdout + result.stderr)
     assert.match(result.stdout, new RegExp(`FAIL  ${failure}`))
-    assert.match(result.stdout, /39 passed · 0 warnings · 1 failed/)
+    assert.match(result.stdout, /41 passed · 0 warnings · 1 failed/)
   })
 }
+
+test('live readiness fails when no usable store-review identity exists', () => {
+  const result = run('complete', 'apple', 'no-review')
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.match(result.stdout, /FAIL  A usable store-review account or one-time link is operational/)
+  assert.match(result.stdout, /41 passed · 0 warnings · 1 failed/)
+})
 
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed) process.exitCode = 1

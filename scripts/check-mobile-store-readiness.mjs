@@ -1209,13 +1209,35 @@ check(
     && studyCommentary.includes("surface: 'commentary'"),
   'Revoked bearers cannot reuse a caller-controlled install ID to read claimed studies',
 )
+// THE ONE FREE STUDY IS DELIBERATE, AND THESE TWO CHECKS ENCODE IT.
+// Cole ruled 2026-09-01: an anonymous visitor gets one free study, then gets
+// pushed to upgrade. /v1/analyze is that study and /v1/read rides the same
+// reservation, so BOTH are intentionally ungated; the paywall lives downstream
+// in claimStudy. The four paid surfaces stay behind an account.
+// Counts: index.js = declaration + ask + sermon-assist; generation.js = quick +
+// guided. A bare count can be satisfied by gating the wrong route, so the
+// second check names the routes explicitly.
+const gatedRoute = (source, marker, end) => {
+  const start = source.indexOf(marker)
+  if (start < 0) return null
+  const stop = end ? source.indexOf(end, start) : -1
+  return source.slice(start, stop > start ? stop : start + 900)
+    .includes('requireGeneratedStudyAccount(req, res)')
+}
 check(
   serverIndex.includes("releaseStage() !== 'full'")
-    // Declaration + Read + Ask + sermon-assist stay in index; Analyze, Quick,
-    // and Guided live in the extracted generation router.
-    && (serverIndex.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 4
-    && (generationRoutes.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 3,
-  'The full store backend requires a verified account before generated spend',
+    && (serverIndex.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 3
+    && (generationRoutes.match(/requireGeneratedStudyAccount\(req, res\)/g) || []).length === 2,
+  'The full store backend requires a verified account before paid generated spend',
+)
+check(
+  gatedRoute(generationRoutes, "app.post('/v1/analyze'") === false
+    && gatedRoute(serverIndex, "app.post('/v1/read'") === false
+    && gatedRoute(serverIndex, "app.post('/v1/ask'") === true
+    && gatedRoute(serverIndex, "app.post('/v1/sermon-assist'") === true
+    && gatedRoute(generationRoutes, "app.post('/v1/quick-study'") === true
+    && gatedRoute(generationRoutes, "app.post('/v1/guided-study'") === true,
+  'The one free study stays open on analyze and read while the four paid surfaces stay gated',
 )
 check(accountRecovery.includes('account_recovery_request') && serverSchema.includes('CREATE TABLE IF NOT EXISTS account_recovery_request'), 'Known and unknown recovery emails share the same persistent cooldown ledger')
 check(accountRegistration.includes('SET account_id = $2') && mobileAccount.includes('DELETE FROM account_registration_code'), 'Registration metadata is account-bound and removed during explicit deletion')

@@ -339,8 +339,10 @@ generation.mount(app, db, {
  */
 const MAX_ANALYSIS_CHARS = 120_000
 
+// NO ACCOUNT GATE, DELIBERATELY — /v1/read rides the reservation /v1/analyze
+// already opened, so gating it would break the free study mid-flow. See the
+// note above the analyze route in routes/generation.js.
 app.post('/v1/read', route(async (req, res) => {
-  if (!requireGeneratedStudyAccount(req, res)) return
   const { analysis, reference, level, studyId: priorStudyId } = req.body || {}
   if (!analysis || !reference) {
     return res.status(400).json({ error: 'analysis and reference are required' })

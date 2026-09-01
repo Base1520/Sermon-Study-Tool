@@ -61,8 +61,17 @@ function mount(app, db, {
   //
   // THIS is where a study is charged. /v1/read then rides the same reservation, so
   // the full flow costs one study and not two. See the studyId branch below.
+  //
+  // NO ACCOUNT GATE HERE, DELIBERATELY. Analyze is the one free study an
+  // anonymous visitor gets before being asked to pay; /v1/read rides the same
+  // reservation so reading it stays free too. A gate was added here on
+  // 2026-08-20 and removed on 2026-09-01 by Cole's explicit decision: keep the
+  // try-before-you-buy path, then push the upgrade. Gating it also stranded
+  // desktop users, which has no route to create a free account, under a modal
+  // headline that still promised "One free study, on the house".
+  // The paywall lives downstream in claimStudy, not at the door.
+  // test-ai-consent-routes.js asserts this route stays ungated.
   app.post('/v1/analyze', route(async (req, res) => {
-    if (!requireGeneratedStudyAccount(req, res)) return
     const { text, reference, requestId } = req.body || {}
     if (!text || !reference) {
       return res.status(400).json({ error: 'text and reference are required' })

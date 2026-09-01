@@ -68,14 +68,21 @@ const analyzeRoute = routeSource(
 const inputCheck = analyzeRoute.indexOf('checkGenerationInput({ text, reference })')
 const claim = analyzeRoute.indexOf('claimStudy(req, {')
 const open = analyzeRoute.indexOf('engine.openStudy(db, {')
-assert.ok(analyzeRoute.indexOf('requireGeneratedStudyAccount(req, res)') < inputCheck,
-  'Analyze must require an account in a full release before processing input')
+/* THE ONE FREE STUDY IS A PRODUCT DECISION, AND THIS IS WHERE IT IS GUARDED.
+   Cole ruled 2026-09-01: an anonymous visitor gets one free study, then gets
+   pushed to upgrade. An account gate on analyze silently ends that trial — and
+   the desktop has no route to create a free account, so it strands those users
+   under a modal still headlined "One free study, on the house".
+   If this assertion fails, someone re-added the gate. Do not resolve it by
+   deleting this test; the paywall belongs downstream in claimStudy. */
+assert.equal(analyzeRoute.indexOf('requireGeneratedStudyAccount(req, res)'), -1,
+  'Analyze must stay open to anonymous callers — it is the one free study')
 assert.ok(inputCheck >= 0 && inputCheck < claim && claim < open,
   'Analyze must reject oversized input before any claim or study row')
 
 const readRoute = routeSource(server, 'index.js', "app.post('/v1/read'", '/**\n * Ask a question about a reading.')
-assert.match(readRoute, /requireGeneratedStudyAccount\(req, res\)/,
-  'Read must require an account in a full release before generated work')
+assert.doesNotMatch(readRoute, /requireGeneratedStudyAccount\(req, res\)/,
+  'Read rides the reservation analyze already opened — gating it breaks the free study mid-flow')
 
 for (const [source, owner, start, end] of [
   [generation, 'routes/generation.js', "app.post('/v1/quick-study'", "app.post('/v1/guided-study'"],
@@ -87,6 +94,10 @@ for (const [source, owner, start, end] of [
   assert.match(route, /aiConsentVersion/)
   assert.match(route, /AI_CONSENT_REQUIRED/)
   assert.match(route, /AI_PROCESSING_CONSENT_VERSION/)
+  /* The free study is analyze only. These four stay behind an account so that
+     opening the trial door never opens the paid surfaces with it. */
+  assert.match(route, /requireGeneratedStudyAccount\(req, res\)/,
+    `${owner} ${start} must still require an account — only analyze is free`)
 }
 
 const askClientStart = client.indexOf('export function askQuestion')

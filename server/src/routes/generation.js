@@ -8,6 +8,7 @@
  * this module registers route bodies and owns no server or database lifecycle.
  */
 
+const crypto = require('crypto')
 const requestIdempotency = require('../request-idempotency')
 
 const QUICK_STUDY_TRANSLATIONS = new Set(['kjv', 'asv', 'web', 'ylt', 'esv'])
@@ -37,6 +38,37 @@ async function reconcilePersistedStudy({ db, meter, engine, studyId }) {
 
   await meter.markStudyReservationAccountingUncertain(db, studyId).catch(() => {})
   return { ok: false, retryable: true, state: 'held' }
+}
+
+/**
+ * LEGACY STUDY-ID FALLBACK — delete one release after both store builds carrying
+ * the request ledger are live.
+ *
+ * Before request-idempotency.js the id was `quick-`/`guided-` + the first 32 hex
+ * of sha256(`${owner}:${requestId}`) (see main @ routes/generation.js:13-25). Now
+ * it is `quick-study-`/`guided-study-` + sha256(`${owner}:${route}:${requestId}`).
+ * A study in flight across the deploy computes the NEW id, finds nothing, opens a
+ * second reservation and charges a second study for work already paid for — the
+ * exact failure this module exists to prevent. On a miss, look once under the old
+ * shape. Legacy rows have request_hash NULL (schema.sql), so the caller must treat
+ * a NULL hash as a match on this path, not a 409.
+ */
+function legacyStudyId(routePrefix, ownerId, requestId) {
+  const digest = crypto.createHash('sha256').update(`${ownerId}:${requestId}`).digest('hex').slice(0, 32)
+  return `${routePrefix}-${digest}`
+}
+async function findExistingStudy(db, { studyId, legacyId, accountId, installId }) {
+  const sql = `SELECT id, state, analysis, document, passage, request_hash
+         FROM study
+        WHERE id = $1
+          AND (($2::uuid IS NOT NULL AND account_id = $2)
+            OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
+        LIMIT 1`
+  const current = await db.query(sql, [studyId, accountId, installId || ''])
+  if (current.rows[0]) return { row: current.rows[0], legacy: false }
+  const older = await db.query(sql, [legacyId, accountId, installId || ''])
+  if (older.rows[0]) return { row: older.rows[0], legacy: true }
+  return { row: null, legacy: false }
 }
 
 function mount(app, db, {
@@ -281,18 +313,18 @@ function mount(app, db, {
     } catch {
       return res.status(400).json({ error: 'a valid requestId is required' })
     }
-    const studyId = idempotency.id
-    const existing = await db.query(
-      `SELECT state, analysis, document, passage, request_hash
-         FROM study
-        WHERE id = $1
-          AND (($2::uuid IS NOT NULL AND account_id = $2)
-            OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
-        LIMIT 1`,
-      [studyId, accountId, req.identity.installId || ''],
-    )
-    const existingStudy = existing.rows[0] || null
-    if (existingStudy && existingStudy.request_hash !== idempotency.requestHash) {
+    let studyId = idempotency.id
+    const found = await findExistingStudy(db, {
+      studyId,
+      legacyId: legacyStudyId('quick', accountId || req.identity.installId, requestId),
+      accountId,
+      installId: req.identity.installId,
+    })
+    const existingStudy = found.row
+    // A legacy row carries no request_hash; it was keyed on the same owner and
+    // requestId, which is the identity being replayed, so it is a match.
+    if (existingStudy && found.legacy) studyId = existingStudy.id
+    if (existingStudy && !found.legacy && existingStudy.request_hash !== idempotency.requestHash) {
       return res.status(409).json({
         error: 'REQUEST_ID_REUSED',
         message: 'That request identifier was already used for different content. Try again.',
@@ -470,18 +502,18 @@ function mount(app, db, {
     } catch {
       return res.status(400).json({ error: 'a valid requestId is required' })
     }
-    const studyId = idempotency.id
-    const existing = await db.query(
-      `SELECT state, analysis, document, passage, request_hash
-         FROM study
-        WHERE id = $1
-          AND (($2::uuid IS NOT NULL AND account_id = $2)
-            OR ($2::uuid IS NULL AND account_id IS NULL AND install_id = $3))
-        LIMIT 1`,
-      [studyId, accountId, req.identity.installId || ''],
-    )
-    const existingStudy = existing.rows[0] || null
-    if (existingStudy && existingStudy.request_hash !== idempotency.requestHash) {
+    let studyId = idempotency.id
+    const found = await findExistingStudy(db, {
+      studyId,
+      legacyId: legacyStudyId('guided', accountId || req.identity.installId, requestId),
+      accountId,
+      installId: req.identity.installId,
+    })
+    const existingStudy = found.row
+    // A legacy row carries no request_hash; it was keyed on the same owner and
+    // requestId, which is the identity being replayed, so it is a match.
+    if (existingStudy && found.legacy) studyId = existingStudy.id
+    if (existingStudy && !found.legacy && existingStudy.request_hash !== idempotency.requestHash) {
       return res.status(409).json({
         error: 'REQUEST_ID_REUSED',
         message: 'That request identifier was already used for different content. Try again.',

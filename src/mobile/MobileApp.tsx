@@ -131,6 +131,26 @@ const DELETE_INFO_URL = 'https://www.base1520.com/operator/account-deletion/'
 const TERMS_URL = 'https://www.base1520.com/operator/terms/'
 const SUPPORT_URL = 'https://www.base1520.com/contact/'
 const PLANS_URL = 'https://www.base1520.com/operator/#plans'
+
+/** Shape of a 402 offer from the server (entitlement.js upgradePrompt). */
+type StudyOffer = {
+  code: string
+  headline: string
+  body: string
+  actions: Array<{ kind: 'subscribe' | 'portal' | string, plan?: string, label: string }>
+}
+function offerFromError(caught: unknown): StudyOffer | null {
+  if (!(caught instanceof OperatorApiError)) return null
+  const p = caught.payload as Record<string, unknown>
+  if (typeof p.headline !== 'string' || typeof p.body !== 'string') return null
+  const actions = Array.isArray(p.actions)
+    ? (p.actions as Array<Record<string, unknown>>).filter((a) => a && typeof a.label === 'string' && typeof a.kind === 'string')
+        .map((a) => ({ kind: String(a.kind), plan: typeof a.plan === 'string' ? a.plan : undefined, label: String(a.label) }))
+    : []
+  // payload.error ('UPGRADE_REQUIRED') shadows payload.code ('FREE_STUDY_SPENT' /
+  // 'ALLOWANCE_SPENT' / past-due) on OperatorApiError.code — read the specific one.
+  return { code: typeof p.code === 'string' ? p.code : caught.code, headline: p.headline, body: p.body, actions }
+}
 const TabletSermonDesk = lazy(() => import('./TabletSermonDesk').then((module) => ({ default: module.TabletSermonDesk })))
 
 function isTabletDevice() {
@@ -406,6 +426,16 @@ export default function MobileApp() {
   const [accountCodeType, setAccountCodeType] = useState<'link' | 'access'>('link')
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountNote, setAccountNote] = useState<string | null>(null)
+  /* THE PAYWALL IS THE ONE SCREEN WHERE MONEY CHANGES HANDS, AND IT USED TO BE BLANK.
+     The server answers a spent allowance with a complete offer — headline, body,
+     and the actions that fit the account's real state (subscribe / update the
+     card). The catch below used to keep only the body string in `error`, then
+     jump to the Account tab — where `error` is never rendered. A Standard
+     subscriber running study #81 got a screen change and no words. A subscriber
+     whose card had lapsed lost the one "Update payment method" action AND the
+     Manage Subscription card (past_due sets paying=false), and was steered toward
+     buying a second subscription. This holds the whole offer for the Account tab. */
+  const [accountOffer, setAccountOffer] = useState<StudyOffer | null>(null)
   const [accountMode, setAccountMode] = useState<'register' | 'recovery' | 'link'>(MOBILE_FULL_RELEASE ? 'register' : 'link')
   const [esvKey, setEsvKeyState] = useState('')
   const [ownerKey, setOwnerKey] = useState('')
@@ -715,6 +745,9 @@ export default function MobileApp() {
     let controller: AbortController | null = null
     let requestId: string | null = null
     try {
+      // A new attempt supersedes any offer left from the last refusal; if this
+      // one is refused too, the catch sets a fresh offer.
+      setAccountOffer(null)
       const studyLabel = tablet ? 'Guided Study' : 'Quick Study'
       const captureAutoRun = import.meta.env.VITE_OPERATOR_CAPTURE_AUTORUN === 'true'
       if (!captureAutoRun && (!account || account.anonymous) && !accountServiceUnavailable) {
@@ -827,7 +860,13 @@ export default function MobileApp() {
         studyRequest.current = null
       }
       setError(errorMessage(caught))
-      if (caught instanceof OperatorApiError && ['UPGRADE_REQUIRED', 'FREE_STUDY_SPENT'].includes(caught.code)) setTab('account')
+      if (caught instanceof OperatorApiError && ['UPGRADE_REQUIRED', 'FREE_STUDY_SPENT'].includes(caught.code)) {
+        setAccountOffer(offerFromError(caught))
+        // The meter the Account tab shows is stale by exactly the study that was
+        // just refused; refresh it so "0 of 80 remain" is true when they arrive.
+        void refresh()
+        setTab('account')
+      }
     } finally {
       if (!controller || studyAbort.current === controller) {
         studyAbort.current = null
@@ -1596,6 +1635,19 @@ export default function MobileApp() {
                     ? 'Your included study still works on this device. Account creation will return when the service is ready.'
                     : 'Link the account already active in The Operator on desktop.'}</p>
             </div>
+            {accountOffer && <div className="mobile-account-card mobile-offer-card">
+              <span className="mobile-card-label">{accountOffer.code === 'FREE_STUDY_SPENT' ? 'YOUR FREE STUDY' : 'THIS MONTH'}</span>
+              <h2>{accountOffer.headline}</h2>
+              <p>{accountOffer.body}</p>
+              {accountOffer.actions.map((action) => action.kind === 'portal'
+                ? <button key={action.label} className="mobile-primary" onClick={() => { void manageBilling() }} disabled={Boolean(storeBusy)}>{storeBusy === 'manage' ? 'OPENING…' : action.label.toUpperCase()}</button>
+                : action.kind === 'subscribe' && !nativePlatform
+                  ? <button key={action.label} className="mobile-primary" onClick={() => { void openExternal(PLANS_URL) }}>{action.label.toUpperCase()}</button>
+                  : null)}
+              {accountOffer.actions.some((action) => action.kind === 'subscribe') && nativePlatform
+                && <p className="mobile-offer-hint">Choose a plan below. It renews through the {nativePlatform === 'ios' ? 'App Store' : 'Play Store'} and you can cancel any time.</p>}
+              <button className="mobile-mode-switch" onClick={() => setAccountOffer(null)}>DISMISS</button>
+            </div>}
             {accountNote && <div className="mobile-account-note">{accountNote}</div>}
 
             {!linkedAccount && accountServiceUnavailable && <div className="mobile-account-card mobile-register-card">

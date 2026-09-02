@@ -981,19 +981,19 @@ process.on('uncaughtException', (e) => console.error('[fatal] uncaught exception
 setInterval(() => {
   meter.sweepStaleReservations(db)
     .then((n) => { if (n) console.log(`[meter] swept ${n} stale reservation(s)`) })
-    .catch((e) => console.error('[meter] sweep failed:', e.message))
+    .catch((e) => console.error('[meter] sweep failed:', e?.stack || e?.code || String(e)))
 }, 5 * 60 * 1000).unref()
 
 setInterval(() => {
   purgeExpiredRegistrationCodes(db)
     .then((n) => { if (n) console.log(`[registration] purged ${n} expired code record(s)`) })
-    .catch((e) => console.error('[registration] retention sweep failed:', e.message))
+    .catch((e) => console.error('[registration] retention sweep failed:', e?.stack || e?.code || String(e)))
 }, 5 * 60 * 1000).unref()
 
 setInterval(() => {
   processMarketingDeletionOutbox(db)
     .then(({ completed }) => { if (completed) console.log(`[mailchimp] completed ${completed} deletion job(s)`) })
-    .catch((e) => console.error('[mailchimp] deletion sweep failed:', e.message))
+    .catch((e) => console.error('[mailchimp] deletion sweep failed:', e?.stack || e?.code || String(e)))
 }, 5 * 60 * 1000).unref()
 
 const port = process.env.PORT || 8080

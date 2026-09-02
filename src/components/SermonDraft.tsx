@@ -158,6 +158,13 @@ export function SermonDraft({ inline = false, isOpen, onClose, analysis, apiKey,
   const [error, setError] = useState<string | null>(null)
   const [expandedPoint, setExpandedPoint] = useState<number | null>(null)
   const [agentStage, setAgentStage] = useState('')
+  /* THE WATCHDOG MUST NEVER SAY "CLEAN" WHEN IT DID NOT RUN.
+     main.js eisegesis-check returns { flags: [], error } whenever it cannot run —
+     on every public (hosted) build there is no local key, so that is every time.
+     An empty flag list renders as "· clean": a silent no-op that looks like good
+     news, which is exactly how a wrong reading reaches a pulpit. This state makes
+     the failure visible instead. */
+  const [watchdogOff, setWatchdogOff] = useState(false)
 
   // Manuscript mode
   const [manuscriptMode, setManuscriptMode] = useState(!!initialDraft)
@@ -205,11 +212,20 @@ export function SermonDraft({ inline = false, isOpen, onClose, analysis, apiKey,
         passageContext: analysis,
         apiKey,
       })
-      if (result?.error) console.warn('[eisegesis]', result.error)
+      if (result?.error) {
+        console.warn('[eisegesis]', result.error)
+        setWatchdogOff(true)
+        setFlags([])
+        // Deliberately NOT setLastChecked: "clean" is gated on it below.
+        return
+      }
+      setWatchdogOff(false)
       setFlags(result?.flags ?? [])
       setLastChecked(text)
     } catch (e) {
       console.error('[eisegesis] check failed:', e)
+      setWatchdogOff(true)
+      setFlags([])
     } finally { setChecking(false) }
   }, [analysis, apiKey])
 
@@ -319,7 +335,12 @@ export function SermonDraft({ inline = false, isOpen, onClose, analysis, apiKey,
                   · {flags.length} flag{flags.length !== 1 ? 's' : ''}
                 </span>
               )}
-              {!checking && flags.length === 0 && lastChecked && (
+              {!checking && watchdogOff && (
+                <span title="The eisegesis watchdog is not available on this build, so this draft has NOT been checked." style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.khaki, letterSpacing: '0.08em', opacity: 0.85 }}>
+                  · watchdog off
+                </span>
+              )}
+              {!checking && !watchdogOff && flags.length === 0 && lastChecked && (
                 <span style={{ fontFamily: 'JetBrains Mono', fontSize: 7, color: BASE.moss, letterSpacing: '0.08em', opacity: 0.7 }}>
                   · clean
                 </span>

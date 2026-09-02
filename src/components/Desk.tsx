@@ -293,6 +293,8 @@ function DraftCardNode({ data }: NodeProps) {
   const [stage, setStage] = useState('')
   const [flags, setFlags] = useState<any[]>([])
   const [checking, setChecking] = useState(false)
+  // See SermonDraft.tsx: a check that cannot run must not look like a clean one.
+  const [watchdogOff, setWatchdogOff] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const histRef = useRef(historyId)
@@ -303,8 +305,9 @@ function DraftCardNode({ data }: NodeProps) {
     setChecking(true)
     try {
       const r = await (window as any).electronAPI.flagManuscript({ manuscriptText: t, passageContext: analysis, apiKey })
-      setFlags(r?.flags ?? [])
-    } catch { /* silent */ }
+      if (r?.error) { setWatchdogOff(true); setFlags([]) }
+      else { setWatchdogOff(false); setFlags(r?.flags ?? []) }
+    } catch { setWatchdogOff(true); setFlags([]) }
     setChecking(false)
   }, [apiKey, analysis])
 
@@ -338,6 +341,7 @@ function DraftCardNode({ data }: NodeProps) {
         <span style={{ fontFamily: FONT.display, fontSize: 13, color: BASE.khaki, letterSpacing: '0.1em' }}>SERMON MANUSCRIPT</span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
           {checking && <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.steel }}>checking…</span>}
+          {!checking && watchdogOff && <span title="The eisegesis watchdog is not available on this build; this manuscript has NOT been checked." style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.khaki, opacity: 0.85 }}>watchdog off</span>}
           {!checking && flagged.length > 0 && <span style={{ fontFamily: 'JetBrains Mono', fontSize: 6.5, color: BASE.red, background: `${BASE.red}12`, border: `1px solid ${BASE.red}30`, borderRadius: 8, padding: '1px 8px' }}>{flagged.length} flag{flagged.length > 1 ? 's' : ''}</span>}
           {!generating && <button className="nodrag" onClick={generate} style={{ fontFamily: FONT.display, fontSize: 14, letterSpacing: '0.12em', color: BASE.gold, background: BASE.goldDim, border: `1px solid ${BASE.borderGold}`, borderRadius: 8, padding: '3px 10px', cursor: 'pointer' }}>{text ? '↺ REGENERATE' : '✦ GENERATE DRAFT'}</button>}
         </div>

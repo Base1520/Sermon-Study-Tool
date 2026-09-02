@@ -258,7 +258,12 @@ async function deleteAccountData(db, identity, {
     )
     await client.query(
       `UPDATE ask_reservation
-          SET account_id = NULL, install_id = NULL
+          SET account_id = NULL, install_id = NULL,
+              -- response holds the full model answer (a replay of the user's
+              -- question). The deletion page promises questions are removed
+              -- and only anonymized token-and-cost records are kept; an
+              -- answer body is not a cost record. Scrub it here.
+              response = NULL
         WHERE account_id = $1 OR install_id = ANY($2::text[])`,
       [account.id, installIds],
     )

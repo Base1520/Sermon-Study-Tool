@@ -509,6 +509,12 @@ body:has(.mobile-app), body:has(.mobile-intro) {
 .mobile-device button, .mobile-signout { color: #a8ad9e; border: 1px solid rgba(103, 112, 79, .28); background: transparent; padding: 8px 10px; font: 700 8px 'Courier Prime', monospace; letter-spacing: .08em; }
 .mobile-signout { width: 100%; min-height: 44px; margin-top: 6px; }
 .mobile-account-note { margin-bottom: 14px; border-left-color: #e5be49; color: #e5be49; background: rgba(229, 190, 73, .06); }
+/* The paywall offer. Gold border like the note, but a full card: this is the
+   one place a subscriber is asked for money, so it gets a headline, the body the
+   server wrote for their exact state, and the action that fits it. */
+.mobile-offer-card { border: 1px solid rgba(229, 190, 73, .55); }
+.mobile-offer-card .mobile-primary { margin-top: 12px; }
+.mobile-offer-hint { margin: 12px 0 0; color: rgba(245, 242, 232, .68); font: 500 12px/1.5 'Courier Prime', monospace; }
 .mobile-consent { display: grid; grid-template-columns: 20px 1fr; align-items: start; gap: 10px; margin: 2px 0 16px; color: rgba(245, 242, 232, .68); font: 500 11px/1.5 'Courier Prime', monospace; text-transform: none; letter-spacing: 0; }
 .mobile-consent input, .mobile-account-card .mobile-consent input { width: 18px; height: 18px; margin: 1px 0 0; padding: 0; accent-color: #e5be49; }
 .mobile-plans { display: grid; gap: 9px; }

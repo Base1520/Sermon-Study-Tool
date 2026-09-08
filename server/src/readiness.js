@@ -82,7 +82,11 @@ function configurationChecks(env = process.env, keys = CORE_CONFIGURATION) {
     if (key === 'TRIAL_IDENTITY_SECRET') ready = String(env[key] || '').length >= 32
     if (key === 'ACCOUNT_RECOVERY_SECRET') ready = String(env[key] || '').length >= 32
     if (key === 'OPERATOR_RELEASE_STAGE') ready = Boolean(releaseStage(env))
-    if (key === 'STRIPE_SECRET_KEY') ready = /^sk_live_[A-Za-z0-9]+$/.test(String(env[key] || '').trim())
+    // Production uses a RESTRICTED live key (rk_live_…), Stripe's scoped-permission
+    // key type. It is the safer choice and Stripe accepts it wherever a secret key
+    // goes. Requiring sk_live_ here failed the 2026-09-08 deploy healthcheck against
+    // a perfectly good key. Both live prefixes are correct; test keys still fail.
+    if (key === 'STRIPE_SECRET_KEY') ready = /^(?:sk|rk)_live_[A-Za-z0-9]+$/.test(String(env[key] || '').trim())
     if (key === 'STRIPE_WEBHOOK_SECRET') ready = /^whsec_[A-Za-z0-9]+$/.test(String(env[key] || '').trim())
     if (key.startsWith('STRIPE_PRICE_')) ready = /^price_[A-Za-z0-9]+$/.test(String(env[key] || '').trim())
     if (key === 'APPLE_APP_ID') {

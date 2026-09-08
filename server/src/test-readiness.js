@@ -385,3 +385,15 @@ test('an unlabelled deployment never falls through to core', async () => {
   assert.equal(result.releaseStage, 'invalid')
   assert.deepEqual(result.missing, ['config_operator_release_stage'])
 })
+
+test('a restricted live Stripe key (rk_live_) satisfies readiness; test keys still do not', () => {
+  const base = Object.fromEntries(CORE_CONFIGURATION.map((k) => [k, 'x'.repeat(40)]))
+  Object.assign(base, { OPERATOR_RELEASE_STAGE: 'full', STRIPE_WEBHOOK_SECRET: 'whsec_' + 'a'.repeat(32) })
+  for (const k of CORE_CONFIGURATION) if (k.startsWith('STRIPE_PRICE_')) base[k] = 'price_' + 'a'.repeat(20)
+  const rk = configurationChecks({ ...base, STRIPE_SECRET_KEY: 'rk_live_' + 'a'.repeat(99) }, CORE_CONFIGURATION)
+  const sk = configurationChecks({ ...base, STRIPE_SECRET_KEY: 'sk_live_' + 'a'.repeat(99) }, CORE_CONFIGURATION)
+  const test_ = configurationChecks({ ...base, STRIPE_SECRET_KEY: 'sk_test_' + 'a'.repeat(99) }, CORE_CONFIGURATION)
+  assert.equal(rk.config_stripe_secret_key, true, 'rk_live_ is a valid production key')
+  assert.equal(sk.config_stripe_secret_key, true)
+  assert.equal(test_.config_stripe_secret_key, false, 'a test key must never pass production readiness')
+})

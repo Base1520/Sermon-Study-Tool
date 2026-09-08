@@ -1199,10 +1199,27 @@ check(recordings.includes('moveSermonRecordings') && mobileApp.includes('moveSer
 check(localStudies.includes('workspaceDirty') && localStudies.includes('notesDirty') && mobileApp.includes('localChanged'), 'Cloud refreshes cannot overwrite dirty local notes or sermon-desk work')
 check(!/if \(reachedServer && state\?\.anonymous\)[\s\S]{0,500}deleteLocalStudies/.test(mobileApp), 'A revoked device token hides account work instead of deleting its local studies')
 check(/await signOutDevice\(\)[\s\S]{0,240}clearActiveReading\(\)/.test(mobileApp), 'Sign-out clears former account content from the active reading surface')
+// COUNTING INLINE COPIES BROKE ON A LEGITIMATE REFACTOR — ASSERT THE PROPERTY INSTEAD.
+// Quick and Guided each carried the ownership clause inline, so this counted 2. On
+// 2026-09-02 the legacy study-id fallback consolidated both lookups into the shared
+// findExistingStudy() helper, which carries the SAME clause once and is called by both
+// routes. Ownership never weakened, but the count went 2 -> 1 and this check went red
+// for six days. What actually matters is the property: the ownership clause exists, and
+// every generated-study lookup goes through something that enforces it. A helper that
+// lost the clause, or a route that stopped calling it, still fails here.
+const generationOwnershipClauses =
+  generationRoutes.match(/account_id IS NULL AND install_id = \$3/g)?.length ?? 0
+const generationHelperCalls =
+  generationRoutes.match(/await findExistingStudy\(db, \{/g)?.length ?? 0
+const generationOwnershipEnforced =
+  generationOwnershipClauses >= 1
+  // the clause must live inside the shared helper, not in some unrelated query
+  && /async function findExistingStudy\([\s\S]{0,400}account_id IS NULL AND install_id = \$3/.test(generationRoutes)
+  // and both metered study routes must actually go through it
+  && generationHelperCalls === 2
 check(
   serverAuth.includes('installId: null')
-    // Quick and Guided ownership SQL moved verbatim with their route bodies.
-    && generationRoutes.match(/account_id IS NULL AND install_id = \$3/g)?.length === 2
+    && generationOwnershipEnforced
     && studyAiAccess.match(/account_id IS NULL AND install_id = \$3/g)?.length === 1
     && serverIndex.match(/resolveOwnedStudyDocument\(db,/g)?.length === 2
     && studyCommentary.match(/resolveOwnedStudyDocument\(db,/g)?.length === 1

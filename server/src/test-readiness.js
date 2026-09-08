@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-const { SCHEMA_SHA256, SCHEMA_VERSION, probeReadiness, runtimeIdentity } = require('./readiness')
+const { SCHEMA_SHA256, SCHEMA_VERSION, probeReadiness, runtimeIdentity, configurationChecks, CORE_CONFIGURATION } = require('./readiness')
 
 const READY_ENV = {
   ANTHROPIC_API_KEY: 'sk-ant-test-ready',

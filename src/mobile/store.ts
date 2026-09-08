@@ -196,17 +196,44 @@ export async function restoreStorePurchases() {
   return restored
 }
 
+/**
+ * ANDROID RENEWALS USED TO DIE HERE, SILENTLY, ON DAY 31.
+ *
+ * The server only learns that a subscription renewed from a store notification
+ * (Apple: /v1/iap/apple/notifications · Google: RTDN). Until one arrives,
+ * `paid_through` still holds the FIRST period's expiry, and entitlement.js:138
+ * flips an active subscriber to `canceled` the moment it passes. This function
+ * is the client-side self-heal that covers the gap.
+ *
+ * It only healed iOS. The Android branch asked for `isAcknowledged === false`,
+ * which is true only of a purchase that has never been acknowledged — i.e. a
+ * brand-new one. A RENEWAL of an already-acknowledged subscription is
+ * `isAcknowledged: true`, so it was filtered out and never re-verified: the man
+ * kept being charged by Google and lost the app on day 31, and the only way back
+ * was to find Restore Purchases himself.
+ *
+ * The fix is to do what this file's own restoreStorePurchases() already does for
+ * Android and has always done safely — ask for current entitlements and take
+ * anything in the purchased state. An unacknowledged purchase is still current
+ * and still `purchaseState === '1'`, so acknowledgment is not lost; it now
+ * happens on the same pass. Verification is deduped per session by
+ * verifiedTransactions / inFlightVerifications, so this costs one call per
+ * subscription per launch.
+ *
+ * This is defence in depth, NOT a substitute for RTDN: it only runs when the
+ * user opens the app.
+ */
 export async function reconcilePendingStorePurchases() {
   const platform = nativePlatform()
   if (!platform) return 0
   const { purchases } = await NativePurchases.getPurchases({
     productType: PURCHASE_TYPE.SUBS,
-    onlyCurrentEntitlements: platform === 'ios',
+    onlyCurrentEntitlements: true,
   })
   let reconciled = 0
   for (const transaction of purchases.filter((purchase) =>
     definitionForTransaction(purchase) && (
-      platform === 'ios' || (purchase.purchaseState === '1' && purchase.isAcknowledged === false)
+      platform !== 'android' || purchase.purchaseState === '1'
     ))) {
     try {
       await verifyTransaction(transaction, true)

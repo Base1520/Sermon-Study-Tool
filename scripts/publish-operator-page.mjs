@@ -47,7 +47,11 @@ async function verifyPublic() {
   const required = ['$29.99', '$299.99', '$49.99', '$499.99', '$149.99', '$1,649.99']
   const missing = required.filter((value) => !html.includes(value))
   if (missing.length) throw new Error(`Public Operator page is missing ${missing.join(', ')}`)
-  if (!/Web (?:&|&amp;) Android only/.test(html)) throw new Error('Public Operator page is missing the Heavy Annual platform boundary')
+  // Heavy Annual is web-only on BOTH stores: Apple's ceiling could not carry it and
+  // Play's hard cap is $999.99 USD (store/products.md PRICE LOCK). The page said
+  // "Web & Android only" until 2026-09-08 — a false purchase promise that got worse
+  // the day Android went live. The guard tracks the corrected string.
+  if (!/Web only/.test(html)) throw new Error('Public Operator page is missing the Heavy Annual platform boundary')
   return { status: response.status, url: response.url, requiredCopyPresent: true }
 }
 

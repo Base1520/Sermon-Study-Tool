@@ -573,3 +573,10 @@ test('a linked Google replacement rolls back the old cancellation when the new w
   assert.ok(order.indexOf('old-canceled') < order.indexOf('subscription-write'))
   assert.ok(order.indexOf('subscription-write') < order.indexOf('rollback'))
 })
+
+test('Apple grace ending leaves a subscription in billing retry, not canceled', () => {
+  const { NotificationTypeV2: AppleNotification } = require('@apple/app-store-server-library')
+  const future = Date.now() + 24 * 60 * 60 * 1000
+  assert.equal(appleStatus({ expiresDate: future }, AppleNotification.GRACE_PERIOD_EXPIRED), 'past_due')
+  assert.equal(appleStatus({ expiresDate: future }, AppleNotification.EXPIRED), 'canceled')
+})

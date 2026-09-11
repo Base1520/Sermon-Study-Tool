@@ -125,6 +125,28 @@ function perStudy(plan) {
 }
 
 /**
+ * How long an ACTIVE subscription keeps working past its recorded period end.
+ *
+ * paid_through only advances when a renewal is written down, and nothing is
+ * written until a provider tells us. Until then a man whose card was charged
+ * successfully looked exactly like one whose plan had ended: allowance zero,
+ * studies refused, "that was your free study." Notifications usually land in
+ * seconds, but a late or failing webhook locked paying customers out on their
+ * renewal date with nothing to bring them back.
+ *
+ * This is NOT a payment grace period. A failed card is past_due, never active,
+ * and still stops the allowance at once. It covers only a subscription last seen
+ * active whose renewal has not been recorded — and any fresh write from Stripe,
+ * Apple or Google re-evaluates with no tolerance at all (billing.js), while
+ * stripe.js re-reads lapsed web subscriptions well inside this window.
+ * billing-period.js holds an account in this state inside the month it already
+ * paid for, so the window only spends what is left of that month and never opens a
+ * new allowance. The price of a missed cancellation is at most the remainder of one
+ * paid month, still under the global spend ceiling.
+ */
+const RENEWAL_GRACE_MS = 48 * 60 * 60 * 1000
+
+/**
  * Resolve what this account may do right now.
  *
  * Deliberately tolerant of a missing or unknown plan — an account row that has
@@ -135,7 +157,7 @@ function entitlementFor(account) {
   const planKey = PLANS[account?.plan] ? account.plan : 'free'
   const plan = PLANS[planKey]
   const paidThrough = account?.paidThrough ? new Date(account.paidThrough).getTime() : null
-  const expired = Number.isFinite(paidThrough) && paidThrough <= Date.now()
+  const expired = Number.isFinite(paidThrough) && paidThrough + RENEWAL_GRACE_MS <= Date.now()
   const effectiveStatus = expired && account?.status === 'active' ? 'canceled' : account?.status ?? 'none'
 
   // Status is set explicitly rather than inferred, because Stripe's default
@@ -240,4 +262,5 @@ module.exports = {
   monthlyPriceUsd,
   annualSavingsUsd,
   NEXT_PLAN_UP,
+  RENEWAL_GRACE_MS,
 }

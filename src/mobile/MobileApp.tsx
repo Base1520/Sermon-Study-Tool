@@ -86,6 +86,8 @@ import {
   storePlatform,
   verifyPendingStoreTransaction,
   type StorePlan,
+  storeSubscriptionOwnership,
+  type StoreSubscriptionOwnership,
 } from './store'
 import bIcon from '../assets/b-icon.png'
 
@@ -448,6 +450,8 @@ export default function MobileApp() {
   const [recoveryStep, setRecoveryStep] = useState<'email' | 'code'>('email')
   const [recoveryBusy, setRecoveryBusy] = useState(false)
   const [storePlans, setStorePlans] = useState<StorePlan[]>([])
+  const [storeOwnership, setStoreOwnership] = useState<StoreSubscriptionOwnership | null>(null)
+  const [storeOwnershipCheck, setStoreOwnershipCheck] = useState(0)
   const [billingCycle, setBillingCycle] = useState<'month' | 'year'>('month')
   const [storeBusy, setStoreBusy] = useState<string | null>(null)
   const [storeNote, setStoreNote] = useState<string | null>(null)
@@ -634,6 +638,7 @@ export default function MobileApp() {
                 if (MOBILE_FULL_RELEASE) setReleaseStatus(await getReleaseStatus().catch(() => null))
                 if (MOBILE_FULL_RELEASE) await reconcilePendingStorePurchases().catch(() => {})
                 await refresh()
+                setStoreOwnershipCheck((count) => count + 1)
               })()
             })
           }
@@ -672,6 +677,18 @@ export default function MobileApp() {
       })
     return () => { cancelled = true }
   }, [tab])
+
+  // Ownership decides whether an in-app purchase is a plan change or a second charge,
+  // so it is re-read whenever what this account pays for can have changed — opening
+  // Account, a purchase, restore or listener-delivered purchase landing (refresh moves
+  // these fields), or the app coming back (the store account may have been switched).
+  useEffect(() => {
+    if (!MOBILE_FULL_RELEASE || tab !== 'account' || !storePlatform()) return
+    let cancelled = false
+    setStoreOwnership(null)
+    void storeSubscriptionOwnership(account?.accountId).then((ownership) => { if (!cancelled) setStoreOwnership(ownership) })
+    return () => { cancelled = true }
+  }, [tab, account?.accountId, account?.paying, account?.billingProvider, account?.status, storeOwnershipCheck])
 
   useEffect(() => {
     if (!MOBILE_FULL_RELEASE || !storePlatform()) return
@@ -1362,7 +1379,7 @@ export default function MobileApp() {
     setStoreNote(null)
     try {
       if (account?.billingProvider === 'stripe') {
-        if (nativePlatform) throw new Error('Manage this existing web subscription from BASE1520.com in your browser. The mobile app does not open outside payment pages.')
+        if (nativePlatform) throw new Error('To change or cancel this web subscription, email info@base1520.com. The mobile app does not open outside billing pages.')
         await openExternal(await createBillingPortal())
       } else if (account?.billingProvider === 'apple' || account?.billingProvider === 'google') {
         await manageStoreSubscriptions()
@@ -1417,6 +1434,64 @@ export default function MobileApp() {
   const nativePlatform = storePlatform()
   const nativeStore = MOBILE_FULL_RELEASE ? nativePlatform : null
   const visibleStorePlans = storePlans.filter((plan) => plan.plan.endsWith('_annual') === (billingCycle === 'year'))
+  const storeProvider = nativePlatform === 'ios' ? 'apple' : nativePlatform === 'android' ? 'google' : null
+  const deviceStore = storeProvider === 'apple' ? 'App Store' : 'Google Play'
+  // A new plan is a change to the current subscription, not a second one, only when
+  // every loaded plan shares one App Store subscription group AND the store account
+  // on this device holds THIS Operator account's subscription. Google Play cannot
+  // change a plan in-app yet, and no store can see a plan billed anywhere else.
+  const appleGroups = new Set(storePlans.map((plan) => plan.product.subscriptionGroupIdentifier))
+  const appleGroupShared = storeProvider === 'apple' && storePlans.length > 0 && appleGroups.size === 1 && !appleGroups.has('')
+  const billedProvider = account?.billingProvider ?? null
+  const inAppPlanChange = Boolean(account?.paying) && billedProvider === 'apple' && storeProvider === 'apple' && appleGroupShared
+  const planCardPending = Boolean(nativeStore) && inAppPlanChange && storeOwnership === null
+  const openSubscription = Boolean(account && billedProvider && (account.paying || account.status === 'past_due'))
+  let planChangeNotice: { headline: string, body: string } | null = null
+  // A paying account whose own store holds a token-mismatched subscription (for
+  // example one restored into this account after the original was deleted) is
+  // steered to managing it in the store below, not told to restore it again.
+  if (nativeStore && account && storeOwnership === 'other-account' && !(account.paying && billedProvider === storeProvider)) {
+    planChangeNotice = {
+      headline: `This ${deviceStore} account already has an Operator subscription.`,
+      body: `It is not linked to this Operator account, so buying here would change that plan or start a second one. If it is yours, use RESTORE PURCHASES. Otherwise switch the ${deviceStore} account on this device, or link the Operator account it belongs to.`,
+    }
+  } else if (nativeStore && account && openSubscription &&
+    !(inAppPlanChange && (storeOwnership === 'this-account' || storeOwnership === null))) {
+    const where = billedProvider === 'apple' ? 'the App Store' : billedProvider === 'google' ? 'Google Play' : null
+    if (account.status === 'past_due') {
+      planChangeNotice = {
+        headline: 'Your last payment did not go through.',
+        body: where
+          ? `Update the payment method in ${where} to keep your plan. Subscribing here as well would charge you twice once that payment recovers.`
+          : 'Your plan is billed outside the app. Update the payment method from The Operator on your computer (Settings → Your Access). Subscribing here as well would charge you twice once that payment recovers.',
+      }
+    } else if (billedProvider === 'stripe') {
+      planChangeNotice = {
+        headline: 'Your plan is billed outside the app.',
+        body: 'To change it, email info@base1520.com and we will switch it without charging you twice. Subscribing here as well would start a second subscription.',
+      }
+    } else if (billedProvider !== storeProvider) {
+      planChangeNotice = {
+        headline: `Your plan is billed through ${where}.`,
+        body: 'Change it on the device where you subscribed. Subscribing here as well would start a second subscription and charge you twice.',
+      }
+    } else if (billedProvider === 'google') {
+      planChangeNotice = {
+        headline: 'Plan changes are not available in the Android app yet.',
+        body: 'Your current plan keeps working. To move to a different plan now, cancel it in Google Play and choose the new plan here once your current period ends. Everything you have studied stays in your library.',
+      }
+    } else if (!appleGroupShared || storeOwnership === 'other-account') {
+      planChangeNotice = {
+        headline: 'Change your plan in the App Store.',
+        body: 'Use MANAGE SUBSCRIPTION above to switch plans without being charged twice.',
+      }
+    } else {
+      planChangeNotice = {
+        headline: 'Your plan is billed to a different Apple ID.',
+        body: 'Change it on the device signed in to the Apple ID you subscribed with. Subscribing with this Apple ID would start a second subscription and charge you twice.',
+      }
+    }
+  }
   const activeStudies = studies.filter((study) => !study.archived_at)
   const archivedStudies = studies.filter((study) => Boolean(study.archived_at))
   const quickDocument = isQuickStudyDocument(document) ? document : null
@@ -1746,10 +1821,16 @@ export default function MobileApp() {
               <h2>{account.label}</h2>
               <p>{account.allowance} new studies each month. Every finished study remains in your library.</p>
               {(account.billingProvider === 'apple' || account.billingProvider === 'google' || (account.billingProvider === 'stripe' && !nativePlatform)) && <button className="mobile-secondary" onClick={() => { void manageBilling() }} disabled={Boolean(storeBusy)}>{storeBusy === 'manage' ? 'OPENING…' : 'MANAGE SUBSCRIPTION'}</button>}
-              {account.billingProvider === 'stripe' && nativePlatform && <div className="mobile-store-staged"><strong>EXISTING WEB SUBSCRIPTION</strong><p>Manage it from BASE1520.com in your browser. The mobile app does not open outside payment or billing pages.</p></div>}
+              {account.billingProvider === 'stripe' && nativePlatform && <div className="mobile-store-staged"><strong>EXISTING WEB SUBSCRIPTION</strong><p>To change or cancel it, email info@base1520.com. The mobile app does not open outside billing pages.</p></div>}
             </div>}
 
-            {linkedAccount && <div className="mobile-account-card mobile-plan-card">
+            {linkedAccount && planChangeNotice && <div className="mobile-account-card mobile-plan-card">
+              <span className="mobile-card-label">CHANGE YOUR PLAN</span>
+              <h2>{planChangeNotice.headline}</h2>
+              <p>{planChangeNotice.body}</p>
+            </div>}
+
+            {linkedAccount && !planChangeNotice && !planCardPending && <div className="mobile-account-card mobile-plan-card">
               <span className="mobile-card-label">{account?.paying ? 'CHANGE OR UPGRADE' : 'CHOOSE YOUR PLAN'}</span>
               <h2>Keep working new passages.</h2>
               <p>Every plan unlocks {tablet ? 'COVENANT Guided Study, the Infinite Sermon Desk, recording, Preach Mode,' : 'Quick Studies here'} and the full preparation workflow on desktop. Annual billing costs less, while the allowance still resets each month.</p>

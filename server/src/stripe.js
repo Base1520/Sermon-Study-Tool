@@ -27,6 +27,8 @@ const {
   mountWebPurchase,
   preferredSubscription,
   OPEN_SUBSCRIPTION_STATUSES,
+  openStoreSubscription,
+  storeConflictMessage,
 } = require('./web-purchase')
 const {
   SOM_SOURCE,
@@ -34,10 +36,19 @@ const {
   recordSomPurchase,
   syncSomBuyerMarketing,
   markSomPurchaseRefunded,
+  markSomPurchaseDisputed,
+  restoreSomPurchaseAfterWonDispute,
+  objectId,
 } = require('./som-purchase')
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' })
+const TOPUP_SOURCE = 'operator-topup'
 const TOPUP_REFUND_RETRY_MS = 24 * 60 * 60 * 1000
+const DISPUTE_EVENTS = new Set([
+  'charge.dispute.created',
+  'charge.dispute.funds_withdrawn',
+  'charge.dispute.closed',
+])
 
 /**
  * Same wrapper as index.js, and needed for the same reason.
@@ -141,7 +152,11 @@ async function syncCustomer(db, customerId, stripeClient = stripe, options = {})
         : sub.status === 'past_due' || sub.status === 'unpaid' || sub.status === 'paused' || sub.status === 'incomplete' ? 'past_due'
         : 'canceled'
       synchronizedIds.push(sub.id)
-      await billing.upsertSubscription(client, {
+      // A query-only handle, never the checked-out client itself: upsertSubscription
+      // treats anything with .connect() as a pool, and a pg pool client has one — so
+      // it called connect() on an already-connected client, pg refused, and every
+      // Stripe sync for a real subscriber threw. The transaction and lock are ours.
+      await billing.upsertSubscription({ query: (...args) => client.query(...args) }, {
         accountId,
         provider: 'stripe',
         externalId: sub.id,
@@ -157,7 +172,14 @@ async function syncCustomer(db, customerId, stripeClient = stripe, options = {})
         providerEventAt: observedAt,
         providerEventRank: status === 'canceled' ? 100 : status === 'past_due' ? 50 : 10,
         environment: sub.livemode === false ? 'sandbox' : 'production',
-        metadata: { customerId },
+        // When this period began, so the sweep can keep asking about a renewal whose
+        // charge Stripe had not yet attempted when the new period was written down.
+        metadata: {
+          customerId,
+          currentPeriodStart: sub.current_period_start
+            ? new Date(sub.current_period_start * 1000).toISOString()
+            : null,
+        },
       })
     }
     if (synchronizedIds.length) {
@@ -253,7 +275,7 @@ async function handleWebhookEvent(db, event, stripeClient = stripe) {
     ['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(event.type) &&
     eventObject.mode === 'payment' &&
     eventObject.payment_status === 'paid' &&
-    eventObject.metadata?.source === 'operator-topup'
+    eventObject.metadata?.source === TOPUP_SOURCE
   ) {
     await creditTopUp(db, eventObject)
   }
@@ -262,8 +284,10 @@ async function handleWebhookEvent(db, event, stripeClient = stripe) {
     await revokeOperatorTopUpRefund(db, eventObject, {
       eventId: event.id,
       eventCreated: event.created,
+      stripeClient,
     })
   }
+  if (DISPUTE_EVENTS.has(event.type)) await handleChargeDispute(db, event, stripeClient)
 }
 
 /**
@@ -274,7 +298,7 @@ async function handleWebhookEvent(db, event, stripeClient = stripe) {
  * race to the primary key and grants nothing.
  */
 async function creditTopUp(db, session) {
-  if (session.metadata?.source !== 'operator-topup') return false
+  if (session.metadata?.source !== TOPUP_SOURCE) return false
   if (!session.payment_intent) {
     throw new Error(`Operator top-up is missing a PaymentIntent for Checkout Session ${session.id}`)
   }
@@ -316,8 +340,71 @@ async function creditTopUp(db, session) {
   }
 }
 
+/**
+ * Was this refunded or disputed Charge an Operator top-up?
+ *
+ * EVERY charge.refunded on the Stripe account reaches the webhook — subscription
+ * invoices, the SOM ebook, and anything else sold through the same account — and
+ * the top-up path used to treat each unmatched one as a top-up whose grant had not
+ * landed yet. It threw, the webhook answered 500, and Stripe redelivered the same
+ * event for a day: one ordinary refund became a day of failures on a live
+ * endpoint, and an endpoint that keeps failing is one Stripe disables, which
+ * silently stops subscription sync for every customer. Only a charge that really
+ * is a top-up may hold its event open for retry or raise a reconciliation alarm.
+ *
+ * Cheapest evidence first; Stripe, the ledger, has the last word.
+ */
+async function chargeIsOperatorTopUp(client, charge, stripeClient = stripe, options = {}) {
+  const source = charge?.metadata?.source
+  if (source) return source === TOPUP_SOURCE
+  // /v1/topup is a one-off Checkout payment and creates no invoice.
+  if (charge?.invoice) return false
+  const paymentIntentId = objectId(charge?.payment_intent)
+  if (!paymentIntentId) return false
+  const som = await client.query(
+    `SELECT 1 FROM som_purchase WHERE payment_intent_id = $1 LIMIT 1`,
+    [paymentIntentId],
+  )
+  if (som.rows.length) return false
+  let sessions
+  try {
+    sessions = await stripeClient.checkout.sessions.list({ payment_intent: paymentIntentId, limit: 1 })
+  } catch (error) {
+    // A key that may not read Checkout Sessions never will, and retrying fails the
+    // endpoint for days. Leave the charge for a person and acknowledge it.
+    if (error?.type !== 'StripePermissionError') throw error
+    await recordReconciliationFailure(client, options.eventId, paymentIntentId,
+      `${options.kind || 'refund'}-classify-not-permitted`)
+    console.error('[stripe] this key may not read the Checkout Session for', paymentIntentId)
+    return false
+  }
+  return (sessions?.data || []).some((session) => session?.metadata?.source === TOPUP_SOURCE)
+}
+
+async function recordReconciliationFailure(client, eventId, paymentIntentId, reason) {
+  await client.query(
+    `INSERT INTO topup_reconciliation_failure
+       (stripe_event_id, payment_intent_id, reason, first_seen_at, last_seen_at, attempt_count)
+     VALUES ($1, $2, $3, now(), now(), 1)
+     ON CONFLICT (stripe_event_id) DO UPDATE
+       SET last_seen_at = now(), attempt_count = topup_reconciliation_failure.attempt_count + 1`,
+    [eventId || `unidentified:${paymentIntentId}`, paymentIntentId, reason],
+  )
+}
+
 async function revokeOperatorTopUpRefund(db, charge, options = {}) {
   if (charge?.refunded !== true || !charge.payment_intent) return false
+  return reverseOperatorTopUp(db, charge, { ...options, kind: 'refund' })
+}
+
+/**
+ * Take back the unspent studies a reversed top-up granted, exactly once.
+ * Shared by full refunds and chargebacks; `kind` only labels the ledger.
+ */
+async function reverseOperatorTopUp(db, charge, options = {}) {
+  const kind = options.kind === 'dispute' ? 'dispute' : 'refund'
+  const paymentIntentId = objectId(charge?.payment_intent)
+  if (!paymentIntentId) return false
   const eventCreatedMs = Number(options.eventCreated) * 1000
   const nowMs = Number(options.nowMs ?? Date.now())
   const insideRetryWindow = Number.isFinite(eventCreatedMs) && nowMs - eventCreatedMs < TOPUP_REFUND_RETRY_MS
@@ -330,24 +417,21 @@ async function revokeOperatorTopUpRefund(db, charge, options = {}) {
     const linked = await client.query(
       `SELECT session_id, stripe_customer_id, studies, studies_revoked, refunded_at
          FROM topup WHERE payment_intent_id = $1 FOR UPDATE`,
-      [charge.payment_intent],
+      [paymentIntentId],
     )
     const topup = linked.rows[0]
     if (!topup) {
-      if (insideRetryWindow) {
-        throw new Error(`Operator top-up refund is waiting for PaymentIntent ${charge.payment_intent}`)
-      }
-      await client.query(
-        `INSERT INTO topup_reconciliation_failure
-           (stripe_event_id, payment_intent_id, reason, first_seen_at, last_seen_at, attempt_count)
-         VALUES ($1, $2, 'unmatched-full-refund', now(), now(), 1)
-         ON CONFLICT (stripe_event_id) DO UPDATE
-           SET last_seen_at = now(), attempt_count = topup_reconciliation_failure.attempt_count + 1`,
-        [options.eventId || `unidentified:${charge.payment_intent}`, charge.payment_intent],
-      )
-      await client.query('COMMIT')
+      // Nothing is locked yet, so find out what this charge was before holding
+      // anything open — most reversals that reach here were never top-ups.
+      await client.query('ROLLBACK')
       transactionOpen = false
-      console.error('[stripe] operator top-up refund requires reconciliation', charge.payment_intent)
+      if (!(await chargeIsOperatorTopUp(client, charge, options.stripeClient || stripe, { eventId: options.eventId, kind }))) return false
+      if (insideRetryWindow) {
+        throw new Error(`Operator top-up ${kind} is waiting for PaymentIntent ${paymentIntentId}`)
+      }
+      await recordReconciliationFailure(client, options.eventId, paymentIntentId,
+        kind === 'refund' ? 'unmatched-full-refund' : 'unmatched-dispute')
+      console.error(`[stripe] operator top-up ${kind} requires reconciliation`, paymentIntentId)
       return false
     }
     if (topup.refunded_at) {
@@ -361,7 +445,18 @@ async function revokeOperatorTopUpRefund(db, charge, options = {}) {
       [topup.stripe_customer_id],
     )
     const account = accountResult.rows[0]
-    if (!account) throw new Error(`Operator top-up refund account match failed for ${topup.session_id}`)
+    if (!account) {
+      // Deleting an account leaves its topup rows behind. With no balance left to
+      // revoke, a retry can never succeed — throwing here only made Stripe
+      // redeliver for three days and then drop the event with no record anywhere.
+      // Close the grant and leave the alarm row instead.
+      await client.query(`UPDATE topup SET refunded_at = now() WHERE session_id = $1`, [topup.session_id])
+      await recordReconciliationFailure(client, options.eventId, paymentIntentId, `${kind}-account-deleted`)
+      await client.query('COMMIT')
+      transactionOpen = false
+      console.error(`[stripe] operator top-up ${kind} found no account`, topup.session_id)
+      return false
+    }
     const revoked = Math.min(remainingGrant, Math.max(0, Number(account.topup_studies)))
     const debited = await client.query(
       `UPDATE account SET topup_studies = topup_studies - $2 WHERE id = $1`,
@@ -385,6 +480,163 @@ async function revokeOperatorTopUpRefund(db, charge, options = {}) {
   } finally {
     if (ownsClient) client.release()
   }
+}
+
+/**
+ * A chargeback takes the money back without ever emitting charge.refunded.
+ *
+ * Stripe withdraws the amount plus a dispute fee the moment a dispute opens, and
+ * it never cancels a subscription on its own. With no handler, a disputer kept
+ * the top-up studies, the ebook download, and a live subscription that went on
+ * billing them — and every further charge to a customer who has already disputed
+ * invites another dispute, which is how a Stripe account gets closed.
+ *
+ * An inquiry (warning_*) moves no money and is left alone. Every step is
+ * idempotent, and the dispute's status is read from Stripe rather than the event,
+ * so created, funds_withdrawn and a close can arrive in any order, or be resent. A dispute the seller WINS restores the ebook; revoked studies and
+ * a canceled subscription are not revived automatically — the win is written to
+ * the reconciliation ledger for a person to decide.
+ */
+/**
+ * A Stripe read this key is not permitted to make will never succeed. Throwing
+ * answered 500 on every delivery for three days and acted on nothing, so record the
+ * dispute for a person (GET /v1/admin/billing-reconciliation) and acknowledge.
+ * Anything else still throws so Stripe retries.
+ */
+async function readForDispute(db, event, payload, read) {
+  try {
+    return await read()
+  } catch (error) {
+    if (error?.type !== 'StripePermissionError') throw error
+    await recordReconciliationFailure(db, event.id,
+      objectId(payload?.payment_intent) || objectId(payload?.charge) || payload?.id, 'dispute-read-not-permitted')
+    console.error('[stripe] this key may not read what dispute', payload?.id, 'needs')
+    return null
+  }
+}
+
+async function handleChargeDispute(db, event, stripeClient = stripe, options = {}) {
+  const payload = event?.data?.object
+  const payloadStatus = String(payload?.status || '')
+  if (payloadStatus.startsWith('warning_')) return 'inquiry'
+  if (event.type === 'charge.dispute.closed' && !['won', 'lost'].includes(payloadStatus)) return 'closed'
+  if (!payload?.id) throw new Error(`Stripe dispute event ${event.id} names no dispute`)
+  // An event's status is only what it was when the event was created. Stripe does
+  // not deliver in order and an owner can resend an old event, so a late "opened"
+  // event must never close the ebook again or cancel a subscription for a customer
+  // whose dispute was already won. Stripe says where the dispute stands now.
+  const dispute = await readForDispute(db, event, payload, () => stripeClient.disputes.retrieve(payload.id))
+  if (!dispute) return 'unreadable'
+  const status = String(dispute?.status || '')
+  if (status.startsWith('warning_')) return 'inquiry'
+  if (!['won', 'lost', 'needs_response', 'under_review'].includes(status)) return 'closed'
+  const chargeId = objectId(dispute?.charge) || objectId(payload?.charge)
+  if (!chargeId) throw new Error(`Stripe dispute ${payload.id} names no Charge`)
+  // Retrieved, not trusted from the payload: this client's pinned API version is
+  // what guarantees the Charge still carries the invoice of a subscription payment.
+  const charge = await readForDispute(db, event, payload, () => stripeClient.charges.retrieve(chargeId))
+  if (!charge) return 'unreadable'
+  const paymentIntentId = objectId(charge?.payment_intent) || objectId(dispute?.payment_intent) ||
+    objectId(payload?.payment_intent)
+
+  if (status === 'won') {
+    await restoreSomPurchaseAfterWonDispute(db, paymentIntentId)
+    const reversed = paymentIntentId
+      ? await db.query(
+          `SELECT 1 FROM topup WHERE payment_intent_id = $1 AND refunded_at IS NOT NULL LIMIT 1`,
+          [paymentIntentId],
+        )
+      : { rows: [] }
+    if (reversed.rows.length || charge?.invoice) {
+      await recordReconciliationFailure(db, event.id, paymentIntentId || chargeId, 'dispute-won-review')
+    }
+    return 'won'
+  }
+
+  if (paymentIntentId) {
+    await markSomPurchaseDisputed(db, paymentIntentId)
+    await reverseOperatorTopUp(db, { ...charge, payment_intent: paymentIntentId }, {
+      kind: 'dispute',
+      eventId: event.id,
+      eventCreated: event.created,
+      stripeClient,
+    })
+  }
+  await cancelDisputedSubscription(db, charge, event, stripeClient, options)
+  return 'reversed'
+}
+
+async function cancelDisputedSubscription(db, charge, event, stripeClient = stripe, options = {}) {
+  const invoiceId = objectId(charge?.invoice)
+  if (!invoiceId) return false
+  try {
+    const invoice = await stripeClient.invoices.retrieve(invoiceId)
+    const subscriptionId = objectId(invoice?.subscription)
+    if (!subscriptionId) return false
+    const subscription = await stripeClient.subscriptions.retrieve(subscriptionId)
+    // Only an Operator plan is this server's to cancel; the same Stripe account
+    // can sell other things.
+    if (!PRICE_TO_PLAN[subscription?.items?.data?.[0]?.price?.id]) return false
+    if (OPEN_SUBSCRIPTION_STATUSES.has(subscription.status)) {
+      await stripeClient.subscriptions.cancel(subscriptionId)
+      console.log(`[stripe] canceled disputed subscription ${subscriptionId}`)
+    }
+  } catch (error) {
+    // A key that may not cancel never will. Retrying would only fail the endpoint
+    // again, so leave it for a person and acknowledge the event.
+    if (error?.type !== 'StripePermissionError') throw error
+    await recordReconciliationFailure(db, event.id, objectId(charge?.payment_intent) || charge?.id,
+      'dispute-cancel-not-permitted')
+    console.error('[stripe] disputed subscription could not be canceled with this key', invoiceId)
+    return false
+  }
+  const customerId = objectId(charge?.customer)
+  if (customerId) await (options.syncCustomer || syncCustomer)(db, customerId, stripeClient)
+  return true
+}
+
+/**
+ * Ask Stripe about every web subscriber whose renewal the webhook never reported.
+ *
+ * The native apps re-verify their store purchase when they open. A web subscriber
+ * had nothing: if the renewal webhook was late, failing, or disabled, his row kept
+ * the old period and he dropped to free on renewal day while Stripe went on
+ * charging him. This re-reads Stripe, the ledger, for two kinds of row:
+ *  - still recorded active past its period end, for up to a week, well inside
+ *    entitlement.js's RENEWAL_GRACE_MS so an outage heals before a lockout; and
+ *  - whose period began in the last four days, at most hourly. Stripe advances the
+ *    period before it attempts the renewal charge, so a row can be written active
+ *    for another month and then have that charge fail with no webhook to say so.
+ * One failing customer never stops the rest.
+ */
+async function resyncLapsedStripeSubscriptions(db, stripeClient = stripe, options = {}) {
+  const { rows } = await db.query(
+    `SELECT DISTINCT a.stripe_customer_id
+       FROM billing_subscription s
+       JOIN account a ON a.id = s.account_id
+      WHERE s.provider = 'stripe'
+        AND s.status = 'active'
+        AND a.stripe_customer_id IS NOT NULL
+        AND (
+          (s.current_period_end <= now() AND s.current_period_end > now() - interval '7 days')
+          OR (
+            (s.metadata->>'currentPeriodStart')::timestamptz > now() - interval '4 days'
+            AND s.verified_at < now() - interval '1 hour'
+          )
+        )
+      LIMIT $1`,
+    [options.limit || 50],
+  )
+  let resynced = 0
+  for (const { stripe_customer_id: customerId } of rows) {
+    try {
+      await (options.syncCustomer || syncCustomer)(db, customerId, stripeClient)
+      resynced += 1
+    } catch (error) {
+      console.error('[stripe] lapsed subscription re-read failed for', customerId, error?.message || error)
+    }
+  }
+  return resynced
 }
 
 async function cancelAccountSubscriptions(db, accountId, stripeClient = stripe) {
@@ -431,13 +683,13 @@ function operatorWebUrl() {
   }
 }
 
-function mount(app, db) {
+function mount(app, db, stripeClient = stripe) {
   const webUrl = operatorWebUrl()
-  mountWebPurchase(app, db, stripe, syncCustomer, {
+  mountWebPurchase(app, db, stripeClient, syncCustomer, {
     apiOrigin: process.env.OPERATOR_API_PUBLIC_URL,
     prices: planPriceIds(),
   })
-  mountSomPurchase(app, db, stripe, {
+  mountSomPurchase(app, db, stripeClient, {
     apiOrigin: process.env.OPERATOR_API_PUBLIC_URL,
     priceId: process.env.STRIPE_PRICE_SOM_DIGITAL,
     cancelUrl: process.env.SOM_SALES_URL,
@@ -450,6 +702,17 @@ function mount(app, db) {
 
     const priceId = priceIdFor(plan)
     if (!priceId) return res.status(500).json({ error: 'plan not configured' })
+
+    // A store subscriber buying again here would be billed by two providers for one plan.
+    const storeSubscription = await openStoreSubscription(db, req.identity.account?.id)
+    if (storeSubscription) {
+      return res.status(409).json({
+        error: 'SUBSCRIBED_IN_STORE',
+        provider: storeSubscription.provider,
+        status: storeSubscription.status,
+        message: storeConflictMessage(storeSubscription),
+      })
+    }
 
     // Reuse the account's customer if it has one, so a second subscription can
     // never be created alongside the first.
@@ -470,7 +733,7 @@ function mount(app, db) {
     }
 
     if (!customerId) {
-      const customer = await stripe.customers.create({
+      const customer = await stripeClient.customers.create({
         email: email || req.identity.account?.email || undefined,
         metadata: { installId: req.identity.installId || '' },
       })
@@ -510,18 +773,18 @@ function mount(app, db) {
      * A plan CHANGE belongs in Stripe's own portal, which handles proration and
      * cannot produce two subscriptions.
      */
-    const existing = await stripe.subscriptions.list({
+    const existing = await stripeClient.subscriptions.list({
       customer: customerId, status: 'all', limit: 100,
     })
     if (existing.data.some((subscription) => OPEN_SUBSCRIPTION_STATUSES.has(subscription.status))) {
-      const portal = await stripe.billingPortal.sessions.create({
+      const portal = await stripeClient.billingPortal.sessions.create({
         customer: customerId,
         return_url: webUrl,
       })
       return res.json({ url: portal.url, changedPlan: true })
     }
 
-    const session = await stripe.checkout.sessions.create({
+    const session = await stripeClient.checkout.sessions.create({
       mode: 'subscription',
       customer: customerId,
       line_items: [{ price: priceId, quantity: 1 }],
@@ -540,13 +803,16 @@ function mount(app, db) {
     if (!customerId) return res.status(401).json({ error: 'sign in first' })
     if (!process.env.STRIPE_PRICE_TOPUP) return res.status(500).json({ error: 'top-up not configured' })
 
-    const session = await stripe.checkout.sessions.create({
+    const session = await stripeClient.checkout.sessions.create({
       mode: 'payment',                       // one-off. No stored intent, no surprise charge.
       customer: customerId,
       line_items: [{ price: process.env.STRIPE_PRICE_TOPUP, quantity: 1 }],
       success_url: `${webUrl}?topup=success`,
       cancel_url: webUrl,
-      metadata: { source: 'operator-topup' },
+      metadata: { source: TOPUP_SOURCE },
+      // Marked on the PaymentIntent as well as the Session, so a refund or dispute
+      // can name what the charge bought without a lookup.
+      payment_intent_data: { metadata: { source: TOPUP_SOURCE } },
     })
     res.json({ url: session.url, studies: TOPUP.studies, priceUsd: TOPUP.priceUsd })
   }))
@@ -555,7 +821,7 @@ function mount(app, db) {
   app.post('/v1/portal', route(async (req, res) => {
     const customerId = req.identity.account?.stripeCustomerId
     if (!customerId) return res.status(401).json({ error: 'sign in first' })
-    const session = await stripe.billingPortal.sessions.create({
+    const session = await stripeClient.billingPortal.sessions.create({
       customer: customerId,
       return_url: webUrl,
     })
@@ -604,7 +870,7 @@ function mount(app, db) {
     // Re-read Stripe rather than trusting our cache — the webhook may not have
     // landed yet, and this is the moment the user is staring at the screen.
     let state = { plan: account.plan, status: account.status }
-    try { state = await syncCustomer(db, account.stripe_customer_id) } catch { /* fall back to cache */ }
+    try { state = await syncCustomer(db, account.stripe_customer_id, stripeClient) } catch { /* fall back to cache */ }
 
     if (state.status !== 'active') {
       return res.status(409).json({ error: 'NOT_ACTIVE', status: state.status,
@@ -620,14 +886,29 @@ function mount(app, db) {
     res.json({ token, email: account.email, ...state })
   }))
 
+  // ── What the webhook could not settle on its own ──────────────────────────
+  // Unmatched refunds, refunds for deleted accounts, and dispute outcomes that need
+  // a person are written to topup_reconciliation_failure — and nothing read them.
+  app.get('/v1/admin/billing-reconciliation', route(async (req, res) => {
+    if (!req.identity?.account?.isAdmin) return res.status(403).json({ error: 'FORBIDDEN' })
+    const { rows } = await db.query(
+      `SELECT stripe_event_id, payment_intent_id, reason, first_seen_at, last_seen_at, attempt_count
+         FROM topup_reconciliation_failure
+        WHERE last_seen_at > now() - interval '90 days'
+        ORDER BY last_seen_at DESC
+        LIMIT 200`,
+    )
+    res.json({ rows })
+  }))
+
   // Called when the browser comes back from checkout, so entitlement is correct
   // immediately rather than whenever the webhook lands. Same function, so the
   // two can never disagree.
   app.get('/v1/checkout/confirm', route(async (req, res) => {
     const { session_id } = req.query
     if (!session_id) return res.status(400).json({ error: 'session_id required' })
-    const session = await stripe.checkout.sessions.retrieve(String(session_id))
-    const state = await syncCustomer(db, String(session.customer))
+    const session = await stripeClient.checkout.sessions.retrieve(String(session_id))
+    const state = await syncCustomer(db, String(session.customer), stripeClient)
     res.json({ ok: true, ...state })
   }))
 }
@@ -640,6 +921,10 @@ module.exports = {
   syncCustomer,
   creditTopUp,
   revokeOperatorTopUpRefund,
+  reverseOperatorTopUp,
+  chargeIsOperatorTopUp,
+  handleChargeDispute,
+  resyncLapsedStripeSubscriptions,
   recordSomPurchase,
   markSomPurchaseRefunded,
   cancelAccountSubscriptions,

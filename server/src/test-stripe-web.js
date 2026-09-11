@@ -1,7 +1,12 @@
+process.env.STRIPE_SECRET_KEY ||= 'sk_test_placeholder'
+process.env.STRIPE_PRICE_STARTER ||= 'price_starter'
+process.env.STRIPE_PRICE_TOPUP ||= 'price_topup'
+
 const {
   mountWebPurchase,
   preferredSubscription,
   OPEN_SUBSCRIPTION_STATUSES,
+  storeConflictMessage,
 } = require('./web-purchase')
 
 const options = {
@@ -222,6 +227,7 @@ function request({ body = {}, query = {}, identity = { anonymous: true }, host =
   const duplicateDb = {
     async query(sql) {
       if (/FROM account WHERE lower\(email\)/.test(sql)) return { rows: [{ id: 'acct-2', stripe_customer_id: 'cus_paid', status: 'active' }] }
+      if (/FROM billing_subscription/.test(sql)) return { rows: [] }
       throw new Error('the duplicate path must not write')
     },
   }
@@ -240,6 +246,151 @@ function request({ body = {}, query = {}, identity = { anonymous: true }, host =
   )
   ok('trialing returns conflict instead of charging twice', duplicateRes.statusCode === 409)
   ok('no second Checkout Session is created', !duplicateCheckoutCreated)
+
+  console.log('\nA STORE SUBSCRIBER IS NOT SOLD A SECOND PLAN ON THE WEB')
+  const storeApp = captureApp()
+  const storeQueries = []
+  const storeDb = {
+    async query(sql, params) {
+      storeQueries.push({ sql, params })
+      if (/FROM account WHERE lower\(email\)/.test(sql)) return { rows: [{ id: 'acct-apple', stripe_customer_id: null, status: 'active' }] }
+      if (/FROM billing_subscription/.test(sql)) return { rows: [{ provider: 'apple' }] }
+      throw new Error('the store-subscriber path must not write')
+    },
+  }
+  let storeCustomerCreated = false
+  let storeCheckoutCreated = false
+  const storeStripe = {
+    customers: { async create() { storeCustomerCreated = true; return { id: 'cus_new' } } },
+    subscriptions: { async list() { return { data: [] } } },
+    checkout: { sessions: { async create() { storeCheckoutCreated = true } } },
+  }
+  mountWebPurchase(storeApp, storeDb, storeStripe, async () => ({}), options)
+  const storeRes = captureResponse()
+  await storeApp.routes.get('POST /v1/web-checkout')(
+    request({ body: { plan: 'heavy', email: 'iphone@example.com' } }),
+    storeRes,
+    (error) => { throw error },
+  )
+  ok('an App Store subscriber gets a conflict instead of a second charge', storeRes.statusCode === 409)
+  ok('...without revealing to a stranger which store bills that email', /already has a plan/.test(storeRes.body || '') && !/App Store|Google Play/.test(storeRes.body || ''))
+  ok('...before any Stripe customer or Checkout Session exists', !storeCustomerCreated && !storeCheckoutCreated)
+  const storeLookup = storeQueries.find(({ sql }) => /FROM billing_subscription/.test(sql))
+  ok('the lookup is bound to that account and to store providers only',
+    storeLookup?.params?.[0] === 'acct-apple' && /provider IN \('apple', 'google'\)/.test(storeLookup?.sql || ''))
+  ok('the lookup honours the renewal grace window', storeLookup?.params?.[1] === 48 * 60 * 60)
+  ok('a stranger cannot tell store billing from web billing: both refusals are byte-identical',
+    typeof storeRes.body === 'string' && storeRes.body === duplicateRes.body)
+  ok('...or when that plan renews', !/turn off renewal/.test(storeRes.body || '') &&
+    !/(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}/.test(storeRes.body || ''))
+
+  const heldApp = captureApp()
+  const heldDb = {
+    async query(sql) {
+      if (/FROM account WHERE lower\(email\)/.test(sql)) return { rows: [{ id: 'acct-play', stripe_customer_id: null, status: 'past_due' }] }
+      if (/FROM billing_subscription/.test(sql)) {
+        return { rows: [{ provider: 'google', status: 'past_due', current_period_end: '2026-09-01T00:00:00.000Z' }] }
+      }
+      throw new Error('the held-store path must not write')
+    },
+  }
+  let heldCheckoutCreated = false
+  mountWebPurchase(heldApp, heldDb, {
+    customers: { async create() { throw new Error('no Stripe customer expected') } },
+    subscriptions: { async list() { return { data: [] } } },
+    checkout: { sessions: { async create() { heldCheckoutCreated = true } } },
+  }, async () => ({}), options)
+  const heldRes = captureResponse()
+  await heldApp.routes.get('POST /v1/web-checkout')(
+    request({ body: { plan: 'standard', email: 'android@example.com' } }),
+    heldRes,
+    (error) => { throw error },
+  )
+  ok('a Google Play subscriber on hold is not sold a second plan', heldRes.statusCode === 409 && !heldCheckoutCreated)
+  ok('...without revealing that a payment failed, or where',
+    !/did not go through/.test(heldRes.body || '') && !/Google Play/.test(heldRes.body || ''))
+  ok('the signed-in refusal tells a past-due store subscriber how to move to web billing',
+    /cancel it in Google Play/.test(storeConflictMessage({ provider: 'google', status: 'past_due' })))
+  const pausedCopy = storeConflictMessage({ provider: 'google', status: 'past_due', subscription_state: 'SUBSCRIPTION_STATE_PAUSED' })
+  ok('a paused Google Play plan is described as paused, not as a failed payment',
+    /paused in Google Play/.test(pausedCopy) && !/did not go through/.test(pausedCopy))
+  ok('a pending Google Play purchase is described as waiting on payment',
+    /still waiting on payment/.test(storeConflictMessage({ provider: 'google', status: 'past_due', subscription_state: 'SUBSCRIPTION_STATE_PENDING' })))
+  ok('the store lookup reads the Google subscription state that copy needs',
+    /metadata->>'subscriptionState'/.test(storeLookup?.sql || ''))
+  ok('the lookup also covers store subscriptions in billing retry, hold, or pause',
+    /status = 'past_due'/.test(storeLookup?.sql || '') && storeLookup?.params?.[2] === 90)
+
+  console.log('\nTHE SIGNED-IN CHECKOUT REFUSES A STORE SUBSCRIBER BEFORE STRIPE IS TOUCHED')
+  const { mount: mountStripeRoutes } = require('./stripe')
+  const stripeCalls = []
+  const recordingStripe = {
+    customers: { async create(args) { stripeCalls.push(['customers.create', args]); return { id: 'cus_new' } } },
+    subscriptions: { async list(args) { stripeCalls.push(['subscriptions.list', args]); return { data: [], has_more: false } } },
+    billingPortal: { sessions: { async create(args) { stripeCalls.push(['billingPortal.sessions.create', args]); return { url: 'https://billing.stripe.test' } } } },
+    checkout: { sessions: {
+      async create(args) { stripeCalls.push(['checkout.sessions.create', args]); return { url: 'https://checkout.stripe.test/route' } },
+      async retrieve(id) { stripeCalls.push(['checkout.sessions.retrieve', id]); return {} },
+      async list(args) { stripeCalls.push(['checkout.sessions.list', args]); return { data: [] } },
+    } },
+  }
+  const routeQueries = []
+  const routeDb = {
+    async query(sql, params) {
+      routeQueries.push({ sql, params })
+      if (/FROM billing_subscription/.test(sql)) {
+        return params?.[0] === 'acct-google'
+          ? { rows: [{ provider: 'google', status: 'active', current_period_end: '2026-10-01T00:00:00.000Z' }] }
+          : { rows: [] }
+      }
+      if (/FROM topup_reconciliation_failure/.test(sql)) {
+        return { rows: [{ stripe_event_id: 'evt_1', payment_intent_id: 'pi_1', reason: 'dispute-won-review', attempt_count: 1 }] }
+      }
+      throw new Error(`unhandled route SQL: ${sql.replace(/\s+/g, ' ').slice(0, 80)}`)
+    },
+  }
+  const stripeApp = captureApp()
+  mountStripeRoutes(stripeApp, routeDb, recordingStripe)
+
+  const guardedRes = captureResponse()
+  let guardedError = null
+  await stripeApp.routes.get('POST /v1/checkout')(
+    request({ body: { plan: 'starter' }, identity: { anonymous: false, installId: 'install-1', account: { id: 'acct-google', stripeCustomerId: null } } }),
+    guardedRes,
+    (error) => { guardedError = error },
+  )
+  ok('a Google Play subscriber gets a conflict from the signed-in checkout',
+    guardedError === null && guardedRes.statusCode === 409, guardedError?.message)
+  ok('...that names the store and says what lifts it', guardedRes.body?.error === 'SUBSCRIBED_IN_STORE' &&
+    guardedRes.body?.provider === 'google' && /Google Play/.test(guardedRes.body?.message || '') &&
+    /turn off renewal/.test(guardedRes.body?.message || ''))
+  ok('...before any Stripe customer, subscription lookup, or Checkout Session', stripeCalls.length === 0)
+
+  console.log('\nA TOP-UP MARKS ITS PAYMENTINTENT')
+  const topupRes = captureResponse()
+  let topupError = null
+  await stripeApp.routes.get('POST /v1/topup')(
+    request({ identity: { anonymous: false, account: { id: 'acct-1', stripeCustomerId: 'cus_topup' } } }),
+    topupRes,
+    (error) => { topupError = error },
+  )
+  const topupSession = stripeCalls.find(([name]) => name === 'checkout.sessions.create')?.[1]
+  ok('the top-up checkout starts', topupError === null && topupRes.body?.url === 'https://checkout.stripe.test/route', topupError?.message)
+  ok('its PaymentIntent carries the marker a refund or dispute can read',
+    topupSession?.payment_intent_data?.metadata?.source === 'operator-topup')
+  ok('...alongside the Session marker the grant reads', topupSession?.metadata?.source === 'operator-topup')
+
+  console.log('\nTHE RECONCILIATION LEDGER CAN BE READ, BY AN ADMIN ONLY')
+  const deniedRes = captureResponse()
+  await stripeApp.routes.get('GET /v1/admin/billing-reconciliation')(
+    request({ identity: { anonymous: false, account: { id: 'acct-1' } } }), deniedRes, (error) => { throw error })
+  ok('a customer cannot read it', deniedRes.statusCode === 403 && !routeQueries.some(({ sql }) => /topup_reconciliation_failure/.test(sql)))
+  const ledgerRes = captureResponse()
+  await stripeApp.routes.get('GET /v1/admin/billing-reconciliation')(
+    request({ identity: { anonymous: false, account: { id: 'acct-admin', isAdmin: true } } }), ledgerRes, (error) => { throw error })
+  ok('an admin sees each alarm and its reason', ledgerRes.body?.rows?.[0]?.reason === 'dispute-won-review')
+  const ledgerQuery = routeQueries.find(({ sql }) => /FROM topup_reconciliation_failure/.test(sql))
+  ok('...newest first and bounded', /ORDER BY last_seen_at DESC/.test(ledgerQuery?.sql || '') && /LIMIT 200/.test(ledgerQuery?.sql || ''))
 
   console.log(`\n${pass} passed, ${fail} failed`)
   process.exit(fail === 0 ? 0 : 1)

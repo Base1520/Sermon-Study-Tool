@@ -4,6 +4,8 @@ const {
   isPaidSomSession,
   recordSomPurchase,
   markSomPurchaseRefunded,
+  markSomPurchaseDisputed,
+  restoreSomPurchaseAfterWonDispute,
   createDownloadToken,
   verifyDownloadToken,
   mountSomPurchase,
@@ -67,6 +69,9 @@ function paidSession(overrides = {}) {
   }
 }
 
+// What a database would execute: SQL comments are not code.
+const sqlCode = (sql) => sql.replace(/--.*$/gm, '')
+
 function fakeDb() {
   const state = { purchase: null, queries: [] }
   return {
@@ -75,10 +80,16 @@ function fakeDb() {
       state.queries.push({ sql, params })
       if (/INSERT INTO som_purchase/.test(sql)) {
         const priorStatus = state.purchase?.status
+        // Which reversed statuses survive a replay is read from the statement's own
+        // CASE, so a regression in the real SQL fails here instead of being masked.
+        const code = sqlCode(sql)
+        const keeps = /status = CASE WHEN som_purchase\.status IN \('refunded', 'disputed'\) THEN som_purchase\.status ELSE 'paid' END/.test(code)
+          ? ['refunded', 'disputed']
+          : /status = CASE WHEN som_purchase\.status = 'refunded' THEN 'refunded' ELSE 'paid' END/.test(code) ? ['refunded'] : []
         state.purchase = {
           session_id: params[0], email: params[1], stripe_customer_id: params[2],
           payment_intent_id: params[3], amount_total: params[4], currency: params[5],
-          status: priorStatus === 'refunded' ? 'refunded' : 'paid', source: params[6],
+          status: keeps.includes(priorStatus) ? priorStatus : 'paid', source: params[6],
           marketing_opt_in: Boolean(params[7]), consent_version: params[8],
           download_count: state.purchase?.download_count || 0,
           purchased_at: state.purchase?.purchased_at || new Date().toISOString(),
@@ -86,8 +97,22 @@ function fakeDb() {
         return { rows: [{ ...state.purchase }] }
       }
       if (/SET status = 'refunded'/.test(sql)) {
-        if (state.purchase?.payment_intent_id === params[0] && state.purchase.status !== 'refunded') {
+        if (state.purchase?.payment_intent_id === params[0] && (!/AND status <> 'refunded'/.test(sqlCode(sql)) || state.purchase.status !== 'refunded')) {
           state.purchase.status = 'refunded'
+          return { rowCount: 1, rows: [] }
+        }
+        return { rowCount: 0, rows: [] }
+      }
+      if (/SET status = 'disputed'/.test(sql)) {
+        if (state.purchase?.payment_intent_id === params[0] && (!/AND status = 'paid'/.test(sqlCode(sql)) || state.purchase.status === 'paid')) {
+          state.purchase.status = 'disputed'
+          return { rowCount: 1, rows: [] }
+        }
+        return { rowCount: 0, rows: [] }
+      }
+      if (/SET status = 'paid'/.test(sql)) {
+        if (state.purchase?.payment_intent_id === params[0] && (!/AND status = 'disputed'/.test(sqlCode(sql)) || state.purchase.status === 'disputed')) {
+          state.purchase.status = 'paid'
           return { rowCount: 1, rows: [] }
         }
         return { rowCount: 0, rows: [] }
@@ -276,6 +301,26 @@ function fakeDb() {
     webhookRejected = true
   }
   ok('a failed webhook write rejects so Stripe can retry it', webhookRejected)
+
+  console.log('\nA CHARGEBACK CLOSES THE DOWNLOAD AND A REPLAY CANNOT REOPEN IT')
+  const somDisputeDb = fakeDb()
+  await recordSomPurchase(somDisputeDb, paidSession())
+  const disputed = await markSomPurchaseDisputed(somDisputeDb, 'pi_som')
+  ok('a dispute closes a paid order', disputed && somDisputeDb.state.purchase.status === 'disputed')
+  ok('...and only a paid one', somDisputeDb.state.queries.some(({ sql }) =>
+    /SET status = 'disputed'/.test(sql) && /AND status = 'paid'/.test(sqlCode(sql))))
+  await recordSomPurchase(somDisputeDb, paidSession())
+  ok('a replayed checkout event cannot revive a disputed order', somDisputeDb.state.purchase.status === 'disputed')
+  ok('...because the upsert keeps a reversed status', somDisputeDb.state.queries.some(({ sql }) =>
+    /status IN \('refunded', 'disputed'\) THEN som_purchase\.status/.test(sqlCode(sql))))
+  const restored = await restoreSomPurchaseAfterWonDispute(somDisputeDb, 'pi_som')
+  ok('a won dispute restores the order', restored && somDisputeDb.state.purchase.status === 'paid')
+  const somRefundedDb = fakeDb()
+  await recordSomPurchase(somRefundedDb, paidSession())
+  await markSomPurchaseRefunded(somRefundedDb, { payment_intent: 'pi_som', refunded: true })
+  const revived = await restoreSomPurchaseAfterWonDispute(somRefundedDb, 'pi_som')
+  ok('winning a dispute never revives a refunded order', !revived && somRefundedDb.state.purchase.status === 'refunded')
+  ok('a dispute with no PaymentIntent touches nothing', (await markSomPurchaseDisputed(fakeDb(), null)) === false)
 
   console.log(`\n${pass} passed, ${fail} failed`)
   process.exit(fail === 0 ? 0 : 1)

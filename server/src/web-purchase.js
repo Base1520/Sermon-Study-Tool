@@ -1,5 +1,5 @@
 const crypto = require('crypto')
-const { PLANS, PAID_PLAN_KEYS } = require('./entitlement')
+const { PLANS, PAID_PLAN_KEYS, RENEWAL_GRACE_MS } = require('./entitlement')
 
 const WEB_PLAN_KEYS = [...PAID_PLAN_KEYS]
 const OPEN_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing', 'past_due', 'unpaid', 'paused', 'incomplete'])
@@ -152,6 +152,71 @@ function apiOriginFor(req, configuredOrigin) {
   return 'https://api-production-15e5e.up.railway.app'
 }
 
+// The public checkout answers ANY email typed into it, so every refusal for an email
+// that already has a plan must read the same — whether the plan is billed by a store or
+// on the web, active or failing.
+const EXISTING_PLAN_MESSAGE = Object.freeze({
+  title: 'This email already has a plan',
+  message: 'Open The Operator where you manage it, so you are not charged twice. If you changed devices, email info@base1520.com and we will reconnect it without a second charge.',
+})
+
+// Apple retries a failed renewal for up to 60 days, and Google can hold or pause a
+// subscription for up to 90. Either store can start charging again on its own.
+const STORE_RECOVERY_WINDOW_DAYS = 90
+
+/**
+ * The App Store or Google Play subscription that would bill alongside a new plan.
+ *
+ * Every checkout used to ask only Stripe whether a customer already subscribed,
+ * so a store subscriber could buy again on the website: both providers billed,
+ * one plan was granted, and nothing in the app showed the second charge. An
+ * active row counts through the same renewal grace as entitlementFor. A past_due
+ * row counts too: a card in Apple's billing retry, or a Google hold or pause, is
+ * still a subscription the store will resume charging without asking.
+ */
+async function openStoreSubscription(db, accountId) {
+  if (!accountId) return null
+  const { rows } = await db.query(
+    `SELECT provider, status, current_period_end, metadata->>'subscriptionState' AS subscription_state
+       FROM billing_subscription
+      WHERE account_id = $1
+        AND provider IN ('apple', 'google')
+        AND (
+          (status = 'active' AND (current_period_end IS NULL OR current_period_end > now() - make_interval(secs => $2)))
+          OR (status = 'past_due' AND (current_period_end IS NULL OR current_period_end > now() - make_interval(days => $3)))
+        )
+      ORDER BY (status = 'active') DESC, current_period_end DESC NULLS FIRST
+      LIMIT 1`,
+    [accountId, RENEWAL_GRACE_MS / 1000, STORE_RECOVERY_WINDOW_DAYS],
+  )
+  return rows[0] || null
+}
+
+function storeName(provider) {
+  return provider === 'apple' ? 'the App Store' : 'Google Play'
+}
+
+/** Says exactly why a checkout was refused and what actually lifts the block. */
+function storeConflictMessage(subscription) {
+  const store = storeName(subscription.provider)
+  if (subscription.status === 'past_due') {
+    // Google files a pause and a pending purchase under the same past_due as a failed
+    // card; telling those customers a payment failed would send them to fix nothing.
+    if (subscription.subscription_state === 'SUBSCRIPTION_STATE_PAUSED') {
+      return `This plan is paused in ${store}, and ${store} resumes charging it on its own. Resume it there, or cancel it in ${store} to buy a plan here once ${store} confirms the cancellation.`
+    }
+    if (subscription.subscription_state === 'SUBSCRIPTION_STATE_PENDING') {
+      return `A ${store} purchase for this plan is still waiting on payment. Complete or cancel it in ${store} before buying a plan here, so you are not charged twice.`
+    }
+    return `This plan is billed through ${store}, and its last payment did not go through. Update the payment method in ${store} to keep it. A plan bought here would bill you alongside it once ${store} recovers the payment. To buy a plan here instead, cancel it in ${store}; checkout opens once ${store} confirms the cancellation.`
+  }
+  const end = new Date(subscription.current_period_end || NaN).getTime()
+  const openAfter = Number.isFinite(end)
+    ? new Date(end + RENEWAL_GRACE_MS).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+    : null
+  return `This plan is billed through ${store}. A plan bought here would bill you alongside it. To buy a plan here instead, turn off renewal in ${store} and come back ${openAfter ? `after ${openAfter}` : 'once that plan has ended'}.`
+}
+
 function mountWebPurchase(app, db, stripeClient, syncCustomerFn, options = {}) {
   app.post('/v1/download', route(async (req, res) => {
     if (String(req.body?.company || '').trim()) {
@@ -242,15 +307,19 @@ function mountWebPurchase(app, db, stripeClient, syncCustomerFn, options = {}) {
       [email],
     )
     const existing = existingResult.rows[0] || null
+    const storeSubscription = await openStoreSubscription(db, existing?.id)
+    if (storeSubscription) {
+      // Anyone can type an email into this form. Say only that a plan exists — never
+      // which store bills it, whether a payment failed, or when it renews. The detail
+      // is for the signed-in desktop checkout, which knows whose account it is.
+      return res.status(409).type('html').send(renderPurchaseMessage(EXISTING_PLAN_MESSAGE))
+    }
     let customerId = existing?.stripe_customer_id || null
 
     if (customerId) {
       const subscriptions = await stripeClient.subscriptions.list({ customer: customerId, status: 'all', limit: 100 })
       if (subscriptions.data.some((subscription) => OPEN_SUBSCRIPTION_STATUSES.has(subscription.status))) {
-        return res.status(409).type('html').send(renderPurchaseMessage({
-          title: 'This email already has an active plan',
-          message: 'Open The Operator and use Settings → Your Access. If you changed computers, contact Cole and we will reconnect it without charging you twice.',
-        }))
+        return res.status(409).type('html').send(renderPurchaseMessage(EXISTING_PLAN_MESSAGE))
       }
     } else {
       const customer = await stripeClient.customers.create({ email, metadata: { source: 'operator-website' } })
@@ -347,6 +416,8 @@ function mountWebPurchase(app, db, stripeClient, syncCustomerFn, options = {}) {
 }
 
 module.exports = {
+  openStoreSubscription,
+  storeConflictMessage,
   WEB_PLAN_KEYS,
   OPEN_SUBSCRIPTION_STATUSES,
   preferredSubscription,

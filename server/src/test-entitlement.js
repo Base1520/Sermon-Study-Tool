@@ -15,6 +15,7 @@ const {
   perStudy,
   monthlyPriceUsd,
   annualSavingsUsd,
+  RENEWAL_GRACE_MS,
 } = require('./entitlement')
 
 let pass = 0
@@ -121,6 +122,24 @@ console.log('\nA PAYING ACCOUNT GETS WHAT IT PAID FOR')
   ok('annual billing is recognised as paying', annual.paying)
   ok('annual billing exposes the same monthly allowance', annual.allowance === 80)
   ok('annual billing is named plainly', annual.billingInterval === 'year' && /annual/.test(annual.label))
+}
+
+console.log('\nA RENEWAL NOT YET WRITTEN DOWN IS NOT A CANCELLATION')
+{
+  const hour = 60 * 60 * 1000
+  const ago = (ms) => new Date(Date.now() - ms).toISOString()
+  const renewing = entitlementFor({ plan: 'standard', status: 'active', paidThrough: ago(hour) })
+  ok('an active subscriber an hour past paid-through keeps his allowance',
+    renewing.paying && renewing.status === 'active' && renewing.allowance === PLANS.standard.studiesPerMonth)
+  ok('the renewal grace window is two days', RENEWAL_GRACE_MS === 48 * hour)
+  const lapsed = entitlementFor({ plan: 'standard', status: 'active', paidThrough: ago(RENEWAL_GRACE_MS + hour) })
+  ok('past the window an unrenewed subscription stops', !lapsed.paying && lapsed.status === 'canceled' && lapsed.allowance === 0)
+  const failedCard = entitlementFor({ plan: 'standard', status: 'past_due', paidThrough: ago(hour) })
+  ok('a failed card inside the window still stops the allowance at once', !failedCard.paying && failedCard.allowance === 0)
+  const canceled = entitlementFor({ plan: 'standard', status: 'canceled', paidThrough: ago(hour) })
+  ok('an explicit cancellation inside the window is not revived', !canceled.paying)
+  const current = entitlementFor({ plan: 'standard', status: 'active', paidThrough: new Date(Date.now() + hour).toISOString() })
+  ok('a current period is unaffected', current.paying)
 }
 
 console.log('\nTHE UPGRADE PROMPT LEADS WITH WHAT HE STILL HAS')

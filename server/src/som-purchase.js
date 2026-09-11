@@ -68,7 +68,8 @@ async function recordSomPurchase(db, session) {
                 payment_intent_id = EXCLUDED.payment_intent_id,
                 amount_total = EXCLUDED.amount_total,
                 currency = EXCLUDED.currency,
-                status = CASE WHEN som_purchase.status = 'refunded' THEN 'refunded' ELSE 'paid' END,
+                -- A replayed checkout event must never revive a reversed order.
+                status = CASE WHEN som_purchase.status IN ('refunded', 'disputed') THEN som_purchase.status ELSE 'paid' END,
                 marketing_opt_in = som_purchase.marketing_opt_in OR EXCLUDED.marketing_opt_in,
                 consent_version = CASE
                   WHEN EXCLUDED.marketing_opt_in THEN EXCLUDED.consent_version
@@ -136,6 +137,30 @@ async function markSomPurchaseRefunded(db, charge) {
     `UPDATE som_purchase
         SET status = 'refunded', updated_at = now()
       WHERE payment_intent_id = $1 AND status <> 'refunded'`,
+    [paymentIntentId],
+  )
+  return result.rowCount > 0
+}
+
+/** A chargeback closes the download the same way a refund does. */
+async function markSomPurchaseDisputed(db, paymentIntentId) {
+  if (!paymentIntentId) return false
+  const result = await db.query(
+    `UPDATE som_purchase
+        SET status = 'disputed', updated_at = now()
+      WHERE payment_intent_id = $1 AND status = 'paid'`,
+    [paymentIntentId],
+  )
+  return result.rowCount > 0
+}
+
+/** A dispute the seller won means the buyer paid after all. */
+async function restoreSomPurchaseAfterWonDispute(db, paymentIntentId) {
+  if (!paymentIntentId) return false
+  const result = await db.query(
+    `UPDATE som_purchase
+        SET status = 'paid', updated_at = now()
+      WHERE payment_intent_id = $1 AND status = 'disputed'`,
     [paymentIntentId],
   )
   return result.rowCount > 0
@@ -368,6 +393,9 @@ module.exports = {
   recordSomPurchase,
   syncSomBuyerMarketing,
   markSomPurchaseRefunded,
+  markSomPurchaseDisputed,
+  restoreSomPurchaseAfterWonDispute,
+  objectId,
   createDownloadToken,
   verifyDownloadToken,
   createStorageDownloadUrl,

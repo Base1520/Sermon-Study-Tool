@@ -316,7 +316,7 @@ async function checkout(store, { plan, email }) {
     body: JSON.stringify({ plan, email }),
   })
   const body = await readJsonOrText(res)
-  if (!res.ok) throw new Error(body?.error || `checkout failed (${res.status})`)
+  if (!res.ok) throw new Error(body?.message || body?.error || `checkout failed (${res.status})`)
   return body.url
 }
 

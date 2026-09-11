@@ -546,6 +546,23 @@ const withEnv = async (url, fn) => {
     })
   }
 
+  console.log('\nA CHECKOUT THE SERVER REFUSES SAYS WHY')
+  {
+    await withEnv('https://api.example.com', async () => {
+      let refused = null
+      await withFetch(async () => jsonResponse({
+        error: 'SUBSCRIBED_IN_STORE', provider: 'google', status: 'active',
+        message: 'This plan is billed through Google Play. A plan bought here would bill you alongside it.',
+      }, 409), async () => { try { await client.checkout(fakeStore(), { plan: 'starter' }) } catch (e) { refused = e } })
+      ok('a store subscriber is shown the server explanation, not a bare error code',
+        refused instanceof Error && /billed through Google Play/.test(refused.message), refused?.message)
+      let bare = null
+      await withFetch(async () => jsonResponse({ error: 'NOT_CONFIGURED' }, 500),
+        async () => { try { await client.checkout(fakeStore(), { plan: 'starter' }) } catch (e) { bare = e } })
+      ok('a refusal without a message still names its code', bare instanceof Error && bare.message === 'NOT_CONFIGURED', bare?.message)
+    })
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`)
   process.exit(fail === 0 ? 0 : 1)
 })()

@@ -10,6 +10,8 @@ import catalog from '../../server/src/iap-products.json'
 import { getReleaseStatus, verifyStorePurchase } from './api'
 import { getAccountId } from './storage'
 import { requireCompleteStoreCatalog } from './storeCatalog'
+import { createVerifiedTransactionCache, verificationIdentity } from './storeVerificationCache'
+import { classifyStoreOwnership, type StoreSubscriptionOwnership } from './storeOwnership'
 
 export interface StorePlan {
   plan: string
@@ -22,7 +24,7 @@ export interface StorePlan {
   product: Product
 }
 
-const verifiedTransactions = new Set<string>()
+const verifiedTransactions = createVerifiedTransactionCache()
 const inFlightVerifications = new Map<string, Promise<void>>()
 
 export class StoreFinalizationPendingError extends Error {
@@ -103,9 +105,9 @@ export async function loadStorePlans(): Promise<StorePlan[]> {
 }
 
 async function transactionVerificationKey(transaction: Transaction) {
-  const identity = transaction.transactionId || transaction.purchaseToken || transaction.jwsRepresentation
   const accountId = await getAccountId().catch(() => null)
-  return `${accountId || 'anonymous'}:${nativePlatform()}:${identity}`
+  const platform = nativePlatform()
+  return `${accountId || 'anonymous'}:${platform}:${verificationIdentity(transaction, platform)}`
 }
 
 async function performTransactionVerification(transaction: Transaction, restoring: boolean) {
@@ -140,14 +142,25 @@ async function performTransactionVerification(transaction: Transaction, restorin
   }
 }
 
-async function verifyTransaction(transaction: Transaction, restoring: boolean) {
+/**
+ * Verify once per burst, never once per process.
+ *
+ * The dedupe used to be a Set that lived as long as the app did. On Android the
+ * key was the purchase token, which Google keeps for the whole life of a
+ * subscription, so once a subscription had been verified the resume-time
+ * self-heal never reached the server again — and RESTORE PURCHASES counted the
+ * cache hit as a success and told a locked-out subscriber he had been restored
+ * without ever asking. Entries now expire, the Android key carries the renewal's
+ * order id, and a restore the customer asked for always goes to the server.
+ */
+async function verifyTransaction(transaction: Transaction, restoring: boolean, { force = false } = {}) {
   const key = await transactionVerificationKey(transaction)
-  if (verifiedTransactions.has(key)) return
+  if (!force && verifiedTransactions.isFresh(key)) return
   const pending = inFlightVerifications.get(key)
   if (pending) return pending
 
   const verification = performTransactionVerification(transaction, restoring)
-    .then(() => { verifiedTransactions.add(key) })
+    .then(() => { verifiedTransactions.remember(key) })
     .finally(() => { inFlightVerifications.delete(key) })
   inFlightVerifications.set(key, verification)
   return verification
@@ -182,7 +195,7 @@ export async function restoreStorePurchases() {
   for (const transaction of purchases.filter((purchase) =>
     definitionForTransaction(purchase) && (platform !== 'android' || purchase.purchaseState === '1'))) {
     try {
-      await verifyTransaction(transaction, true)
+      await verifyTransaction(transaction, true, { force: true })
       restored += 1
     } catch (error) {
       if (isStoreFinalizationPendingError(error)) restored += 1
@@ -216,9 +229,9 @@ export async function restoreStorePurchases() {
  * Android and has always done safely — ask for current entitlements and take
  * anything in the purchased state. An unacknowledged purchase is still current
  * and still `purchaseState === '1'`, so acknowledgment is not lost; it now
- * happens on the same pass. Verification is deduped per session by
- * verifiedTransactions / inFlightVerifications, so this costs one call per
- * subscription per launch.
+ * happens on the same pass. verifiedTransactions / inFlightVerifications dedupe
+ * bursts for a few minutes, never for the life of the process, so a renewal is
+ * re-verified the next time the app comes back to the foreground.
  *
  * This is defence in depth, NOT a substitute for RTDN: it only runs when the
  * user opens the app.
@@ -243,6 +256,33 @@ export async function reconcilePendingStorePurchases() {
     }
   }
   return reconciled
+}
+
+export type { StoreSubscriptionOwnership } from './storeOwnership'
+
+/**
+ * Whose Operator subscription does the store account on THIS device hold?
+ *
+ * A subscription group turns a new plan into a change of the existing subscription
+ * for that store account, whichever Operator account it belongs to. So an in-app
+ * plan change is safe only for 'this-account'; 'other-account' means a purchase here
+ * would change someone else's subscription or start a second one. Resolves null when
+ * the store could not answer — unknown, never "no".
+ */
+export async function storeSubscriptionOwnership(accountId: string | null | undefined): Promise<StoreSubscriptionOwnership | null> {
+  const platform = nativePlatform()
+  if (!platform) return 'none'
+  try {
+    const { purchases } = await NativePurchases.getPurchases({
+      productType: PURCHASE_TYPE.SUBS,
+      onlyCurrentEntitlements: true,
+    })
+    const operator = purchases.filter((purchase) =>
+      definitionForTransaction(purchase) && (platform !== 'android' || purchase.purchaseState === '1'))
+    return classifyStoreOwnership(operator, accountId)
+  } catch {
+    return null
+  }
 }
 
 export function listenForStoreTransactions(onTransaction: (transaction: Transaction) => Promise<void>) {

@@ -88,9 +88,11 @@ function appleStatus(transaction, notificationType, subtype) {
   if (transaction.revocationDate || [NotificationTypeV2.REFUND, NotificationTypeV2.REVOKE].includes(notificationType)) {
     return 'canceled'
   }
-  if ([NotificationTypeV2.EXPIRED, NotificationTypeV2.GRACE_PERIOD_EXPIRED].includes(notificationType)) {
-    return 'canceled'
-  }
+  if (notificationType === NotificationTypeV2.EXPIRED) return 'canceled'
+  // Grace ending is not the subscription ending: Apple keeps retrying the charge for
+  // up to 60 more days and resumes billing on its own if it succeeds. Recorded as
+  // canceled, a retrying subscriber could be sold a second plan on the web.
+  if (notificationType === NotificationTypeV2.GRACE_PERIOD_EXPIRED) return 'past_due'
   if (notificationType === NotificationTypeV2.DID_FAIL_TO_RENEW) {
     return subtype === Subtype.GRACE_PERIOD ? 'active' : 'past_due'
   }

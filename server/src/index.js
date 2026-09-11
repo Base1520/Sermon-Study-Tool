@@ -996,6 +996,15 @@ setInterval(() => {
     .catch((e) => console.error('[mailchimp] deletion sweep failed:', e?.stack || e?.code || String(e)))
 }, 5 * 60 * 1000).unref()
 
+// A web subscriber has no app-open self-heal. If Stripe's renewal webhook is
+// late, failing, or disabled, re-read Stripe before RENEWAL_GRACE_MS runs out.
+setInterval(() => {
+  if (!process.env.STRIPE_SECRET_KEY) return
+  stripeApi.resyncLapsedStripeSubscriptions(db)
+    .then((n) => { if (n) console.log(`[stripe] re-read ${n} lapsed web subscription(s) from Stripe`) })
+    .catch((e) => console.error('[stripe] lapsed subscription sweep failed:', e?.stack || e?.code || String(e)))
+}, 5 * 60 * 1000).unref()
+
 const port = process.env.PORT || 8080
 app.listen(port, () => console.log(`[operator] listening on ${port}`))
 

@@ -81,7 +81,10 @@ function event(type, object) {
   return { type, data: { object } }
 }
 
-function refundDb({ balance = 0, topups = [], failLedgerUpdate = false, zeroLedgerUpdate = false } = {}) {
+function refundDb({
+  balance = 0, topups = [], failLedgerUpdate = false, zeroLedgerUpdate = false,
+  noAccount = false, somPaymentIntents = [],
+} = {}) {
   const state = {
     balance,
     topups: topups.map((row) => ({ studies_revoked: 0, refunded_at: null, ...row })),
@@ -90,6 +93,9 @@ function refundDb({ balance = 0, topups = [], failLedgerUpdate = false, zeroLedg
     refundLookups: [],
     failLedgerUpdate,
     zeroLedgerUpdate,
+    noAccount,
+    somPaymentIntents,
+    reasons: [],
   }
   return {
     state,
@@ -124,11 +130,20 @@ function refundDb({ balance = 0, topups = [], failLedgerUpdate = false, zeroLedg
               ? 'payment_intent_id'
               : sql.includes('stripe_customer_id = $1') ? 'stripe_customer_id' : 'unknown'
             state.refundLookups.push({ column, value: params[0] })
-            const row = working.topups.find((item) => item[column] === params[0])
+            const row = (working || state).topups.find((item) => item[column] === params[0])
             return { rows: row ? [{ ...row }] : [] }
           }
           if (sql.includes('FROM account WHERE stripe_customer_id')) {
+            if (state.noAccount) return { rows: [] }
             return { rows: [{ id: 'acct_1', topup_studies: working.balance }] }
+          }
+          if (sql.includes('SELECT 1 FROM som_purchase WHERE payment_intent_id')) {
+            return { rows: state.somPaymentIntents.includes(params[0]) ? [{}] : [] }
+          }
+          if (sql.includes('UPDATE topup SET refunded_at = now() WHERE session_id')) {
+            const row = working.topups.find((item) => item.session_id === params[0])
+            row.refunded_at = new Date().toISOString()
+            return { rowCount: 1, rows: [] }
           }
           if (sql.includes('UPDATE account SET topup_studies = topup_studies -')) {
             working.balance -= params[1]
@@ -143,8 +158,9 @@ function refundDb({ balance = 0, topups = [], failLedgerUpdate = false, zeroLedg
             return { rowCount: 1, rows: [] }
           }
           if (sql.includes('INSERT INTO topup_reconciliation_failure')) {
-            const prior = working.failures.get(params[0]) || 0
-            working.failures.set(params[0], prior + 1)
+            const ledger = (working || state).failures
+            ledger.set(params[0], (ledger.get(params[0]) || 0) + 1)
+            state.reasons.push(params[2])
             return { rowCount: 1, rows: [] }
           }
           throw new Error(`unexpected refund test query: ${sql}`)
@@ -159,6 +175,16 @@ function topupRow(overrides = {}) {
   return {
     session_id: 'cs_refund', stripe_customer_id: 'cus_paid', payment_intent_id: 'pi_refund',
     studies: TOPUP.studies, ...overrides,
+  }
+}
+
+const TOPUP_SESSION = { metadata: { source: 'operator-topup' } }
+
+function stripeSessions(sessions = []) {
+  const calls = []
+  return {
+    calls,
+    checkout: { sessions: { async list(params) { calls.push(params); return { data: sessions } } } },
   }
 }
 
@@ -272,7 +298,7 @@ function topupRow(overrides = {}) {
   let earlyRejected = false
   try {
     await revokeOperatorTopUpRefund(earlyDb, refund, {
-      eventId: 'evt_early', eventCreated: Math.floor(nowMs / 1000), nowMs,
+      eventId: 'evt_early', eventCreated: Math.floor(nowMs / 1000), nowMs, stripeClient: stripeSessions([TOPUP_SESSION]),
     })
   } catch { earlyRejected = true }
   ok('an out-of-order refund rejects for bounded Stripe retry without an alarm row',
@@ -280,13 +306,14 @@ function topupRow(overrides = {}) {
   earlyDb.state.topups.push(topupRow())
   earlyDb.state.balance = 5
   const recovered = await revokeOperatorTopUpRefund(earlyDb, refund, {
-    eventId: 'evt_early', eventCreated: Math.floor(nowMs / 1000), nowMs,
+    eventId: 'evt_early', eventCreated: Math.floor(nowMs / 1000), nowMs, stripeClient: stripeSessions([TOPUP_SESSION]),
   })
   ok('the retried refund resolves after its Checkout grant appears', recovered && earlyDb.state.balance === 0)
 
   const expiredDb = refundDb()
   const expired = await revokeOperatorTopUpRefund(expiredDb, refund, {
     eventId: 'evt_expired', eventCreated: Math.floor((nowMs - 25 * 60 * 60 * 1000) / 1000), nowMs,
+    stripeClient: stripeSessions([TOPUP_SESSION]),
   })
   ok('an unmatched refund becomes a durable reconciliation failure after the retry window',
     !expired && expiredDb.state.failures.get('evt_expired') === 1)
@@ -304,6 +331,121 @@ function topupRow(overrides = {}) {
   ok('a zero-row refund ledger update rolls back its account debit',
     zeroLedgerRejected && zeroLedgerDb.state.balance === 7 && zeroLedgerDb.state.topups[0].refunded_at === null &&
       isDeepStrictEqual(zeroLedgerDb.state.transactions, ['BEGIN', 'ROLLBACK']))
+
+  console.log('\nONLY A REAL TOP-UP MAY HOLD A REFUND OPEN OR RAISE AN ALARM')
+  const inWindow = { eventCreated: Math.floor(nowMs / 1000), nowMs }
+  const pastWindow = { eventCreated: Math.floor((nowMs - 25 * 60 * 60 * 1000) / 1000), nowMs }
+
+  const subscriptionDb = refundDb()
+  const subscriptionStripe = stripeSessions()
+  let subscriptionError = null
+  let subscriptionResult
+  try {
+    subscriptionResult = await revokeOperatorTopUpRefund(subscriptionDb,
+      { ...refund, payment_intent: 'pi_invoice', invoice: 'in_renewal' },
+      { ...inWindow, eventId: 'evt_sub_refund', stripeClient: subscriptionStripe })
+  } catch (error) { subscriptionError = error }
+  ok('a refunded subscription invoice resolves at once instead of holding the webhook open',
+    subscriptionError === null && subscriptionResult === false, subscriptionError?.message)
+  ok('...raises no reconciliation alarm', subscriptionDb.state.failures.size === 0)
+  ok('...and needs no Stripe lookup', subscriptionStripe.calls.length === 0)
+
+  const somDb = refundDb({ somPaymentIntents: ['pi_som'] })
+  const somStripe = stripeSessions()
+  let somError = null
+  try {
+    await revokeOperatorTopUpRefund(somDb, { ...refund, payment_intent: 'pi_som' },
+      { ...inWindow, eventId: 'evt_som_refund', stripeClient: somStripe })
+  } catch (error) { somError = error }
+  ok('a refunded SOM ebook resolves at once without an alarm or a Stripe lookup',
+    somError === null && somDb.state.failures.size === 0 && somStripe.calls.length === 0, somError?.message)
+
+  const foreignDb = refundDb()
+  const foreignStripe = stripeSessions([{ metadata: { source: 'som-digital-early-access' } }])
+  let foreignError = null
+  try {
+    await revokeOperatorTopUpRefund(foreignDb, { ...refund, payment_intent: 'pi_foreign' },
+      { ...inWindow, eventId: 'evt_foreign_refund', stripeClient: foreignStripe })
+  } catch (error) { foreignError = error }
+  ok('a refund Stripe says was not a top-up resolves without an alarm',
+    foreignError === null && foreignDb.state.failures.size === 0, foreignError?.message)
+  ok('...after asking Stripe by its PaymentIntent',
+    isDeepStrictEqual(foreignStripe.calls, [{ payment_intent: 'pi_foreign', limit: 1 }]))
+
+  const manualDb = refundDb()
+  const manual = await revokeOperatorTopUpRefund(manualDb, { ...refund, payment_intent: 'pi_manual' },
+    { ...pastWindow, eventId: 'evt_manual_refund', stripeClient: stripeSessions() })
+  ok('a charge with no Checkout Session is never reported as a lost top-up, even past the window',
+    manual === false && manualDb.state.failures.size === 0)
+
+  const markedDb = refundDb()
+  const markedStripe = stripeSessions()
+  let markedRejected = false
+  try {
+    await revokeOperatorTopUpRefund(markedDb,
+      { ...refund, payment_intent: 'pi_marked', metadata: { source: 'operator-topup' } },
+      { ...inWindow, eventId: 'evt_marked_refund', stripeClient: markedStripe })
+  } catch { markedRejected = true }
+  ok('a charge marked as a top-up still waits for its grant, without a Stripe lookup',
+    markedRejected && markedStripe.calls.length === 0 && markedDb.state.failures.size === 0)
+
+  console.log('\nA REFUND FOR A DELETED ACCOUNT CLOSES INSTEAD OF RETRYING FOR DAYS')
+  const deletedDb = refundDb({ topups: [topupRow()], noAccount: true })
+  let deletedError = null
+  let deletedResult
+  try {
+    deletedResult = await revokeOperatorTopUpRefund(deletedDb, refund, { ...inWindow, eventId: 'evt_deleted' })
+  } catch (error) { deletedError = error }
+  ok('the refund acknowledges instead of throwing', deletedError === null && deletedResult === false, deletedError?.message)
+  ok('the grant is closed so a redelivery is a no-op',
+    Boolean(deletedDb.state.topups[0].refunded_at) && deletedDb.state.topups[0].studies_revoked === 0)
+  ok('a durable alarm row names the reason',
+    deletedDb.state.failures.get('evt_deleted') === 1 && deletedDb.state.reasons.includes('refund-account-deleted'))
+  ok('it commits in one transaction', isDeepStrictEqual(deletedDb.state.transactions, ['BEGIN', 'COMMIT']))
+  const deletedReplay = await revokeOperatorTopUpRefund(deletedDb, refund, { ...inWindow, eventId: 'evt_deleted' })
+  ok('a redelivery of that refund is a quiet no-op', deletedReplay === false && deletedDb.state.failures.get('evt_deleted') === 1)
+
+  console.log('\nTHE WEBHOOK ACKNOWLEDGES A SUBSCRIPTION REFUND')
+  const webhookDb = refundDb()
+  webhookDb.query = async (sql) => {
+    if (/UPDATE som_purchase/.test(sql)) return { rowCount: 0, rows: [] }
+    if (/SELECT id FROM account WHERE stripe_customer_id/.test(sql)) return { rows: [] }
+    throw new Error(`unexpected webhook query: ${sql}`)
+  }
+  let webhookError = null
+  try {
+    await handleWebhookEvent(webhookDb, {
+      id: 'evt_webhook_sub_refund', created: Math.floor(nowMs / 1000), type: 'charge.refunded',
+      data: { object: {
+        object: 'charge', id: 'ch_sub', customer: 'cus_paid', refunded: true,
+        payment_intent: 'pi_sub_renewal', invoice: 'in_sub_renewal',
+      } },
+    }, {
+      subscriptions: { async list() { return { data: [], has_more: false } } },
+      checkout: { sessions: { async list() { throw new Error('no Checkout lookup expected') } } },
+    })
+  } catch (error) { webhookError = error }
+  ok('a subscription refund no longer fails the webhook', webhookError === null, webhookError?.message)
+  ok('...and raises no alarm', webhookDb.state.failures.size === 0)
+
+  console.log('\nA KEY THAT MAY NOT READ CHECKOUT SESSIONS LEAVES A RECORD')
+  const { errors: stripeErrors } = require('stripe')
+  const unreadableDb = refundDb()
+  let unreadableError = null
+  let unreadableResult
+  try {
+    unreadableResult = await revokeOperatorTopUpRefund(unreadableDb, { ...refund, payment_intent: 'pi_unreadable' }, {
+      ...inWindow,
+      eventId: 'evt_unreadable_refund',
+      stripeClient: { checkout: { sessions: { async list() {
+        throw new stripeErrors.StripePermissionError({ message: 'denied', statusCode: 403 })
+      } } } },
+    })
+  } catch (error) { unreadableError = error }
+  ok('a refund the key cannot classify acknowledges instead of failing for days',
+    unreadableError === null && unreadableResult === false, unreadableError?.message)
+  ok('...and is recorded for a person', unreadableDb.state.failures.get('evt_unreadable_refund') === 1 &&
+    unreadableDb.state.reasons.includes('refund-classify-not-permitted'))
 
   console.log(`\n${pass} passed, ${fail} failed`)
   process.exit(fail === 0 ? 0 : 1)

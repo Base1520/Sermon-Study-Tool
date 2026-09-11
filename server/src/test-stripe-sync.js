@@ -5,7 +5,12 @@ process.env.STRIPE_PRICE_STARTER = 'price_starter'
 process.env.STRIPE_PRICE_HEAVY = 'price_heavy'
 process.env.STRIPE_SECRET_KEY = 'sk_test_placeholder'
 
-const { cancelAccountSubscriptions, operatorWebUrl, syncCustomer } = require('./stripe')
+const {
+  cancelAccountSubscriptions,
+  operatorWebUrl,
+  resyncLapsedStripeSubscriptions,
+  syncCustomer,
+} = require('./stripe')
 
 function subscription(id, status, priceId, created) {
   return {
@@ -347,4 +352,99 @@ test('billing return URLs reject unsafe configuration and never become undefined
     if (legacy === undefined) delete process.env.PUBLIC_URL
     else process.env.PUBLIC_URL = legacy
   }
+})
+
+test('the lapsed-subscription sweep re-reads Stripe for each stale active web subscription', async () => {
+  const seen = []
+  const db = {
+    async query(sql, params) {
+      seen.push({ sql, params })
+      return { rows: [{ stripe_customer_id: 'cus_a' }, { stripe_customer_id: 'cus_broken' }, { stripe_customer_id: 'cus_b' }] }
+    },
+  }
+  const synced = []
+  const originalError = console.error
+  console.error = () => {}
+  let count
+  try {
+    count = await resyncLapsedStripeSubscriptions(db, {}, {
+      limit: 25,
+      syncCustomer: async (_db, customerId) => {
+        if (customerId === 'cus_broken') throw new Error('Stripe timed out')
+        synced.push(customerId)
+      },
+    })
+  } finally {
+    console.error = originalError
+  }
+  assert.deepEqual(synced, ['cus_a', 'cus_b'], 'one failing customer must not stop the rest')
+  assert.equal(count, 2)
+  assert.equal(seen.length, 1)
+  assert.match(seen[0].sql, /s\.provider = 'stripe'/)
+  assert.match(seen[0].sql, /s\.status = 'active'/)
+  assert.match(seen[0].sql, /s\.current_period_end <= now\(\)/)
+  assert.match(seen[0].sql, /interval '7 days'/)
+  assert.match(seen[0].sql, /currentPeriodStart'\)::timestamptz > now\(\) - interval '4 days'/,
+    'a period that rolled before its renewal charge ran must keep being re-read')
+  assert.match(seen[0].sql, /s\.verified_at < now\(\) - interval '1 hour'/, '...but no more than hourly')
+  assert.deepEqual(seen[0].params, [25])
+})
+
+test('the lapsed-subscription sweep does nothing when no renewal is overdue', async () => {
+  let syncs = 0
+  const count = await resyncLapsedStripeSubscriptions({ async query() { return { rows: [] } } }, {}, {
+    syncCustomer: async () => { syncs += 1 },
+  })
+  assert.equal(count, 0)
+  assert.equal(syncs, 0)
+})
+
+test('a sync records when the current period began, so a renewal charge still pending is re-read', async () => {
+  const db = fakeBillingDb()
+  const written = []
+  const connect = db.connect
+  db.connect = async () => {
+    const client = await connect()
+    return {
+      ...client,
+      async query(sql, params) {
+        if (/INSERT INTO billing_subscription/.test(sql)) written.push(JSON.parse(params[11]))
+        return client.query(sql, params)
+      },
+    }
+  }
+  const stripeClient = {
+    subscriptions: {
+      async list() {
+        return { has_more: false, data: [subscription('sub_new_starter', 'active', 'price_starter', 1_800_000_000)] }
+      },
+    },
+  }
+  await syncCustomer(db, 'cus_1', stripeClient)
+  assert.deepEqual(written, [{ customerId: 'cus_1', currentPeriodStart: new Date(1_800_000_000 * 1000).toISOString() }])
+})
+
+test('a sync hands billing a query handle, never the checked-out pool client (pg refuses a second connect)', async () => {
+  const { Client } = require('pg')
+  const db = fakeBillingDb()
+  const connect = db.connect
+  db.connect = async () => {
+    const fake = await connect()
+    // What pg.Pool hands out in production: a real pg.Client that is already connected.
+    const checkedOut = new Client()
+    checkedOut._connected = true
+    checkedOut.query = fake.query
+    checkedOut.release = fake.release
+    return checkedOut
+  }
+  const stripeClient = {
+    subscriptions: {
+      async list() {
+        return { has_more: false, data: [subscription('sub_new_starter', 'active', 'price_starter', 1_800_000_000)] }
+      },
+    },
+  }
+  const entitlement = await syncCustomer(db, 'cus_1', stripeClient)
+  assert.equal(entitlement.status, 'active')
+  assert.equal(db.state.subscriptions.get('sub_new_starter').status, 'active')
 })

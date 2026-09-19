@@ -42,7 +42,7 @@ import {
   type TabletInkStroke,
   type TabletSermonWorkspace,
 } from './tabletDeskModel'
-import { nextFreeDeskSlot, type DeskRect } from '../lib/deskLayout.ts'
+import { packDeskTiles, nextFreeDeskSlot, type DeskRect } from '../lib/deskLayout.ts'
 
 type TabletFlowData = TabletDeskTileData & Record<string, unknown>
 type TabletFlowNode = Node<TabletFlowData, TabletDeskNode['type']>
@@ -594,6 +594,34 @@ export function TabletSermonDeskInner({
     }, 60)
   }
 
+  /**
+   * Re-seat every open tile in centred rows, in their current order.
+   *
+   * Deliberately NOT the Mac's CLEAN UP, which rebuilds the desk from source: a
+   * tablet desk holds edited content, pencil strokes and notes the study never
+   * produced, so rebuilding would throw the work away. This moves tiles and
+   * touches nothing inside them. Tiles in the library stay in the library.
+   */
+  const arrangeDesk = useCallback(() => {
+    setNodes((current) => {
+      const visible = current.filter((node) => !node.hidden)
+      if (!visible.length) return current
+      const packed = packDeskTiles(visible.map((node) => ({
+        width: dimension(node.width, 460),
+        height: dimension(node.height, 320),
+      })))
+      const seats = new Map(visible.map((node, index) => [node.id, packed[index]]))
+      return current.map((node) => {
+        const seat = seats.get(node.id)
+        return seat ? { ...node, position: seat } : node
+      })
+    })
+    setDeskNotice(null)
+    window.setTimeout(() => {
+      void flowRef.current?.fitView({ padding: .08, maxZoom: .82, duration: 420 })
+    }, 60)
+  }, [setNodes])
+
   const fitDesk = () => {
     void flowRef.current?.fitView({ padding: .08, maxZoom: .82, duration: 350 })
   }
@@ -641,6 +669,7 @@ export function TabletSermonDeskInner({
             <button onClick={() => addNode('illustration')} disabled={locked}>+ ILLUSTRATION</button>
             <button onClick={() => addNode('ink')} disabled={locked}>✎ PENCIL</button>
             <button className={tilesOpen ? 'active' : ''} onClick={() => setTilesOpen((open) => !open)}>+ TILES {hiddenNodes.length ? `· ${hiddenNodes.length}` : ''}</button>
+            <button onClick={arrangeDesk} disabled={locked}>ARRANGE</button>
             <button onClick={fitDesk}>FIT</button>
             <button className={locked ? 'active' : ''} onClick={() => setLocked((value) => !value)}>{locked ? '🔒 LOCKED' : 'LOCK DESK'}</button>
           </div>

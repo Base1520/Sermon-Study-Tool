@@ -337,5 +337,19 @@ check('adding eight tiles in a row never stacks them', () => {
   assert.equal(clash, null, clash || '')
 })
 
+check('the desk offers ARRANGE, and a locked desk cannot be rearranged', () => {
+  const source = fs.readFileSync(deskPath, 'utf8')
+  assert.ok(/onClick=\{arrangeDesk\} disabled=\{locked\}>ARRANGE</.test(source), 'ARRANGE control is missing or not gated on the lock')
+})
+
+check('ARRANGE moves tiles without rebuilding what is inside them', () => {
+  const source = fs.readFileSync(deskPath, 'utf8')
+  const body = source.slice(source.indexOf('const arrangeDesk'), source.indexOf('const fitDesk'))
+  assert.ok(body.length > 0, 'arrangeDesk not found')
+  assert.ok(/\.\.\.node, position: seat/.test(body), 'arrangeDesk must preserve the node and replace only its position')
+  assert.ok(!/createTabletSermonWorkspace|createTabletDeskNote/.test(body), 'arrangeDesk must not rebuild tiles — a tablet desk holds edited content')
+  assert.ok(/filter\(\(node\) => !node\.hidden\)/.test(body), 'arrangeDesk must leave library tiles in the library')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed) process.exit(1)

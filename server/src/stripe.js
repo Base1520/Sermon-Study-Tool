@@ -370,13 +370,12 @@ async function chargeIsOperatorTopUp(client, charge, stripeClient = stripe, opti
   try {
     sessions = await stripeClient.checkout.sessions.list({ payment_intent: paymentIntentId, limit: 1 })
   } catch (error) {
-    // A key that may not read Checkout Sessions never will, and retrying fails the
-    // endpoint for days. Leave the charge for a person and acknowledge it.
+    // Record the permission gap, but keep delivery retryable after the key is repaired.
     if (error?.type !== 'StripePermissionError') throw error
     await recordReconciliationFailure(client, options.eventId, paymentIntentId,
       `${options.kind || 'refund'}-classify-not-permitted`)
     console.error('[stripe] this key may not read the Checkout Session for', paymentIntentId)
-    return false
+    throw error
   }
   return (sessions?.data || []).some((session) => session?.metadata?.source === TOPUP_SOURCE)
 }
@@ -497,12 +496,7 @@ async function reverseOperatorTopUp(db, charge, options = {}) {
  * a canceled subscription are not revived automatically — the win is written to
  * the reconciliation ledger for a person to decide.
  */
-/**
- * A Stripe read this key is not permitted to make will never succeed. Throwing
- * answered 500 on every delivery for three days and acted on nothing, so record the
- * dispute for a person (GET /v1/admin/billing-reconciliation) and acknowledge.
- * Anything else still throws so Stripe retries.
- */
+/** Keep a durable permission alarm and propagate failures for webhook retry. */
 async function readForDispute(db, event, payload, read) {
   try {
     return await read()
@@ -511,15 +505,12 @@ async function readForDispute(db, event, payload, read) {
     await recordReconciliationFailure(db, event.id,
       objectId(payload?.payment_intent) || objectId(payload?.charge) || payload?.id, 'dispute-read-not-permitted')
     console.error('[stripe] this key may not read what dispute', payload?.id, 'needs')
-    return null
+    throw error
   }
 }
 
 async function handleChargeDispute(db, event, stripeClient = stripe, options = {}) {
   const payload = event?.data?.object
-  const payloadStatus = String(payload?.status || '')
-  if (payloadStatus.startsWith('warning_')) return 'inquiry'
-  if (event.type === 'charge.dispute.closed' && !['won', 'lost'].includes(payloadStatus)) return 'closed'
   if (!payload?.id) throw new Error(`Stripe dispute event ${event.id} names no dispute`)
   // An event's status is only what it was when the event was created. Stripe does
   // not deliver in order and an owner can resend an old event, so a late "opened"
@@ -582,13 +573,13 @@ async function cancelDisputedSubscription(db, charge, event, stripeClient = stri
       console.log(`[stripe] canceled disputed subscription ${subscriptionId}`)
     }
   } catch (error) {
-    // A key that may not cancel never will. Retrying would only fail the endpoint
-    // again, so leave it for a person and acknowledge the event.
+    // Keep a durable alarm AND fail the delivery. A repaired permission must be
+    // able to retry cancellation; acknowledging here leaves the customer billing.
     if (error?.type !== 'StripePermissionError') throw error
     await recordReconciliationFailure(db, event.id, objectId(charge?.payment_intent) || charge?.id,
       'dispute-cancel-not-permitted')
     console.error('[stripe] disputed subscription could not be canceled with this key', invoiceId)
-    return false
+    throw error
   }
   const customerId = objectId(charge?.customer)
   if (customerId) await (options.syncCustomer || syncCustomer)(db, customerId, stripeClient)
@@ -602,28 +593,31 @@ async function cancelDisputedSubscription(db, charge, event, stripeClient = stri
  * had nothing: if the renewal webhook was late, failing, or disabled, his row kept
  * the old period and he dropped to free on renewal day while Stripe went on
  * charging him. This re-reads Stripe, the ledger, for two kinds of row:
- *  - still recorded active past its period end, for up to a week, well inside
- *    entitlement.js's RENEWAL_GRACE_MS so an outage heals before a lockout; and
+ *  - still recorded active past its period end, including after a long outage; and
  *  - whose period began in the last four days, at most hourly. Stripe advances the
  *    period before it attempts the renewal charge, so a row can be written active
  *    for another month and then have that charge fail with no webhook to say so.
- * One failing customer never stops the rest.
+ * Re-read at most hourly, oldest verification first. The entitlement grace is 48
+ * hours, not seven days; a longer outage must still be recoverable. One failing
+ * customer never stops the rest of the batch.
  */
 async function resyncLapsedStripeSubscriptions(db, stripeClient = stripe, options = {}) {
   const { rows } = await db.query(
-    `SELECT DISTINCT a.stripe_customer_id
+    `SELECT a.stripe_customer_id
        FROM billing_subscription s
        JOIN account a ON a.id = s.account_id
       WHERE s.provider = 'stripe'
         AND s.status = 'active'
         AND a.stripe_customer_id IS NOT NULL
+        AND (s.verified_at IS NULL OR s.verified_at < now() - interval '1 hour')
         AND (
-          (s.current_period_end <= now() AND s.current_period_end > now() - interval '7 days')
+          s.current_period_end <= now()
           OR (
             (s.metadata->>'currentPeriodStart')::timestamptz > now() - interval '4 days'
-            AND s.verified_at < now() - interval '1 hour'
           )
         )
+      GROUP BY a.stripe_customer_id
+      ORDER BY min(s.verified_at) ASC NULLS FIRST, a.stripe_customer_id
       LIMIT $1`,
     [options.limit || 50],
   )

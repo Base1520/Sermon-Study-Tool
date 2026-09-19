@@ -383,7 +383,10 @@ test('the lapsed-subscription sweep re-reads Stripe for each stale active web su
   assert.match(seen[0].sql, /s\.provider = 'stripe'/)
   assert.match(seen[0].sql, /s\.status = 'active'/)
   assert.match(seen[0].sql, /s\.current_period_end <= now\(\)/)
-  assert.match(seen[0].sql, /interval '7 days'/)
+  assert.doesNotMatch(seen[0].sql, /interval '7 days'/, 'long outages must remain recoverable')
+  assert.match(seen[0].sql, /GROUP BY a\.stripe_customer_id/)
+  assert.match(seen[0].sql, /ORDER BY min\(s\.verified_at\) ASC NULLS FIRST/, 'oldest verification has priority')
+  assert.match(seen[0].sql, /s\.verified_at IS NULL/, 'never-verified rows are eligible')
   assert.match(seen[0].sql, /currentPeriodStart'\)::timestamptz > now\(\) - interval '4 days'/,
     'a period that rolled before its renewal charge ran must keep being re-read')
   assert.match(seen[0].sql, /s\.verified_at < now\(\) - interval '1 hour'/, '...but no more than hourly')
@@ -447,4 +450,17 @@ test('a sync hands billing a query handle, never the checked-out pool client (pg
   const entitlement = await syncCustomer(db, 'cus_1', stripeClient)
   assert.equal(entitlement.status, 'active')
   assert.equal(db.state.subscriptions.get('sub_new_starter').status, 'active')
+})
+
+
+test('a deletion-race cancellation permission failure propagates for webhook retry', async () => {
+  const denied = Object.assign(new Error('fixture permission refusal'), { type: 'StripePermissionError' })
+  const db = fakeBillingDb({ deleting: true })
+  await assert.rejects(syncCustomer(db, 'cus_1', {
+    subscriptions: {
+      list: async () => ({ has_more: false, data: [subscription('sub_race', 'active', 'price_starter', 1_800_000_000)] }),
+      cancel: async () => { throw denied },
+    },
+  }), (error) => error === denied)
+  assert.equal(db.state.subscriptions.has('sub_race'), false)
 })

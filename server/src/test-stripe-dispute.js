@@ -134,10 +134,13 @@ const cancels = (stripe) => stripe.calls.filter(([name]) => name === 'subscripti
   console.log('\nAN INQUIRY MOVES NO MONEY AND CHANGES NOTHING')
   {
     const db = disputeDb({ som: { payment_intent_id: 'pi_disputed' } })
-    const stripe = fakeStripe({ charge: { payment_intent: 'pi_disputed' } })
+    const stripe = fakeStripe({ charge: { payment_intent: 'pi_disputed' }, disputeStatus: 'warning_needs_response' })
     const result = await handleChargeDispute(db, disputeEvent('charge.dispute.created', 'warning_needs_response'), stripe)
     ok('an inquiry is recognised', result === 'inquiry')
-    ok('...without touching Stripe or the order', stripe.calls.length === 0 && db.state.som.status === 'paid')
+    ok('...after reading current status, without changing the order', stripe.calls.length === 1 && db.state.som.status === 'paid')
+    stripe.disputeStatus = 'needs_response'
+    const escalated = await handleChargeDispute(db, disputeEvent('charge.dispute.created', 'warning_needs_response'), stripe)
+    ok('a stale inquiry event cannot hide an escalated chargeback', escalated === 'reversed' && db.state.som.status === 'disputed')
   }
 
   console.log('\nA DISPUTED TOP-UP GIVES BACK ITS UNSPENT STUDIES, ONCE')
@@ -212,11 +215,12 @@ const cancels = (stripe) => stripe.calls.filter(([name]) => name === 'subscripti
   console.log('\nA CLOSE THAT IS NEITHER WON NOR LOST DOES NOTHING')
   {
     const db = disputeDb({ som: { payment_intent_id: 'pi_disputed' } })
-    const stripe = fakeStripe({ charge: { payment_intent: 'pi_disputed' } })
+    const stripe = fakeStripe({ charge: { payment_intent: 'pi_disputed' }, disputeStatus: 'warning_closed' })
     const result = await handleChargeDispute(db, disputeEvent('charge.dispute.closed', 'warning_closed'), stripe)
-    ok('a closed inquiry changes nothing', result === 'inquiry' && stripe.calls.length === 0 && db.state.som.status === 'paid')
+    ok('a closed inquiry changes nothing', result === 'inquiry' && stripe.calls.length === 1 && db.state.som.status === 'paid')
+    stripe.disputeStatus = 'prevented'
     const prevented = await handleChargeDispute(db, disputeEvent('charge.dispute.closed', 'prevented'), stripe)
-    ok('a close with another status changes nothing', prevented === 'closed' && stripe.calls.length === 0)
+    ok('a close with another status changes nothing', prevented === 'closed' && stripe.calls.length === 2)
   }
 
   console.log('\nTHIS SERVER ONLY CANCELS WHAT IT SOLD')
@@ -234,7 +238,7 @@ const cancels = (stripe) => stripe.calls.filter(([name]) => name === 'subscripti
       cancels(stripe) === 0 && subscription.status === 'active')
   }
 
-  console.log('\nA KEY THAT MAY NOT CANCEL LEAVES A RECORD INSTEAD OF FAILING THE WEBHOOK')
+  console.log('\nA KEY THAT MAY NOT CANCEL LEAVES A RECORD AND FAILS THE WEBHOOK')
   {
     const db = disputeDb()
     const denied = Object.assign(new Error('The provided key does not have the required permissions'),
@@ -247,9 +251,16 @@ const cancels = (stripe) => stripe.calls.filter(([name]) => name === 'subscripti
     })
     let rejected = false
     try { await deliver(db, stripe, 'charge.dispute.created', 'needs_response') } catch { rejected = true }
-    ok('a permission refusal acknowledges the event', !rejected)
+    ok('a permission refusal rejects the event for retry', rejected)
     ok('...and records it for a person',
       db.state.failures.get('evt_charge.dispute.created_needs_response') === 'dispute-cancel-not-permitted')
+
+    const repaired = fakeStripe({
+      charge: { payment_intent: 'pi_disputed', customer: 'cus_sub', invoice: 'in_1' },
+      invoice: { subscription: 'sub_1' }, subscription: operatorSubscription(),
+    })
+    const retried = await deliver(db, repaired, 'charge.dispute.created', 'needs_response', { syncCustomer: async () => {} })
+    ok('redelivery after permissions are repaired cancels the subscription', retried === 'reversed' && cancels(repaired) === 1)
 
     const outage = Object.assign(new Error('Stripe is having a moment'), { type: 'StripeAPIError' })
     const flaky = fakeStripe({
@@ -273,7 +284,7 @@ const cancels = (stripe) => stripe.calls.filter(([name]) => name === 'subscripti
     ok('...which asks Stripe where the dispute stands', stripe.calls.some(([name, id]) => name === 'disputes.retrieve' && id === 'dp_1'))
   }
 
-  console.log('\nA KEY THAT MAY NOT READ THE DISPUTE LEAVES A RECORD INSTEAD OF FAILING FOR DAYS')
+  console.log('\nA KEY THAT MAY NOT READ THE DISPUTE LEAVES A RECORD AND REJECTS')
   {
     const { errors } = require('stripe')
     const denied = () => new errors.StripePermissionError({ message: 'The provided key does not have the required permissions', statusCode: 403 })
@@ -282,14 +293,15 @@ const cancels = (stripe) => stripe.calls.filter(([name]) => name === 'subscripti
     stripe.disputes.retrieve = async () => { throw denied() }
     let error = null
     try { await handleWebhookEvent(db, disputeEvent('charge.dispute.created', 'needs_response'), stripe) } catch (caught) { error = caught }
-    ok('a dispute the key may not read acknowledges the webhook', error === null, error?.message)
+    ok('a dispute the key may not read rejects the webhook', error?.type === 'StripePermissionError')
     ok('...and is recorded for a person', db.state.failures.get('evt_charge.dispute.created_needs_response') === 'dispute-read-not-permitted')
 
     const chargeDb = disputeDb({ som: { payment_intent_id: 'pi_disputed' } })
     const chargeStripe = fakeStripe({ charge: { payment_intent: 'pi_disputed' } })
     chargeStripe.charges.retrieve = async () => { throw denied() }
-    const chargeResult = await deliver(chargeDb, chargeStripe, 'charge.dispute.created', 'needs_response')
-    ok('a charge the key may not read is recorded the same way', chargeResult === 'unreadable' &&
+    let chargeError
+    try { await deliver(chargeDb, chargeStripe, 'charge.dispute.created', 'needs_response') } catch (error) { chargeError = error }
+    ok('a charge the key may not read rejects and is recorded the same way', chargeError?.type === 'StripePermissionError' &&
       chargeDb.state.failures.get('evt_charge.dispute.created_needs_response') === 'dispute-read-not-permitted')
     ok('...and nothing it could not verify is changed', chargeDb.state.som.status === 'paid')
   }

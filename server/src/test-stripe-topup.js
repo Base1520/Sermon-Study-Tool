@@ -442,8 +442,8 @@ function stripeSessions(sessions = []) {
       } } } },
     })
   } catch (error) { unreadableError = error }
-  ok('a refund the key cannot classify acknowledges instead of failing for days',
-    unreadableError === null && unreadableResult === false, unreadableError?.message)
+  ok('a refund the key cannot classify rejects for retry',
+    unreadableError?.type === 'StripePermissionError' && unreadableResult === undefined)
   ok('...and is recorded for a person', unreadableDb.state.failures.get('evt_unreadable_refund') === 1 &&
     unreadableDb.state.reasons.includes('refund-classify-not-permitted'))
 

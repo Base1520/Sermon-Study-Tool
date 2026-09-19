@@ -8,6 +8,8 @@ const {
   restoreSomPurchaseAfterWonDispute,
   createDownloadToken,
   verifyDownloadToken,
+  durableDownloadUrl,
+  somApiOrigin,
   mountSomPurchase,
 } = require('./som-purchase')
 process.env.STRIPE_SECRET_KEY ||= 'sk_test_placeholder'
@@ -117,10 +119,11 @@ function fakeDb() {
         }
         return { rowCount: 0, rows: [] }
       }
-      if (/WHERE session_id = \$1 AND status = 'paid'/.test(sql)) {
+      if (/SELECT/.test(sql) && /WHERE session_id = \$1 AND status = 'paid'/.test(sql)) {
         return { rows: state.purchase?.session_id === params[0] && state.purchase.status === 'paid' ? [{ ...state.purchase }] : [] }
       }
       if (/SET download_count = download_count \+ 1/.test(sql)) {
+        if (/AND status = 'paid'/.test(sql) && state.purchase.status !== 'paid') return { rowCount: 0, rows: [] }
         state.purchase.download_count += 1
         return { rowCount: 1, rows: [] }
       }
@@ -151,21 +154,112 @@ function fakeDb() {
   ok('an expired token is rejected',
     verifyDownloadToken(token, secret, 1_000_000 + (25 * 60 * 60 * 1000)) === null)
 
+  const assert = require('node:assert/strict')
+  for (const suffix of ['.', '..extra', '.extra', '.extra.more']) {
+    ok(`extra token segments are rejected (${suffix})`, verifyDownloadToken(token + suffix, secret, 1_000_001) === null)
+  }
+  ok('a token without its signature is rejected', verifyDownloadToken(token.split('.')[0], secret) === null)
+  ok('expiry is exclusive', verifyDownloadToken(token, secret, 1_000_000 + 86400_000) === null)
+  const rotated = 'another-test-signing-secret-longer-than-thirty-two-characters'
+  ok('rotation without a retained key rejects old tokens', verifyDownloadToken(token, rotated, 1_000_001) === null)
+  ok('rotation with a retained key preserves old tokens', verifyDownloadToken(token, [rotated, secret], 1_000_001)?.sessionId === 'cs_som_paid')
+  const durable = new URL(durableDownloadUrl('cs_som_paid', { signingSecret: secret, apiOrigin: 'https://staging.example/' }))
+  const durableToken = durable.searchParams.get('token')
+  const parsedDurable = verifyDownloadToken(durableToken, secret)
+  ok('durable URL uses the configured origin and route', durable.origin === 'https://staging.example' && durable.pathname === '/v1/som/download')
+  ok('durable tokens live for ten years', Math.abs(parsedDurable.expiresAt - Math.floor(Date.now() / 1000) - 3650 * 86400) <= 1)
+  ok('the default durable URL serves the PDF (no format param)', !durable.searchParams.has('format'))
+  const durableEpub = new URL(durableDownloadUrl('cs_som_paid', { signingSecret: secret, apiOrigin: 'https://staging.example/', format: 'epub' }))
+  ok('an epub durable URL carries format=epub and a valid token',
+    durableEpub.searchParams.get('format') === 'epub' &&
+    verifyDownloadToken(durableEpub.searchParams.get('token'), secret)?.sessionId === 'cs_som_paid')
+  assert.throws(() => durableDownloadUrl('cs_paid', { signingSecret: '', apiOrigin: 'https://staging.example' }), /signing secret/)
+  for (const origin of ['javascript:alert(1)', 'http://example.com', 'https://user:pass@example.com', 'https://example.com/path']) {
+    assert.throws(() => somApiOrigin({ apiOrigin: origin }), /origin/)
+  }
+  ok('local development origins are allowed', somApiOrigin({ apiOrigin: 'http://localhost:3000/' }) === 'http://localhost:3000')
+
+  // Isolate configuration and transport without changing process.env or contacting a provider.
+  const fs = require('node:fs')
+  const vm = require('node:vm')
+  const { createRequire } = require('node:module')
+  function isolatedModule(name, env, overrides = {}) {
+    const filename = require.resolve(name)
+    const module = { exports: {} }
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+      module, exports: module.exports, require: createRequire(filename),
+      process: { env }, Buffer, URL, console: { error() {} },
+      setTimeout, clearTimeout, AbortController, ...overrides,
+    }, { filename })
+    return module.exports
+  }
+  const fallbackSom = isolatedModule('./som-purchase', { OPERATOR_API_PUBLIC_URL: 'https://staging-fallback.example/' })
+  ok('email links fall back to the configured Operator API', fallbackSom.somApiOrigin() === 'https://staging-fallback.example')
+  const explicitSom = isolatedModule('./som-purchase', { SOM_API_ORIGIN: 'https://som.example', OPERATOR_API_PUBLIC_URL: 'https://operator.example' })
+  ok('SOM-specific configuration takes precedence', explicitSom.somApiOrigin() === 'https://som.example')
+  assert.throws(() => isolatedModule('./som-purchase', {}).somApiOrigin(), /not configured/)
+  ok('missing origin fails instead of sending staging buyers to production', true)
+  let timingChecks = 0
+  const crypto = require('node:crypto')
+  const nativeSomRequire = createRequire(require.resolve('./som-purchase'))
+  const timingSom = isolatedModule('./som-purchase', {}, {
+    require: (name) => name === 'crypto' ? {
+      ...crypto, timingSafeEqual: (...args) => { timingChecks += 1; return crypto.timingSafeEqual(...args) },
+    } : nativeSomRequire(name),
+  })
+  timingSom.verifyDownloadToken(token, [rotated, secret], 1_000_001)
+  ok('every retained key uses constant-time signature comparison', timingChecks === 2)
+  for (const payload of [{ sessionId: 'cs_som_paid' }, { sessionId: {}, expiresAt: 9999999999 }, { sessionId: 'cs_som_paid', expiresAt: '9999999999' }]) {
+    const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url')
+    const signature = crypto.createHmac('sha256', secret).update(encoded).digest('base64url')
+    assert.equal(verifyDownloadToken(`${encoded}.${signature}`, secret), null)
+  }
+  ok('signed payloads must contain a string session and numeric expiry', true)
+  for (const withSecret of [true, false]) {
+    const sent = []
+    const mailchimp = isolatedModule('./mailchimp', {
+      MAILCHIMP_API_KEY: 'fixture-us21', MAILCHIMP_AUDIENCE_ID: 'fixture-audience',
+    }, { fetch: async (_url, init) => { sent.push(JSON.parse(init.body)); return { ok: true, status: 200 } } })
+    const nativeRequire = createRequire(require.resolve('./som-purchase'))
+    const som = isolatedModule('./som-purchase', {}, {
+      require: (name) => name === './mailchimp' ? mailchimp : nativeRequire(name),
+    })
+    let intentId
+    const client = { release() {}, async query(sql, params) {
+      if (/INSERT INTO marketing_contact_state/.test(sql)) intentId = params[2]
+      return { rows: /SELECT action, intent_id/.test(sql) ? [{ action: 'sync', intent_id: intentId }] : [] }
+    } }
+    const result = await som.syncSomBuyerMarketing({ connect: async () => client },
+      { email: 'reader@example.com', status: 'paid' }, paidSession(), {
+        ...(withSecret ? { signingSecret: secret } : {}), apiOrigin: 'https://staging.example',
+      })
+    ok(`SOM marketing sync succeeds with signing secret ${withSecret ? 'present' : 'absent'}`, result.synced === true)
+    assert.equal(sent[0].status, 'subscribed')
+    assert.equal(sent[0].status_if_new, 'subscribed')
+    assert.deepEqual(sent[1].tags.map((tag) => tag.name), ['SOM Buyer', "The Spiritual Operator's Manual"])
+    if (withSecret) assert.equal(verifyDownloadToken(new URL(sent[0].merge_fields.DLURL).searchParams.get('token'), secret).sessionId, 'cs_som_paid')
+    else assert.equal(sent[0].merge_fields, undefined)
+  }
+
   console.log('\nSOM CHECKOUT USES THE EXACT PRICE AND A PRIVATE RETURN PATH')
   const app = captureApp()
   const db = fakeDb()
   const stripeState = { checkout: null, retrieved: paidSession() }
-  const stripe = { checkout: { sessions: {
+  const stripe = {
+    paymentIntents: { async retrieve() { return { status: 'succeeded', latest_charge: { id: 'ch_som', paid: true, refunded: false, disputed: false } } } },
+    checkout: { sessions: {
     async create(payload) {
       stripeState.checkout = payload
       return { url: 'https://checkout.stripe.test/som' }
     },
     async retrieve() { return stripeState.retrieved },
   } } }
+  let fileUrls = 0
   mountSomPurchase(app, db, stripe, {
     priceId: 'price_som_999',
+    apiOrigin: 'https://staging.example',
     signingSecret: secret,
-    createDownloadUrl: async () => 'https://private-bucket.test/signed-pdf',
+    createDownloadUrl: async () => { fileUrls += 1; return 'https://private-bucket.test/signed-pdf' },
   })
 
   const invalidRes = captureResponse()
@@ -197,7 +291,7 @@ function fakeDb() {
     stripeState.checkout?.metadata?.source === SOM_SOURCE &&
       stripeState.checkout?.payment_intent_data?.metadata?.source === SOM_SOURCE)
   ok('an attacker-controlled Host cannot replace the return URL',
-    /^https:\/\/api-production-15e5e\.up\.railway\.app\//.test(stripeState.checkout?.success_url || ''))
+    /^https:\/\/staging\.example\//.test(stripeState.checkout?.success_url || ''))
 
   console.log('\nONLY THE PAID BUYER RECEIVES THE PRIVATE PDF')
   stripeState.retrieved = paidSession({ payment_status: 'unpaid' })
@@ -231,6 +325,82 @@ function fakeDb() {
   ok('a valid buyer is redirected to a short-lived private object URL',
     downloadRes.statusCode === 303 && downloadRes.redirectTo === 'https://private-bucket.test/signed-pdf')
   ok('the private download is counted', db.state.purchase?.download_count === 1)
+
+  // Exercise the real mounted route, including the storage boundary.
+  const redeem = async (value = durableToken) => {
+    const res = captureResponse()
+    await app.routes.get('GET /v1/som/download')(
+      request({ query: { token: value } }), res, (error) => { throw error },
+    )
+    return res
+  }
+  ok('durable token replay is intentionally allowed for a paid buyer', (await redeem()).statusCode === 303 && (await redeem()).statusCode === 303)
+  ok('a valid signature cannot authorize a never-paid session',
+    (await redeem(createDownloadToken('cs_never_paid', secret))).statusCode === 403)
+  for (const status of ['refunded', 'disputed']) {
+    db.state.purchase.status = status
+    ok(`the actual download route blocks a ${status} durable token`, (await redeem()).statusCode === 403)
+  }
+  db.state.purchase.status = 'paid'
+  const livePayment = stripe.paymentIntents.retrieve
+  for (const charge of [
+    { paid: true, refunded: true, disputed: false },
+    { paid: true, refunded: false, disputed: true },
+  ]) {
+    stripe.paymentIntents.retrieve = async () => ({ status: 'succeeded', latest_charge: { id: 'ch_som', ...charge } })
+    stripe.disputes = { list: async () => ({ data: [{ status: 'lost' }], has_more: false }) }
+    ok('a reversed live payment blocks a stale paid ledger row', (await redeem()).statusCode === 403)
+    const earlyDb = fakeDb()
+    if (charge.refunded) await markSomPurchaseRefunded(earlyDb, { payment_intent: 'pi_som', refunded: true })
+    else await markSomPurchaseDisputed(earlyDb, 'pi_som')
+    await recordSomPurchase(earlyDb, paidSession())
+    const earlyApp = captureApp()
+    mountSomPurchase(earlyApp, earlyDb, stripe, {
+      signingSecret: secret,
+      createDownloadUrl: async () => { throw new Error('reversed payment must never sign storage') },
+    })
+    const earlyResponse = captureResponse()
+    await earlyApp.routes.get('GET /v1/som/download')(request({ query: { token: durableToken } }), earlyResponse, (error) => { throw error })
+    ok('reversal-before-checkout event ordering cannot grant a download', earlyDb.state.purchase.status === 'paid' && earlyResponse.statusCode === 403)
+
+  }
+  for (const status of ['needs_response', 'under_review']) {
+    stripe.disputes.list = async () => ({ data: [{ status }], has_more: false })
+    ok(`a live ${status} dispute blocks delivery`, (await redeem()).statusCode === 403)
+  }
+  stripe.disputes.list = async () => ({ data: [{ status: 'won' }], has_more: false })
+  ok('a won dispute permits a locally eligible purchase', (await redeem()).statusCode === 303)
+  stripe.paymentIntents.retrieve = async () => { throw new Error('provider unavailable') }
+  const fileUrlsBeforeFailure = fileUrls
+  await assert.rejects(redeem(), /provider unavailable/)
+  ok('provider read failure never issues a file URL', fileUrls === fileUrlsBeforeFailure)
+  stripe.paymentIntents.retrieve = livePayment
+  const originalIntent = db.state.purchase.payment_intent_id
+  const originalAmount = db.state.purchase.amount_total
+  db.state.purchase.payment_intent_id = null
+  ok('a nonzero order without a PaymentIntent cannot download', (await redeem()).statusCode === 403)
+  db.state.purchase.amount_total = 0
+  ok('a recorded zero-dollar promotion remains downloadable', (await redeem()).statusCode === 303)
+  db.state.purchase.payment_intent_id = originalIntent
+  db.state.purchase.amount_total = originalAmount
+  ok('book ownership requires no Operator account (including a deleted account)', (await redeem()).statusCode === 303 &&
+    !db.state.queries.some(({ sql }) => /FROM account/.test(sql)))
+  const racingApp = captureApp()
+  mountSomPurchase(racingApp, db, stripe, {
+    signingSecret: secret,
+    createDownloadUrl: async () => { db.state.purchase.status = 'refunded'; return 'https://private-bucket.test/signed-pdf' },
+  })
+  const racingResponse = captureResponse()
+  await racingApp.routes.get('GET /v1/som/download')(request({ query: { token: durableToken } }), racingResponse, (error) => { throw error })
+  ok('a reversal while preparing the file URL prevents the redirect', racingResponse.statusCode === 403 && !racingResponse.redirectTo)
+  db.state.purchase.status = 'paid'
+  const rotationApp = captureApp()
+  mountSomPurchase(rotationApp, db, stripe, {
+    signingSecret: rotated, previousSigningSecrets: [secret], createDownloadUrl: async () => 'https://private-bucket.test/signed-pdf',
+  })
+  const rotationResponse = captureResponse()
+  await rotationApp.routes.get('GET /v1/som/download')(request({ query: { token: durableToken } }), rotationResponse, (error) => { throw error })
+  ok('the mounted route accepts an emailed token after planned rotation', rotationResponse.statusCode === 303)
 
   const publicFeed = captureResponse()
   await app.routes.get('GET /v1/som/purchases')(

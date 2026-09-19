@@ -201,3 +201,15 @@ test('the existing outbox scheduler recovers a crash marker even with no marketi
   assert.deepEqual(await processMarketingDeletionOutbox(db), { claimed: 0, completed: 0 })
   assert.equal(markerSweeps, 1)
 })
+
+
+test('paid opt-in merge fields thread into the provider payload without changing default opt-in', () => {
+  assert.deepEqual(marketingMemberPayload(' Reader@Example.com ', {
+    status: 'subscribed', mergeFields: { DLURL: 'https://staging.example/v1/som/download?token=fixture' },
+  }), {
+    email_address: 'reader@example.com', status: 'subscribed', status_if_new: 'subscribed',
+    merge_fields: { DLURL: 'https://staging.example/v1/som/download?token=fixture' },
+  })
+  assert.equal('merge_fields' in marketingMemberPayload('reader@example.com', { mergeFields: {} }), false)
+  assert.equal(marketingMemberPayload('reader@example.com', { mergeFields: { DLURL: 'fixture' } }).status_if_new, 'pending')
+})

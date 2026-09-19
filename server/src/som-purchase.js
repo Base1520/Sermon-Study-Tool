@@ -7,9 +7,33 @@ const { stageMarketingSync, syncMarketingContact } = require('./mailchimp')
 const SOM_SOURCE = 'som-digital-early-access'
 const SOM_CONSENT_VERSION = 'som-digital-v1'
 const DOWNLOAD_TOKEN_TTL_SECONDS = 24 * 60 * 60
+// A reusable bearer link. Each redemption checks the local order and live Stripe payment.
+// Already issued storage URLs remain usable for up to 15 minutes after a reversal.
+const DURABLE_DOWNLOAD_TOKEN_TTL_SECONDS = 3650 * 24 * 60 * 60
 const PRESIGNED_URL_TTL_SECONDS = 15 * 60
 const DEFAULT_OBJECT_KEY = 'the-spiritual-operators-manual-2026-08-06.pdf'
 const DEFAULT_FILENAME = "The Spiritual Operator's Manual — Cole Permenter.pdf"
+const DEFAULT_EPUB_OBJECT_KEY = 'the-spiritual-operators-manual-2026-09-18.epub'
+const DEFAULT_EPUB_FILENAME = "The Spiritual Operator's Manual — Cole Permenter.epub"
+
+// Buyers get BOTH a print-friendly PDF and a reflowable EPUB (opens in Apple Books / Kindle /
+// Google Play — remembers the reader's place). `format` selects which object the download serves;
+// anything other than 'epub' falls back to the PDF so old links keep working.
+const DOWNLOAD_FORMATS = {
+  pdf: {
+    objectKey: () => process.env.SOM_OBJECT_KEY || DEFAULT_OBJECT_KEY,
+    contentType: 'application/pdf',
+    filename: DEFAULT_FILENAME,
+  },
+  epub: {
+    objectKey: () => process.env.SOM_EPUB_OBJECT_KEY || DEFAULT_EPUB_OBJECT_KEY,
+    contentType: 'application/epub+zip',
+    filename: DEFAULT_EPUB_FILENAME,
+  },
+}
+function normalizeFormat(value) {
+  return String(value || '').toLowerCase() === 'epub' ? 'epub' : 'pdf'
+}
 
 const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next)
 
@@ -23,10 +47,12 @@ function escapeHtml(value) {
 }
 
 function apiOriginFor(req, configuredOrigin) {
-  if (configuredOrigin) return configuredOrigin.replace(/\/$/, '')
+  if (configuredOrigin || process.env.SOM_API_ORIGIN || process.env.OPERATOR_API_PUBLIC_URL) {
+    return somApiOrigin({ apiOrigin: configuredOrigin })
+  }
   const host = String(req.get('host') || '')
   if (/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host)) return `${req.protocol}://${host}`
-  return 'https://api-production-15e5e.up.railway.app'
+  return somApiOrigin()
 }
 
 function objectId(value) {
@@ -99,7 +125,7 @@ async function recordSomPurchase(db, session) {
  * It never throws into the webhook — a mail outage must not fail paid fulfilment. Returns a
  * small status object for tests/logging.
  */
-async function syncSomBuyerMarketing(db, purchase, session) {
+async function syncSomBuyerMarketing(db, purchase, session, options = {}) {
   if (!purchase || purchase.status !== 'paid') return { synced: false, reason: 'not-paid' }
   if (!optedIntoMarketing(session?.metadata?.marketing_opt_in)) return { synced: false, reason: 'no-opt-in' }
   const email = purchase.email
@@ -119,10 +145,24 @@ async function syncSomBuyerMarketing(db, purchase, session) {
     } finally {
       client.release()
     }
+    // Stamp the buyer's durable, one-click download links onto their contact so the "SOM Buyer"
+    // welcome email can hand them back: *|DLURL|* (PDF) and *|DLURLEPUB|* (reflowable EPUB for
+    // Apple Books / Kindle / Google Play). Best-effort: if the signing secret is unset we still
+    // sync the tag/status, just without the links.
+    let mergeFields
+    try {
+      mergeFields = {
+        DLURL: durableDownloadUrl(session?.id, options),
+        DLURLEPUB: durableDownloadUrl(session?.id, { ...options, format: 'epub' }),
+      }
+    } catch (error) {
+      console.error('[som] durable download link not stamped:', error?.message || error)
+    }
     return await syncMarketingContact(db, email, {
       intentId,
       tags: ['SOM Buyer', "The Spiritual Operator's Manual"],
       status: 'subscribed', // single opt-in — they explicitly consented at a paid checkout
+      mergeFields,
     })
   } catch (error) {
     console.error('[mailchimp] SOM buyer sync failed:', error?.message || error)
@@ -167,46 +207,101 @@ async function restoreSomPurchaseAfterWonDispute(db, paymentIntentId) {
 }
 
 function signingSecret(options = {}) {
-  return options.signingSecret || process.env.SOM_DOWNLOAD_SIGNING_SECRET || ''
+  return options.signingSecret ?? process.env.SOM_DOWNLOAD_SIGNING_SECRET ?? ''
 }
 
-function createDownloadToken(sessionId, secret, now = Date.now()) {
+function createDownloadToken(sessionId, secret, now = Date.now(), ttlSeconds = DOWNLOAD_TOKEN_TTL_SECONDS) {
   if (!secret || secret.length < 32) throw new Error('SOM download signing secret is not configured')
   const payload = Buffer.from(JSON.stringify({
     sessionId,
-    expiresAt: Math.floor(now / 1000) + DOWNLOAD_TOKEN_TTL_SECONDS,
+    expiresAt: Math.floor(now / 1000) + ttlSeconds,
   })).toString('base64url')
   const signature = crypto.createHmac('sha256', secret).update(payload).digest('base64url')
   return `${payload}.${signature}`
 }
 
+/** Webhooks have no request host. Never send staging buyers to production by default. */
+function somApiOrigin(options = {}) {
+  const origin = options.apiOrigin || process.env.SOM_API_ORIGIN || process.env.OPERATOR_API_PUBLIC_URL
+  if (!origin) throw new Error('SOM API origin is not configured')
+  let url
+  try { url = new URL(origin) } catch { throw new Error('SOM API origin is invalid') }
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+  if ((url.protocol !== 'https:' && !(local && url.protocol === 'http:')) ||
+      url.username || url.password || url.search || url.hash || url.pathname !== '/') {
+    throw new Error('SOM API origin must be an HTTPS origin (HTTP allowed on localhost)')
+  }
+  return url.origin
+}
+
+function verificationSecrets(options = {}) {
+  const previous = options.previousSigningSecrets ??
+    String(process.env.SOM_DOWNLOAD_PREVIOUS_SIGNING_SECRETS || '').split(',').filter(Boolean)
+  return [signingSecret(options), ...previous]
+}
+
+/** A ten-year bearer link; eligibility is checked on redemption. `format` ('pdf'|'epub')
+ *  selects which file the link serves — defaults to PDF so pre-existing links are unchanged. */
+function durableDownloadUrl(sessionId, options = {}) {
+  const token = createDownloadToken(sessionId, signingSecret(options), Date.now(), DURABLE_DOWNLOAD_TOKEN_TTL_SECONDS)
+  const format = normalizeFormat(options.format)
+  const suffix = format === 'epub' ? '&format=epub' : ''
+  return `${somApiOrigin(options)}/v1/som/download?token=${encodeURIComponent(token)}${suffix}`
+}
+
 function verifyDownloadToken(token, secret, now = Date.now()) {
-  if (!secret || secret.length < 32) return null
-  const [payload, suppliedSignature, extra] = String(token || '').split('.')
-  if (!payload || !suppliedSignature || extra) return null
-  const expectedSignature = crypto.createHmac('sha256', secret).update(payload).digest('base64url')
+  if (typeof token !== 'string') return null
+  const parts = token.split('.')
+  if (parts.length !== 2) return null
+  const [payload, suppliedSignature] = parts
+  if (!/^[A-Za-z0-9_-]+$/.test(payload) || !/^[A-Za-z0-9_-]{43}$/.test(suppliedSignature)) return null
   const suppliedBuffer = Buffer.from(suppliedSignature)
-  const expectedBuffer = Buffer.from(expectedSignature)
-  if (
-    suppliedBuffer.length !== expectedBuffer.length ||
-    !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)
-  ) return null
+  let matches = 0
+  for (const key of Array.isArray(secret) ? secret : [secret]) {
+    if (typeof key !== 'string' || key.length < 32) continue
+    const expected = crypto.createHmac('sha256', key).update(payload).digest('base64url')
+    matches |= Number(crypto.timingSafeEqual(suppliedBuffer, Buffer.from(expected)))
+  }
+  if (!matches) return null
   try {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
-    if (!parsed.sessionId || Number(parsed.expiresAt) < Math.floor(now / 1000)) return null
+    if (typeof parsed?.sessionId !== 'string' || !parsed.sessionId ||
+        !Number.isSafeInteger(parsed.expiresAt) || parsed.expiresAt <= Math.floor(now / 1000)) return null
     return parsed
   } catch {
     return null
   }
 }
 
+// Checkout stays "paid" after a reversal. Read the Charge, even if a webhook was missed
+// or arrived before the purchase row. Provider errors propagate: never issue a file URL
+// when the source ledger cannot be checked.
+async function paymentAllowsDownload(purchase, stripeClient) {
+  if (!purchase.payment_intent_id) return Number(purchase.amount_total) === 0
+  const intent = await stripeClient.paymentIntents.retrieve(purchase.payment_intent_id, {
+    expand: ['latest_charge'],
+  })
+  const charge = intent.latest_charge
+  if (intent.status !== 'succeeded' || !charge || typeof charge !== 'object' ||
+      charge.paid !== true || charge.refunded !== false) return false
+  if (charge.disputed === false) return true
+  if (charge.disputed !== true) return false
+  const disputes = await stripeClient.disputes.list({ charge: charge.id, limit: 100 })
+  return !disputes.has_more && disputes.data.length > 0 && disputes.data.every((dispute) =>
+    ['won', 'warning_needs_response', 'warning_under_review', 'warning_closed'].includes(dispute.status))
+}
+
 function storageOptions(options = {}) {
+  const format = normalizeFormat(options.format)
+  const spec = DOWNLOAD_FORMATS[format]
   return {
     endpoint: options.bucketEndpoint || process.env.BUCKET_ENDPOINT,
     accessKeyId: options.bucketAccessKeyId || process.env.BUCKET_ACCESS_KEY_ID,
     secretAccessKey: options.bucketSecretAccessKey || process.env.BUCKET_SECRET_ACCESS_KEY,
     bucket: options.bucketName || process.env.BUCKET_NAME,
-    objectKey: options.objectKey || process.env.SOM_OBJECT_KEY || DEFAULT_OBJECT_KEY,
+    objectKey: options.objectKey || spec.objectKey(),
+    contentType: spec.contentType,
+    filename: spec.filename,
   }
 }
 
@@ -227,8 +322,8 @@ async function createStorageDownloadUrl(options = {}) {
   const command = new GetObjectCommand({
     Bucket: storage.bucket,
     Key: storage.objectKey,
-    ResponseContentType: 'application/pdf',
-    ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(DEFAULT_FILENAME)}`,
+    ResponseContentType: storage.contentType,
+    ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(storage.filename)}`,
   })
   return getSignedUrl(client, command, { expiresIn: PRESIGNED_URL_TTL_SECONDS })
 }
@@ -248,7 +343,7 @@ function pageShell({ title, eyebrow, body }) {
     .eyebrow{margin-bottom:12px;color:var(--gold);font:700 11px/1.4 Saira,system-ui,sans-serif;letter-spacing:.18em;text-transform:uppercase}
     h1,h2{margin:0;color:#fff;font-family:Saira,system-ui,sans-serif;text-transform:uppercase}h1{font-size:clamp(32px,7vw,54px);line-height:1.02}h2{margin-top:30px;font-size:20px}
     p{color:#d1d1d1;font-size:17px;line-height:1.7}.receipt{margin:24px 0;padding:18px;background:#10120f;border:1px solid #354122;border-radius:8px}.receipt strong{color:#fff}
-    .button{display:inline-block;margin-top:18px;padding:16px 23px;border:1px solid var(--gold);border-radius:6px;background:var(--gold);color:#111;text-decoration:none;text-transform:uppercase;letter-spacing:.06em;font:800 13px Saira,system-ui,sans-serif}.fine{color:var(--muted);font-size:13px}a{color:var(--gold)}
+    .button{display:inline-block;margin-top:18px;padding:16px 23px;border:1px solid var(--gold);border-radius:6px;background:var(--gold);color:#111;text-decoration:none;text-transform:uppercase;letter-spacing:.06em;font:800 13px Saira,system-ui,sans-serif}.button.alt{background:transparent;color:var(--gold)}.buttons{display:flex;gap:12px;flex-wrap:wrap}.fine{color:var(--muted);font-size:13px}a{color:var(--gold)}
     @media(max-width:620px){body{padding:10px}main{margin:2vh auto;padding:28px 20px}.button{display:block;text-align:center}}
   </style>
 </head>
@@ -261,12 +356,15 @@ function renderSomPurchaseComplete({ email, token }) {
     title: 'Your manual is ready',
     eyebrow: 'BASE 1520 · Digital Early Access',
     body: `<h1>Your manual is ready.</h1>
-      <p>Stripe confirmed the purchase for <strong>${escapeHtml(email)}</strong>. This is the complete 287-page digital edition of <em>The Spiritual Operator's Manual</em>.</p>
-      <div class="receipt"><strong>Download it now.</strong><br>The link below creates a private, short-lived file link. Save the PDF somewhere you can find it.</div>
-      <a class="button" href="/v1/som/download?token=${encodeURIComponent(token)}">Download the full PDF</a>
+      <p>Stripe confirmed the purchase for <strong>${escapeHtml(email)}</strong>. This is the complete digital edition of <em>The Spiritual Operator's Manual</em>, in both formats.</p>
+      <div class="receipt"><strong>Download it now — pick your format.</strong><br><strong>EPUB</strong> opens in Apple Books, the Kindle app, or Google Play Books and remembers where you left off. <strong>PDF</strong> is best for printing or reading on a computer. Each link creates a private, short-lived file link — save the file somewhere you can find it.</div>
+      <div class="buttons">
+        <a class="button" href="/v1/som/download?token=${encodeURIComponent(token)}&format=epub">Download the EPUB</a>
+        <a class="button alt" href="/v1/som/download?token=${encodeURIComponent(token)}">Download the PDF</a>
+      </div>
       <h2>What comes next</h2>
       <p>The paperback and Kindle editions launch in October. Your digital copy is available now so you can begin working the COVENANT method before launch week.</p>
-      <p class="fine">Your download access is tied to this paid checkout. If the link expires before you save the file, return to this receipt page or email <a href="mailto:cole@base1520.com">cole@base1520.com</a>.</p>`,
+      <p class="fine">Your download access is tied to this paid checkout. If a link expires before you save the file, return to this receipt page or email <a href="mailto:cole@base1520.com">cole@base1520.com</a>.</p>`,
   })
 }
 
@@ -340,31 +438,37 @@ function mountSomPurchase(app, db, stripeClient, options = {}) {
   }))
 
   app.get('/v1/som/download', route(async (req, res) => {
-    const parsed = verifyDownloadToken(req.query?.token, signingSecret(options))
+    res.set('Cache-Control', 'no-store')
+    res.set('Referrer-Policy', 'no-referrer')
+    const parsed = verifyDownloadToken(req.query?.token, verificationSecrets(options))
     if (!parsed) {
       const message = renderSomMessage({ title: 'Download link expired', message: 'Return to your Stripe receipt page or contact Cole for a fresh private link.', status: 403 })
       return res.status(message.status).type('html').send(message.html)
     }
     const { rows } = await db.query(
-      `SELECT session_id, email, status
+      `SELECT session_id, email, status, payment_intent_id, amount_total
          FROM som_purchase
         WHERE session_id = $1 AND status = 'paid'`,
       [parsed.sessionId],
     )
-    if (!rows[0]) {
+    if (!rows[0] || !(await paymentAllowsDownload(rows[0], stripeClient))) {
       const message = renderSomMessage({ title: 'Download unavailable', message: 'No active paid order matches this link. Contact Cole if the order should still be active.', status: 403 })
       return res.status(message.status).type('html').send(message.html)
     }
     const downloadUrlFn = options.createDownloadUrl || createStorageDownloadUrl
-    const downloadUrl = await downloadUrlFn(options)
-    await db.query(
+    const downloadUrl = await downloadUrlFn({ ...options, format: normalizeFormat(req.query?.format) })
+    const delivered = await db.query(
       `UPDATE som_purchase
           SET download_count = download_count + 1,
               last_downloaded_at = now(),
               updated_at = now()
-        WHERE session_id = $1`,
+        WHERE session_id = $1 AND status = 'paid'`,
       [parsed.sessionId],
     )
+    if (delivered.rowCount !== 1) {
+      const message = renderSomMessage({ title: 'Download unavailable', message: 'This order is no longer eligible for download.', status: 403 })
+      return res.status(message.status).type('html').send(message.html)
+    }
     res.set('Cache-Control', 'no-store')
     res.redirect(303, downloadUrl)
   }))
@@ -398,6 +502,8 @@ module.exports = {
   objectId,
   createDownloadToken,
   verifyDownloadToken,
+  durableDownloadUrl,
+  somApiOrigin,
   createStorageDownloadUrl,
   renderSomPurchaseComplete,
   renderSomMessage,

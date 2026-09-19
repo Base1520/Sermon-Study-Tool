@@ -15,13 +15,18 @@ function subscriberHash(email) {
   return crypto.createHash('md5').update(String(email).trim().toLowerCase()).digest('hex')
 }
 
-function marketingMemberPayload(email, { status } = {}) {
+function marketingMemberPayload(email, { status, mergeFields } = {}) {
   const address = String(email).trim().toLowerCase()
   // An explicit status (e.g. a paid buyer who ticked consent at checkout) means single
   // opt-in — subscribed outright. Default stays double opt-in (pending), so an unconfirmed
   // lead must still confirm before receiving campaigns.
-  if (status) return { email_address: address, status, status_if_new: status }
-  return { email_address: address, status_if_new: 'pending' }
+  const payload = status
+    ? { email_address: address, status, status_if_new: status }
+    : { email_address: address, status_if_new: 'pending' }
+  // merge_fields let a caller stamp per-contact values (e.g. a buyer's durable download URL)
+  // that a Mailchimp email then renders with *|MERGETAG|*.
+  if (mergeFields && Object.keys(mergeFields).length) payload.merge_fields = mergeFields
+  return payload
 }
 
 async function lockMarketingSubscriber(db, hash) {
@@ -102,6 +107,7 @@ async function syncMarketingContact(db, email, {
   intentId,
   tags = ['The Operator', 'Mobile App'],
   status,
+  mergeFields,
 } = {}) {
   const resolved = config()
   if (!resolved) return { configured: false }
@@ -124,7 +130,7 @@ async function syncMarketingContact(db, email, {
     }
     await request(`/lists/${encodeURIComponent(resolved.audienceId)}/members/${hash}`, {
       method: 'PUT',
-      body: JSON.stringify(marketingMemberPayload(email, { status })),
+      body: JSON.stringify(marketingMemberPayload(email, { status, mergeFields })),
     })
     await request(`/lists/${encodeURIComponent(resolved.audienceId)}/members/${hash}/tags`, {
       method: 'POST',

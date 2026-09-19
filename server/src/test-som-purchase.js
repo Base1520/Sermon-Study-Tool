@@ -337,6 +337,32 @@ function fakeDb() {
   ok('durable token replay is intentionally allowed for a paid buyer', (await redeem()).statusCode === 303 && (await redeem()).statusCode === 303)
   ok('a valid signature cannot authorize a never-paid session',
     (await redeem(createDownloadToken('cs_never_paid', secret))).statusCode === 403)
+
+  // Dual-format delivery: ?format selects the file, defaults to PDF, and an unknown value never
+  // reaches an arbitrary object key (locks the EPUB path against silent regressions).
+  let seenFormat = null
+  const fmtApp = captureApp()
+  mountSomPurchase(fmtApp, db, stripe, {
+    apiOrigin: 'https://staging.example',
+    signingSecret: secret,
+    createDownloadUrl: async (opts) => { seenFormat = opts.format; return 'https://private-bucket.test/signed' },
+  })
+  const hitFormat = async (format) => {
+    const res = captureResponse()
+    const query = format === undefined ? { token: durableToken } : { token: durableToken, format }
+    await fmtApp.routes.get('GET /v1/som/download')(request({ query }), res, (error) => { throw error })
+    return { status: res.statusCode, format: seenFormat }
+  }
+  const rEpub = await hitFormat('epub')
+  ok('?format=epub delivers the EPUB', rEpub.status === 303 && rEpub.format === 'epub')
+  const rDefault = await hitFormat(undefined)
+  ok('no ?format defaults to the PDF', rDefault.status === 303 && rDefault.format === 'pdf')
+  const rPdf = await hitFormat('pdf')
+  ok('?format=pdf delivers the PDF', rPdf.status === 303 && rPdf.format === 'pdf')
+  const rUpper = await hitFormat('EPUB')
+  ok('?format is case-insensitive (EPUB resolves to epub)', rUpper.status === 303 && rUpper.format === 'epub')
+  const rBad = await hitFormat('exe')
+  ok('an unknown ?format falls back to the PDF, never an arbitrary object', rBad.status === 303 && rBad.format === 'pdf')
   for (const status of ['refunded', 'disputed']) {
     db.state.purchase.status = status
     ok(`the actual download route blocks a ${status} durable token`, (await redeem()).statusCode === 403)

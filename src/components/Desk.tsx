@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import type { PhrasingAnalysis, Phrase, ClauseType } from '../types/phrasing'
 import { CLAUSE_COLORS } from '../services/colors'
 import { BASE, FONT } from '../theme'
+import { nextFreeDeskSlot, type DeskRect } from '../lib/deskLayout'
 import { TopoMap } from './TopoMap'
 import { MonarchyCardNode } from './MonarchyCard'
 import { KingsListNode } from './KingsList'
@@ -856,20 +857,20 @@ function DeskInner({
       worshipStructure: { w: 560,  h: 560, data: {} },
       lineageViewer:    { w: 500,  h: 580, data: {} },
     }[type]
-    const BELOW_Y = DRAFT_Y + CARD_H_BOT + 60
-    const RIGHT_X = CARD_X2 + CARD_W2 + 60
-    const notePositions: Record<string, { x: number; y: number }> = {
-      noteCard:     { x: CARD_X,  y: BELOW_Y },
-      mapCard:      { x: RIGHT_X, y: PHRASE_Y },
-      parallelCard:  { x: RIGHT_X, y: PHRASE_Y },
-      slideDeckCard: { x: RIGHT_X, y: PHRASE_Y },
-      crossRefArcs:  { x: RIGHT_X, y: PHRASE_Y },
-      monarchyCard:  { x: RIGHT_X, y: PHRASE_Y },
-      kingsList:        { x: RIGHT_X, y: PHRASE_Y },
-      worshipStructure: { x: RIGHT_X, y: PHRASE_Y },
-      lineageViewer:    { x: RIGHT_X, y: PHRASE_Y },
-    }
-    const pos = notePositions[type]
+    // Every card except the note used to be pinned to one shared coordinate, so
+    // opening a second one put it exactly on top of the first. Ask the desk where
+    // there is actually room instead, measured against what is already open.
+    const occupied: DeskRect[] = nodes.map((node) => ({
+      x: node.position.x,
+      y: node.position.y,
+      width: Number(node.width) || Number((node.style as { width?: number } | undefined)?.width) || NODE_W,
+      height: Number(node.height) || Number((node.style as { height?: number } | undefined)?.height) || NODE_H,
+    }))
+    const pos = nextFreeDeskSlot(occupied, { width: config.w, height: config.h }, {
+      margin: PHRASE_Y,
+      gutter: CARD_GAP_X,
+      rowWidth: 3400,
+    })
     setNodes(ns => [...ns, {
       id, type,
       position: pos,

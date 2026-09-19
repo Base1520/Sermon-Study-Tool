@@ -298,5 +298,44 @@ check('tile library copy presents the hidden set as addable tiles', () => {
   assert.ok(/EVERY TILE IS ON THE DESK/.test(source), 'empty-library prompt is missing')
 })
 
+// Tiles must not cover each other. The desk used to seed the manuscript on top of
+// the outline, and every added tile landed at the viewport centre — on the last one.
+function rects(nodes) {
+  return nodes.map((node) => ({
+    id: node.id, x: node.position.x, y: node.position.y, width: node.width, height: node.height,
+  }))
+}
+function overlapping(list) {
+  for (let i = 0; i < list.length; i += 1) {
+    for (let j = i + 1; j < list.length; j += 1) {
+      const a = list[i], b = list[j]
+      if (a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height) {
+        return `${a.id} overlaps ${b.id}`
+      }
+    }
+  }
+  return null
+}
+
+check('the opening desk seats the core tiles without overlap', () => {
+  const clash = overlapping(rects(workspace.nodes.filter((node) => !node.hidden)))
+  assert.equal(clash, null, clash || '')
+})
+
+check('the whole seeded desk, library included, has no two tiles on the same spot', () => {
+  const clash = overlapping(rects(workspace.nodes))
+  assert.equal(clash, null, clash || '')
+})
+
+check('adding eight tiles in a row never stacks them', () => {
+  let desk = rects(workspace.nodes.filter((node) => !node.hidden))
+  for (let i = 0; i < 8; i += 1) {
+    const note = model.createTabletDeskNote(i % 2 ? 'illustration' : 'note', desk)
+    desk = [...desk, { id: note.id, x: note.position.x, y: note.position.y, width: note.width, height: note.height }]
+  }
+  const clash = overlapping(desk)
+  assert.equal(clash, null, clash || '')
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed) process.exit(1)

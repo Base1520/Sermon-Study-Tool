@@ -42,6 +42,7 @@ import {
   type TabletInkStroke,
   type TabletSermonWorkspace,
 } from './tabletDeskModel'
+import { nextFreeDeskSlot, type DeskRect } from '../lib/deskLayout.ts'
 
 type TabletFlowData = TabletDeskTileData & Record<string, unknown>
 type TabletFlowNode = Node<TabletFlowData, TabletDeskNode['type']>
@@ -78,6 +79,19 @@ function flowNode(node: TabletDeskNode): TabletFlowNode {
     style: { width: node.width, height: node.height },
     data: node.data as TabletFlowData,
   }
+}
+
+function occupiedDeskRects(nodes: TabletFlowNode[], exceptId?: string): DeskRect[] {
+  // Only what is actually on the desk counts. Hidden tiles are in the library,
+  // not in the way, and the tile being restored must not block its own slot.
+  return nodes
+    .filter((node) => !node.hidden && node.id !== exceptId)
+    .map((node) => ({
+      x: node.position.x,
+      y: node.position.y,
+      width: dimension(node.width, 460),
+      height: dimension(node.height, 320),
+    }))
 }
 
 function dimension(value: unknown, fallback: number) {
@@ -531,7 +545,18 @@ export function TabletSermonDeskInner({
   }, [setNodes])
 
   const restoreNode = useCallback((id: string) => {
-    setNodes((current) => current.map((node) => node.id === id ? { ...node, hidden: false } : node))
+    setNodes((current) => {
+      const target = current.find((node) => node.id === id)
+      if (!target) return current
+      // A restored tile used to reappear at the coordinate it was seeded with,
+      // which for the reference tiles is far off to the right of everything.
+      // Give it the next free seat on the desk as it stands now.
+      const spot = nextFreeDeskSlot(occupiedDeskRects(current, id), {
+        width: dimension(target.width, 460),
+        height: dimension(target.height, 320),
+      })
+      return current.map((node) => node.id === id ? { ...node, hidden: false, position: spot } : node)
+    })
   }, [setNodes])
 
   const saveNow = useCallback(async () => {
@@ -558,10 +583,15 @@ export function TabletSermonDeskInner({
       return
     }
     setDeskNotice(null)
-    const created = flowNode(createTabletDeskNote(kind, nodes.length))
-    const center = flowRef.current?.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
-    if (center) created.position = { x: center.x - dimension(created.width, 460) / 2, y: center.y - dimension(created.height, 320) / 2 }
+    const created = flowNode(createTabletDeskNote(kind, occupiedDeskRects(nodes)))
     setNodes((current) => [...current, created])
+    // The tile goes where there is room; the view comes to it. Dropping it at the
+    // centre of the viewport is what put every new tile on top of the last one.
+    const width = dimension(created.width, 460)
+    const height = dimension(created.height, 320)
+    window.setTimeout(() => {
+      void flowRef.current?.setCenter(created.position.x + width / 2, created.position.y + height / 2, { zoom: .7, duration: 420 })
+    }, 60)
   }
 
   const fitDesk = () => {

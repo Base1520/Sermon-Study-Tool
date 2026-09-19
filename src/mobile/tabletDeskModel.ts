@@ -1,4 +1,5 @@
 import type { GuidedStudyDoc, PassageResult } from './api'
+import { packDeskTiles, nextFreeDeskSlot, type DeskRect, type DeskPoint } from '../lib/deskLayout.ts'
 
 export const MAX_TABLET_DESK_NODES = 32
 
@@ -242,8 +243,97 @@ function node(
   return { id, type, position: { x, y }, width, height, hidden, data }
 }
 
+interface TabletDeskSeed {
+  id: string
+  type: TabletDeskNode['type']
+  width: number
+  height: number
+  data: TabletDeskTileData
+  hidden?: boolean
+}
+
 export function createTabletSermonWorkspace(document: GuidedStudyDoc, passage: PassageResult): TabletSermonWorkspace {
   const now = new Date().toISOString()
+  const seeds: TabletDeskSeed[] = [
+    { id: 'passage', type: 'textTile', width: 650, height: 540, data: {
+      kind: 'passage', eyebrow: document.reference, title: 'THE TEXT',
+      content: passageContent(passage), editable: false, sourceRefs: [], accent: 'gold',
+    } },
+    { id: 'big-idea', type: 'textTile', width: 560, height: 280, data: {
+      kind: 'big-idea', eyebrow: 'TEXT-DRIVEN', title: 'BIG IDEA',
+      content: document.mainClaim, editable: true, sourceRefs: document.mainClaimSources, accent: 'gold',
+    } },
+    { id: 'structure', type: 'textTile', width: 560, height: 520, data: {
+      kind: 'structure', eyebrow: 'STUDY EVIDENCE', title: 'NATURAL DIVISIONS',
+      content: structureContent(document), editable: false,
+      sourceRefs: document.textUnits.map((unit) => `Passage: ${unit.anchor}`), accent: 'khaki',
+    } },
+    { id: 'context', type: 'textTile', width: 500, height: 500, data: {
+      kind: 'context', eyebrow: 'WHOLE-BIBLE', title: 'CONTEXT + RESTRAINT',
+      content: contextContent(document), editable: false,
+      sourceRefs: [...document.situation.sourceRefs, ...document.guardrails], accent: 'khaki',
+    } },
+    { id: 'application', type: 'textTile', width: 560, height: 500, data: {
+      kind: 'application', eyebrow: 'THEN \u2192 NOW', title: 'APPLICATION / LANDING',
+      content: applicationContent(document), editable: true,
+      sourceRefs: document.application.sourceRefs, accent: 'blue',
+    } },
+    { id: 'outline', type: 'textTile', width: 500, height: 550, data: {
+      kind: 'outline', eyebrow: 'TEXT-DRIVEN', title: 'SERMON OUTLINE',
+      content: outlineContent(document), editable: true,
+      sourceRefs: document.textUnits.map((unit) => `Passage: ${unit.anchor}`), accent: 'gold',
+    } },
+    { id: 'manuscript', type: 'manuscriptTile', width: 900, height: 760, data: {
+      kind: 'manuscript', eyebrow: 'WORKING DRAFT', title: 'MANUSCRIPT',
+      content: manuscriptScaffold(document), editable: true,
+      sourceRefs: document.mainClaimSources, accent: 'gold',
+    } },
+    // Secondary tiles start hidden \u2014 the desk opens with the core study set
+    // and everything below is one tap away in ADD TILES.
+    { id: 'ink-1', type: 'inkTile', width: 500, height: 430, hidden: true, data: {
+      kind: 'ink', eyebrow: 'STYLUS', title: 'PENCIL NOTES',
+      content: '', editable: true, sourceRefs: [], accent: 'gold', strokes: [],
+    } },
+    { id: 'map', type: 'referenceTile', width: 760, height: 600, hidden: true, data: {
+      kind: 'map', eyebrow: 'BIBLICAL WORLD', title: 'PASSAGE MAP',
+      content: '', editable: false, sourceRefs: [], accent: 'blue',
+    } },
+    { id: 'lineage', type: 'referenceTile', width: 620, height: 640, hidden: true, data: {
+      kind: 'lineage', eyebrow: 'REFERENCE', title: 'LINEAGE',
+      content: '', editable: false, sourceRefs: [], accent: 'khaki',
+    } },
+    { id: 'timeline', type: 'referenceTile', width: 1200, height: 620, hidden: true, data: {
+      kind: 'timeline', eyebrow: 'HISTORICAL FRAME', title: 'BIBLICAL TIMELINE',
+      content: '', editable: false, sourceRefs: [], accent: 'khaki',
+    } },
+    { id: 'temple', type: 'referenceTile', width: 760, height: 680, hidden: true, data: {
+      kind: 'temple', eyebrow: 'TABERNACLE + TEMPLES', title: 'WORSHIP STRUCTURES',
+      content: '', editable: false, sourceRefs: [], accent: 'gold',
+    } },
+    { id: 'commentary', type: 'commentaryTile', width: 650, height: 650, hidden: true, data: {
+      kind: 'commentary', eyebrow: 'CITATION FIRST', title: 'COMMENTARIES',
+      content: '', editable: false, sourceRefs: [], accent: 'gold',
+    } },
+  ]
+
+  // The desk opens as centred rows of the core set. The tile library's hidden
+  // tiles are parked in the next free slots beneath it rather than at fixed
+  // coordinates off in empty space, so restoring one lands in the arrangement.
+  const visible = seeds.filter((seed) => !seed.hidden)
+  const packed = packDeskTiles(visible.map((seed) => ({ width: seed.width, height: seed.height })))
+  const placed = new Map<string, DeskPoint>()
+  const occupied: DeskRect[] = []
+  visible.forEach((seed, index) => {
+    placed.set(seed.id, packed[index])
+    occupied.push({ ...packed[index], width: seed.width, height: seed.height })
+  })
+  for (const seed of seeds) {
+    if (!seed.hidden) continue
+    const spot = nextFreeDeskSlot(occupied, { width: seed.width, height: seed.height })
+    placed.set(seed.id, spot)
+    occupied.push({ ...spot, width: seed.width, height: seed.height })
+  }
+
   return {
     version: 1,
     reference: document.reference,
@@ -251,80 +341,34 @@ export function createTabletSermonWorkspace(document: GuidedStudyDoc, passage: P
     locked: false,
     agentThreads: emptyTabletAgentThreads(),
     updatedAt: now,
-    nodes: [
-      node('passage', 'textTile', 80, 80, 650, 540, {
-        kind: 'passage', eyebrow: document.reference, title: 'THE TEXT',
-        content: passageContent(passage), editable: false, sourceRefs: [], accent: 'gold',
-      }),
-      node('big-idea', 'textTile', 780, 80, 560, 280, {
-        kind: 'big-idea', eyebrow: 'TEXT-DRIVEN', title: 'BIG IDEA',
-        content: document.mainClaim, editable: true, sourceRefs: document.mainClaimSources, accent: 'gold',
-      }),
-      node('structure', 'textTile', 780, 400, 560, 520, {
-        kind: 'structure', eyebrow: 'STUDY EVIDENCE', title: 'NATURAL DIVISIONS',
-        content: structureContent(document), editable: false,
-        sourceRefs: document.textUnits.map((unit) => `Passage: ${unit.anchor}`), accent: 'khaki',
-      }),
-      node('context', 'textTile', 1390, 80, 500, 500, {
-        kind: 'context', eyebrow: 'WHOLE-BIBLE', title: 'CONTEXT + RESTRAINT',
-        content: contextContent(document), editable: false,
-        sourceRefs: [...document.situation.sourceRefs, ...document.guardrails], accent: 'khaki',
-      }),
-      node('application', 'textTile', 80, 680, 560, 500, {
-        kind: 'application', eyebrow: 'THEN → NOW', title: 'APPLICATION / LANDING',
-        content: applicationContent(document), editable: true,
-        sourceRefs: document.application.sourceRefs, accent: 'blue',
-      }),
-      node('outline', 'textTile', 1390, 630, 500, 550, {
-        kind: 'outline', eyebrow: 'TEXT-DRIVEN', title: 'SERMON OUTLINE',
-        content: outlineContent(document), editable: true,
-        sourceRefs: document.textUnits.map((unit) => `Passage: ${unit.anchor}`), accent: 'gold',
-      }),
-      node('manuscript', 'manuscriptTile', 680, 980, 900, 760, {
-        kind: 'manuscript', eyebrow: 'WORKING DRAFT', title: 'MANUSCRIPT',
-        content: manuscriptScaffold(document), editable: true,
-        sourceRefs: document.mainClaimSources, accent: 'gold',
-      }),
-      // Secondary tiles start hidden — the desk opens with the core study set
-      // and everything below is one tap away in ADD TILES.
-      node('ink-1', 'inkTile', 80, 1240, 500, 430, {
-        kind: 'ink', eyebrow: 'STYLUS', title: 'PENCIL NOTES',
-        content: '', editable: true, sourceRefs: [], accent: 'gold', strokes: [],
-      }, true),
-      node('map', 'referenceTile', 1950, 80, 760, 600, {
-        kind: 'map', eyebrow: 'BIBLICAL WORLD', title: 'PASSAGE MAP',
-        content: '', editable: false, sourceRefs: [], accent: 'blue',
-      }, true),
-      node('lineage', 'referenceTile', 1950, 730, 620, 640, {
-        kind: 'lineage', eyebrow: 'REFERENCE', title: 'LINEAGE',
-        content: '', editable: false, sourceRefs: [], accent: 'khaki',
-      }, true),
-      node('timeline', 'referenceTile', 80, 1780, 1200, 620, {
-        kind: 'timeline', eyebrow: 'HISTORICAL FRAME', title: 'BIBLICAL TIMELINE',
-        content: '', editable: false, sourceRefs: [], accent: 'khaki',
-      }, true),
-      node('temple', 'referenceTile', 1340, 1780, 760, 680, {
-        kind: 'temple', eyebrow: 'TABERNACLE + TEMPLES', title: 'WORSHIP STRUCTURES',
-        content: '', editable: false, sourceRefs: [], accent: 'gold',
-      }, true),
-      node('commentary', 'commentaryTile', 2150, 1420, 650, 650, {
-        kind: 'commentary', eyebrow: 'CITATION FIRST', title: 'COMMENTARIES',
-        content: '', editable: false, sourceRefs: [], accent: 'gold',
-      }, true),
-    ],
+    nodes: seeds.map((seed) => {
+      const spot = placed.get(seed.id) as DeskPoint
+      return node(seed.id, seed.type, spot.x, spot.y, seed.width, seed.height, seed.data, seed.hidden ?? false)
+    }),
   }
 }
 
-export function createTabletDeskNote(kind: 'note' | 'illustration' | 'ink', index: number): TabletDeskNode {
-  const suffix = `${Date.now()}-${index}`
+/**
+ * A new note takes the next free seat on the desk, measured against what is
+ * actually open. It used to be offset 36px from a counter that included hidden
+ * tiles, and the caller then threw the result at the centre of the viewport
+ * anyway \u2014 so every added tile covered the last one.
+ */
+export function createTabletDeskNote(
+  kind: 'note' | 'illustration' | 'ink',
+  occupied: DeskRect[] = [],
+): TabletDeskNode {
+  const suffix = `${Date.now()}-${occupied.length}`
+  const size = kind === 'ink' ? { width: 500, height: 430 } : { width: 460, height: 320 }
+  const spot = nextFreeDeskSlot(occupied, size)
   if (kind === 'ink') {
-    return node(`ink-${suffix}`, 'inkTile', 240 + index * 36, 240 + index * 36, 500, 430, {
+    return node(`ink-${suffix}`, 'inkTile', spot.x, spot.y, size.width, size.height, {
       kind: 'ink', eyebrow: 'STYLUS', title: 'PENCIL NOTES', content: '', editable: true,
       sourceRefs: [], accent: 'gold', strokes: [],
     })
   }
   const illustration = kind === 'illustration'
-  return node(`${kind}-${suffix}`, 'textTile', 240 + index * 36, 240 + index * 36, 460, 320, {
+  return node(`${kind}-${suffix}`, 'textTile', spot.x, spot.y, size.width, size.height, {
     kind,
     eyebrow: illustration ? 'VERIFY BEFORE USE' : 'FIELD NOTE',
     title: illustration ? 'ILLUSTRATION PLACEHOLDER' : 'BLANK NOTE',

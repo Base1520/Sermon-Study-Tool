@@ -237,7 +237,18 @@ function fakeDb() {
     assert.equal(sent[0].status, 'subscribed')
     assert.equal(sent[0].status_if_new, 'subscribed')
     assert.deepEqual(sent[1].tags.map((tag) => tag.name), ['SOM Buyer', "The Spiritual Operator's Manual"])
-    if (withSecret) assert.equal(verifyDownloadToken(new URL(sent[0].merge_fields.DLURL).searchParams.get('token'), secret).sessionId, 'cs_som_paid')
+    if (withSecret) {
+      assert.equal(verifyDownloadToken(new URL(sent[0].merge_fields.DLURL).searchParams.get('token'), secret).sessionId, 'cs_som_paid')
+      // The buyer's welcome email offers two links. Nothing asserted the second
+      // one, so dropping its format left DLURLEPUB pointing at the PDF and every
+      // test still green — the buyer clicks "EPUB" and gets a PDF.
+      const pdfLink = new URL(sent[0].merge_fields.DLURL)
+      const epubLink = new URL(sent[0].merge_fields.DLURLEPUB)
+      assert.equal(pdfLink.searchParams.get('format'), null, 'the PDF link must carry no format')
+      assert.equal(epubLink.searchParams.get('format'), 'epub', 'the EPUB link must ask for the EPUB')
+      assert.notEqual(pdfLink.href, epubLink.href, 'the two download links must not be the same link')
+      assert.equal(verifyDownloadToken(epubLink.searchParams.get('token'), secret).sessionId, 'cs_som_paid')
+    }
     else assert.equal(sent[0].merge_fields, undefined)
   }
 
